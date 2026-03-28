@@ -3,6 +3,7 @@ use crate::core::health::HealthChecker;
 use crate::error::AppError;
 use crate::modules::Module;
 use crate::modules::file_integrity::FileIntegrityModule;
+use crate::modules::process_monitor::ProcessMonitorModule;
 use std::time::Duration;
 use tokio::signal::unix::{SignalKind, signal};
 
@@ -36,6 +37,18 @@ impl Daemon {
             let cancel_token = fim.cancel_token();
             fim.start().await?;
             tracing::info!("ファイル整合性監視モジュールを起動しました");
+            Some(cancel_token)
+        } else {
+            None
+        };
+
+        // プロセス異常検知モジュールの初期化と起動
+        let pm_cancel_token = if self.config.modules.process_monitor.enabled {
+            let mut pm = ProcessMonitorModule::new(self.config.modules.process_monitor.clone());
+            pm.init()?;
+            let cancel_token = pm.cancel_token();
+            pm.start().await?;
+            tracing::info!("プロセス異常検知モジュールを起動しました");
             Some(cancel_token)
         } else {
             None
@@ -89,6 +102,10 @@ impl Daemon {
         if let Some(cancel_token) = fim_cancel_token {
             cancel_token.cancel();
             tracing::info!("ファイル整合性監視モジュールを停止しました");
+        }
+        if let Some(cancel_token) = pm_cancel_token {
+            cancel_token.cancel();
+            tracing::info!("プロセス異常検知モジュールを停止しました");
         }
 
         tracing::info!("シャットダウン完了");

@@ -32,6 +32,10 @@ pub struct ModulesConfig {
     /// ファイル整合性監視モジュールの設定
     #[serde(default)]
     pub file_integrity: FileIntegrityConfig,
+
+    /// プロセス異常検知モジュールの設定
+    #[serde(default)]
+    pub process_monitor: ProcessMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -62,6 +66,46 @@ impl Default for FileIntegrityConfig {
             enabled: false,
             scan_interval_secs: Self::default_scan_interval_secs(),
             watch_paths: Vec::new(),
+        }
+    }
+}
+
+/// プロセス異常検知モジュールの設定
+#[derive(Debug, Deserialize, Clone)]
+pub struct ProcessMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "ProcessMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 不審とみなすパスのリスト
+    #[serde(default = "ProcessMonitorConfig::default_suspicious_paths")]
+    pub suspicious_paths: Vec<PathBuf>,
+}
+
+impl ProcessMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        60
+    }
+
+    fn default_suspicious_paths() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/tmp"),
+            PathBuf::from("/dev/shm"),
+            PathBuf::from("/var/tmp"),
+        ]
+    }
+}
+
+impl Default for ProcessMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            suspicious_paths: Self::default_suspicious_paths(),
         }
     }
 }

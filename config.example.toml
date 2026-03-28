@@ -13,6 +13,14 @@ scan_interval_secs = 300
 # 監視対象パスのリスト
 watch_paths = []
 
+[modules.process_monitor]
+# プロセス異常検知モジュールの有効/無効
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 60
+# 不審とみなすパスのリスト
+suspicious_paths = ["/tmp", "/dev/shm", "/var/tmp"]
+
 [health]
 # ハートビート（定期的なヘルスチェックログ出力）の有効/無効
 enabled = true
