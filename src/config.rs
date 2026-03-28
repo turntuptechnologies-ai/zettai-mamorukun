@@ -12,6 +12,10 @@ pub struct AppConfig {
     /// モジュール設定
     #[serde(default)]
     pub modules: ModulesConfig,
+
+    /// ヘルスチェック設定
+    #[serde(default)]
+    pub health: HealthConfig,
 }
 
 /// 一般設定
@@ -25,6 +29,37 @@ pub struct GeneralConfig {
 /// モジュール設定（将来の拡張用）
 #[derive(Debug, Default, Deserialize)]
 pub struct ModulesConfig {}
+
+/// ヘルスチェック設定
+#[derive(Debug, Deserialize)]
+pub struct HealthConfig {
+    /// ハートビートを有効にするか
+    #[serde(default = "HealthConfig::default_enabled")]
+    pub enabled: bool,
+
+    /// ハートビートのインターバル（秒）
+    #[serde(default = "HealthConfig::default_interval")]
+    pub heartbeat_interval_secs: u64,
+}
+
+impl HealthConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+
+    fn default_interval() -> u64 {
+        60
+    }
+}
+
+impl Default for HealthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            heartbeat_interval_secs: Self::default_interval(),
+        }
+    }
+}
 
 impl GeneralConfig {
     fn default_log_level() -> String {
@@ -94,6 +129,25 @@ log_level = "debug"
         write!(tmpfile, "invalid = [[[toml").unwrap();
         let result = AppConfig::load(tmpfile.path());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_health_config_defaults() {
+        let config: AppConfig = toml::from_str("").unwrap();
+        assert!(config.health.enabled);
+        assert_eq!(config.health.heartbeat_interval_secs, 60);
+    }
+
+    #[test]
+    fn test_health_config_custom() {
+        let toml_str = r#"
+[health]
+enabled = false
+heartbeat_interval_secs = 30
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.health.enabled);
+        assert_eq!(config.health.heartbeat_interval_secs, 30);
     }
 
     #[test]
