@@ -1,0 +1,12 @@
+[Unit]
+Description=ぜったいまもるくん - サイバー攻撃防御デーモン
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/zettai-mamorukun --config /etc/zettai-mamorukun/config.toml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
