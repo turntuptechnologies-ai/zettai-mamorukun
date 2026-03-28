@@ -1,5 +1,6 @@
 use std::path::Path;
 use zettai_mamorukun::config::AppConfig;
+use zettai_mamorukun::core::health::HealthChecker;
 
 #[test]
 fn test_config_default_when_file_missing() {
@@ -16,6 +17,38 @@ fn test_binary_help() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("サイバー攻撃防御デーモン"));
+}
+
+#[test]
+fn test_health_checker_integration() {
+    let checker = HealthChecker::new();
+    let status = checker.status();
+    // 統合テストでの基本的な動作確認
+    assert!(status.uptime_secs < 60);
+    // Linux 環境では VmRSS が取得できる
+    assert!(status.memory_rss_kb.is_some());
+    assert!(status.memory_rss_kb.unwrap() > 0);
+}
+
+#[test]
+fn test_config_with_health_section() {
+    use std::io::Write;
+    let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+    write!(
+        tmpfile,
+        r#"
+[general]
+log_level = "debug"
+
+[health]
+enabled = true
+heartbeat_interval_secs = 10
+"#
+    )
+    .unwrap();
+    let config = AppConfig::load(tmpfile.path()).unwrap();
+    assert!(config.health.enabled);
+    assert_eq!(config.health.heartbeat_interval_secs, 10);
 }
 
 #[tokio::test]
