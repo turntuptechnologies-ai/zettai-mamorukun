@@ -15,6 +15,7 @@ struct Cli {
 fn init_logging(log_level: &str) {
     use tracing_subscriber::{EnvFilter, fmt};
 
+    // unwrap safety: "info" は有効なフィルタディレクティブであり、EnvFilter::new() はパニックしない
     let filter = EnvFilter::try_new(log_level).unwrap_or_else(|_| EnvFilter::new("info"));
 
     fmt().with_env_filter(filter).with_target(true).init();

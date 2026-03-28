@@ -16,7 +16,7 @@ Linux サーバ上でデーモンとして動作し（systemd で管理）、あ
 
 ## 言語・ツール
 
-- 言語: Rust (edition 2021)
+- 言語: Rust (edition 2024)
 - ビルド: `cargo build --release`
 - テスト: `cargo test`
 - リント: `cargo clippy -- -D warnings`
