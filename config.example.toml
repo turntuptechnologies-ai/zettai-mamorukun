@@ -1,0 +1,10 @@
+# zettai-mamorukun 設定ファイル
+# /etc/zettai-mamorukun/config.toml にコピーして使用する
+
+[general]
+# ログレベル: trace, debug, info, warn, error
+log_level = "info"
+
+[modules]
+# 各モジュールの有効/無効を設定する
+# (モジュールが実装され次第、ここに項目が追加される)
