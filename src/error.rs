@@ -23,4 +23,24 @@ pub enum AppError {
     /// シグナルハンドラの登録に失敗
     #[error("シグナルハンドラの登録に失敗しました")]
     SignalHandler(#[source] std::io::Error),
+
+    /// ファイル I/O エラー
+    #[error("ファイル I/O エラー: {path}")]
+    FileIo {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// ディレクトリ走査エラー
+    #[error("ディレクトリ走査エラー: {path}")]
+    DirWalk {
+        path: PathBuf,
+        #[source]
+        source: walkdir::Error,
+    },
+
+    /// モジュール設定エラー
+    #[error("モジュール設定エラー: {message}")]
+    ModuleConfig { message: String },
 }

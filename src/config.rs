@@ -1,6 +1,6 @@
 use crate::error::AppError;
 use serde::Deserialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// アプリケーション全体の設定
 #[derive(Debug, Default, Deserialize)]
@@ -26,9 +26,45 @@ pub struct GeneralConfig {
     pub log_level: String,
 }
 
-/// モジュール設定（将来の拡張用）
+/// モジュール設定
 #[derive(Debug, Default, Deserialize)]
-pub struct ModulesConfig {}
+pub struct ModulesConfig {
+    /// ファイル整合性監視モジュールの設定
+    #[serde(default)]
+    pub file_integrity: FileIntegrityConfig,
+}
+
+/// ファイル整合性監視モジュールの設定
+#[derive(Debug, Deserialize, Clone)]
+pub struct FileIntegrityConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "FileIntegrityConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象パスのリスト
+    #[serde(default)]
+    pub watch_paths: Vec<PathBuf>,
+}
+
+impl FileIntegrityConfig {
+    fn default_scan_interval_secs() -> u64 {
+        300
+    }
+}
+
+impl Default for FileIntegrityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            watch_paths: Vec::new(),
+        }
+    }
+}
 
 /// ヘルスチェック設定
 #[derive(Debug, Deserialize)]

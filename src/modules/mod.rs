@@ -1,3 +1,5 @@
+pub mod file_integrity;
+
 use crate::error::AppError;
 
 /// 防御モジュールが実装すべきトレイト

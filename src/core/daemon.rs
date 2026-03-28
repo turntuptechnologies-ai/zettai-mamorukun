@@ -1,6 +1,8 @@
 use crate::config::AppConfig;
 use crate::core::health::HealthChecker;
 use crate::error::AppError;
+use crate::modules::Module;
+use crate::modules::file_integrity::FileIntegrityModule;
 use std::time::Duration;
 use tokio::signal::unix::{SignalKind, signal};
 
@@ -26,6 +28,18 @@ impl Daemon {
         let mut heartbeat = tokio::time::interval(heartbeat_interval);
         // 最初の tick は即座に発火するのでスキップ
         heartbeat.tick().await;
+
+        // ファイル整合性監視モジュールの初期化と起動
+        let fim_cancel_token = if self.config.modules.file_integrity.enabled {
+            let mut fim = FileIntegrityModule::new(self.config.modules.file_integrity.clone());
+            fim.init()?;
+            let cancel_token = fim.cancel_token();
+            fim.start().await?;
+            tracing::info!("ファイル整合性監視モジュールを起動しました");
+            Some(cancel_token)
+        } else {
+            None
+        };
 
         tracing::info!("デーモンを起動しました");
 
@@ -69,6 +83,12 @@ impl Daemon {
                     }
                 }
             }
+        }
+
+        // モジュールの停止
+        if let Some(cancel_token) = fim_cancel_token {
+            cancel_token.cancel();
+            tracing::info!("ファイル整合性監視モジュールを停止しました");
         }
 
         tracing::info!("シャットダウン完了");

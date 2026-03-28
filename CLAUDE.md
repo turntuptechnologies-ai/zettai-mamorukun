@@ -77,6 +77,7 @@ src/
     event.rs           # イベントバス
   modules/
     mod.rs             # モジュールトレイト・レジストリ
+    file_integrity.rs  # ファイル整合性監視モジュール
 tests/
   integration_test.rs  # 統合テスト
 config.example.toml    # 設定ファイルサンプル
