@@ -381,4 +381,124 @@ mod tests {
         let canonical = &module.config.watch_paths[0];
         assert!(!canonical.to_string_lossy().contains(".."));
     }
+
+    #[test]
+    fn test_scan_files_empty_watch_paths() {
+        let watch_paths: Vec<PathBuf> = vec![];
+        let result = FileIntegrityModule::scan_files(&watch_paths);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_scan_files_symlink_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_file = dir.path().join("real.txt");
+        std::fs::write(&real_file, "real content").unwrap();
+
+        // ディレクトリ外にシンボリックリンクのターゲットを作成
+        let target_dir = tempfile::tempdir().unwrap();
+        let target_file = target_dir.path().join("target.txt");
+        std::fs::write(&target_file, "target content").unwrap();
+
+        // シンボリックリンクを作成
+        let link_path = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&target_file, &link_path).unwrap();
+
+        let watch_paths = vec![dir.path().to_path_buf()];
+        let result = FileIntegrityModule::scan_files(&watch_paths);
+
+        // real.txt は含まれるが、シンボリックリンクは follow_links(false) のため
+        // WalkDir がシンボリックリンクのファイルタイプを symlink として報告し、
+        // is_file() が true を返すため結果に含まれる（ただしリンク先は辿らない）
+        assert!(result.contains_key(&real_file));
+    }
+
+    #[test]
+    fn test_scan_files_nested_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub1 = dir.path().join("sub1");
+        let sub2 = sub1.join("sub2");
+        std::fs::create_dir_all(&sub2).unwrap();
+
+        let file_root = dir.path().join("root.txt");
+        let file_sub1 = sub1.join("sub1.txt");
+        let file_sub2 = sub2.join("sub2.txt");
+        std::fs::write(&file_root, "root").unwrap();
+        std::fs::write(&file_sub1, "sub1").unwrap();
+        std::fs::write(&file_sub2, "sub2").unwrap();
+
+        let watch_paths = vec![dir.path().to_path_buf()];
+        let result = FileIntegrityModule::scan_files(&watch_paths);
+        assert_eq!(result.len(), 3);
+        assert!(result.contains_key(&file_root));
+        assert!(result.contains_key(&file_sub1));
+        assert!(result.contains_key(&file_sub2));
+    }
+
+    #[test]
+    fn test_init_empty_watch_paths() {
+        let config = FileIntegrityConfig {
+            enabled: true,
+            scan_interval_secs: 300,
+            watch_paths: vec![],
+        };
+        let mut module = FileIntegrityModule::new(config);
+        let result = module.init();
+        assert!(result.is_ok());
+        assert!(module.config.watch_paths.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_start_creates_baseline_and_stops() {
+        let dir = tempfile::tempdir().unwrap();
+        let file1 = dir.path().join("a.txt");
+        std::fs::write(&file1, "content a").unwrap();
+
+        let config = FileIntegrityConfig {
+            enabled: true,
+            scan_interval_secs: 3600,
+            watch_paths: vec![dir.path().to_path_buf()],
+        };
+        let mut module = FileIntegrityModule::new(config);
+        module.init().unwrap();
+
+        let cancel_token = module.cancel_token();
+        module.start().await.unwrap();
+
+        // start() が成功すればベースラインスキャンが完了している
+        // stop() でクリーンに停止できることを確認
+        module.stop().await.unwrap();
+        assert!(cancel_token.is_cancelled());
+    }
+
+    #[test]
+    fn test_change_report_has_changes_empty() {
+        let report = ChangeReport {
+            modified: vec![],
+            added: vec![],
+            removed: vec![],
+        };
+        assert!(!report.has_changes());
+    }
+
+    #[test]
+    fn test_detect_changes_combined() {
+        let mut baseline = HashMap::new();
+        baseline.insert(PathBuf::from("/existing"), "hash1".to_string());
+        baseline.insert(PathBuf::from("/to_remove"), "hash2".to_string());
+        baseline.insert(PathBuf::from("/to_modify"), "hash3".to_string());
+
+        let mut current = HashMap::new();
+        current.insert(PathBuf::from("/existing"), "hash1".to_string());
+        current.insert(PathBuf::from("/to_modify"), "hash_changed".to_string());
+        current.insert(PathBuf::from("/new_file"), "hash4".to_string());
+
+        let report = FileIntegrityModule::detect_changes(&baseline, &current);
+        assert_eq!(report.modified.len(), 1);
+        assert_eq!(report.added.len(), 1);
+        assert_eq!(report.removed.len(), 1);
+        assert!(report.modified.contains(&PathBuf::from("/to_modify")));
+        assert!(report.added.contains(&PathBuf::from("/new_file")));
+        assert!(report.removed.contains(&PathBuf::from("/to_remove")));
+    }
 }

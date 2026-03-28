@@ -51,6 +51,37 @@ heartbeat_interval_secs = 10
     assert_eq!(config.health.heartbeat_interval_secs, 10);
 }
 
+#[test]
+fn test_config_with_file_integrity_section() {
+    use std::io::Write;
+    let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+    write!(
+        tmpfile,
+        r#"
+[general]
+log_level = "info"
+
+[modules.file_integrity]
+enabled = true
+scan_interval_secs = 60
+watch_paths = ["/tmp"]
+"#
+    )
+    .unwrap();
+    let config = AppConfig::load(tmpfile.path()).unwrap();
+    assert!(config.modules.file_integrity.enabled);
+    assert_eq!(config.modules.file_integrity.scan_interval_secs, 60);
+    assert_eq!(config.modules.file_integrity.watch_paths.len(), 1);
+}
+
+#[test]
+fn test_config_file_integrity_disabled_by_default() {
+    let config = AppConfig::load(Path::new("/tmp/nonexistent-zettai-config.toml")).unwrap();
+    assert!(!config.modules.file_integrity.enabled);
+    assert_eq!(config.modules.file_integrity.scan_interval_secs, 300);
+    assert!(config.modules.file_integrity.watch_paths.is_empty());
+}
+
 #[tokio::test]
 async fn test_daemon_sigterm_shutdown() {
     use std::time::Duration;
