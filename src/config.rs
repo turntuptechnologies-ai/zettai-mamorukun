@@ -52,6 +52,10 @@ pub struct ModulesConfig {
     /// ログファイル改ざん検知モジュールの設定
     #[serde(default)]
     pub log_tamper: LogTamperConfig,
+
+    /// systemd サービス監視モジュールの設定
+    #[serde(default)]
+    pub systemd_service: SystemdServiceConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -283,6 +287,46 @@ impl Default for LogTamperConfig {
     }
 }
 
+/// systemd サービス監視モジュールの設定
+#[derive(Debug, Deserialize, Clone)]
+pub struct SystemdServiceConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "SystemdServiceConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象パスのリスト
+    #[serde(default = "SystemdServiceConfig::default_watch_paths")]
+    pub watch_paths: Vec<PathBuf>,
+}
+
+impl SystemdServiceConfig {
+    fn default_scan_interval_secs() -> u64 {
+        120
+    }
+
+    fn default_watch_paths() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/etc/systemd/system/"),
+            PathBuf::from("/usr/lib/systemd/system/"),
+            PathBuf::from("/usr/local/lib/systemd/system/"),
+        ]
+    }
+}
+
+impl Default for SystemdServiceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            watch_paths: Self::default_watch_paths(),
+        }
+    }
+}
+
 /// ヘルスチェック設定
 #[derive(Debug, Deserialize)]
 pub struct HealthConfig {
@@ -438,5 +482,27 @@ watch_paths = ["/etc/crontab", "/etc/cron.d"]
         assert!(config.modules.cron_monitor.enabled);
         assert_eq!(config.modules.cron_monitor.scan_interval_secs, 60);
         assert_eq!(config.modules.cron_monitor.watch_paths.len(), 2);
+    }
+
+    #[test]
+    fn test_systemd_service_config_defaults() {
+        let config: AppConfig = toml::from_str("").unwrap();
+        assert!(!config.modules.systemd_service.enabled);
+        assert_eq!(config.modules.systemd_service.scan_interval_secs, 120);
+        assert_eq!(config.modules.systemd_service.watch_paths.len(), 3);
+    }
+
+    #[test]
+    fn test_systemd_service_config_custom() {
+        let toml_str = r#"
+[modules.systemd_service]
+enabled = true
+scan_interval_secs = 60
+watch_paths = ["/etc/systemd/system/"]
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.modules.systemd_service.enabled);
+        assert_eq!(config.modules.systemd_service.scan_interval_secs, 60);
+        assert_eq!(config.modules.systemd_service.watch_paths.len(), 1);
     }
 }
