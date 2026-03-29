@@ -156,6 +156,49 @@ fn test_config_cron_monitor_disabled_by_default() {
 }
 
 #[test]
+fn test_config_with_user_account_section() {
+    use std::io::Write;
+    let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+    write!(
+        tmpfile,
+        r#"
+[modules.user_account]
+enabled = true
+scan_interval_secs = 30
+passwd_path = "/etc/passwd"
+group_path = "/etc/group"
+"#
+    )
+    .unwrap();
+    let config = AppConfig::load(tmpfile.path()).unwrap();
+    assert!(config.modules.user_account.enabled);
+    assert_eq!(config.modules.user_account.scan_interval_secs, 30);
+    assert_eq!(
+        config.modules.user_account.passwd_path,
+        std::path::PathBuf::from("/etc/passwd")
+    );
+    assert_eq!(
+        config.modules.user_account.group_path,
+        std::path::PathBuf::from("/etc/group")
+    );
+}
+
+#[test]
+fn test_config_user_account_disabled_by_default() {
+    let config = AppConfig::load(Path::new("/tmp/nonexistent-zettai-config.toml")).unwrap();
+    assert!(!config.modules.user_account.enabled);
+    assert_eq!(config.modules.user_account.scan_interval_secs, 60);
+    assert_eq!(
+        config.modules.user_account.passwd_path,
+        std::path::PathBuf::from("/etc/passwd")
+    );
+    assert_eq!(
+        config.modules.user_account.group_path,
+        std::path::PathBuf::from("/etc/group")
+    );
+}
+
+#[test]
 fn test_config_file_integrity_disabled_by_default() {
     let config = AppConfig::load(Path::new("/tmp/nonexistent-zettai-config.toml")).unwrap();
     assert!(!config.modules.file_integrity.enabled);
