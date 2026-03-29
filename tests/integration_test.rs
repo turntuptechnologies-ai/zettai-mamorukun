@@ -227,6 +227,34 @@ fn test_config_log_tamper_disabled_by_default() {
 }
 
 #[test]
+fn test_config_with_systemd_service_section() {
+    use std::io::Write;
+    let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+    write!(
+        tmpfile,
+        r#"
+[modules.systemd_service]
+enabled = true
+scan_interval_secs = 60
+watch_paths = ["/etc/systemd/system"]
+"#
+    )
+    .unwrap();
+    let config = AppConfig::load(tmpfile.path()).unwrap();
+    assert!(config.modules.systemd_service.enabled);
+    assert_eq!(config.modules.systemd_service.scan_interval_secs, 60);
+    assert_eq!(config.modules.systemd_service.watch_paths.len(), 1);
+}
+
+#[test]
+fn test_config_systemd_service_disabled_by_default() {
+    let config = AppConfig::load(Path::new("/tmp/nonexistent-zettai-config.toml")).unwrap();
+    assert!(!config.modules.systemd_service.enabled);
+    assert_eq!(config.modules.systemd_service.scan_interval_secs, 120);
+    assert_eq!(config.modules.systemd_service.watch_paths.len(), 3);
+}
+
+#[test]
 fn test_config_file_integrity_disabled_by_default() {
     let config = AppConfig::load(Path::new("/tmp/nonexistent-zettai-config.toml")).unwrap();
     assert!(!config.modules.file_integrity.enabled);
