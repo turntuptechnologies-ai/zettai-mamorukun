@@ -44,6 +44,10 @@ pub struct ModulesConfig {
     /// Cron ジョブ改ざん検知モジュールの設定
     #[serde(default)]
     pub cron_monitor: CronMonitorConfig,
+
+    /// ユーザーアカウント監視モジュールの設定
+    #[serde(default)]
+    pub user_account: UserAccountConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -185,6 +189,51 @@ impl Default for CronMonitorConfig {
             enabled: false,
             scan_interval_secs: Self::default_scan_interval_secs(),
             watch_paths: Self::default_watch_paths(),
+        }
+    }
+}
+
+/// ユーザーアカウント監視モジュールの設定
+#[derive(Debug, Deserialize, Clone)]
+pub struct UserAccountConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "UserAccountConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// passwd ファイルのパス
+    #[serde(default = "UserAccountConfig::default_passwd_path")]
+    pub passwd_path: PathBuf,
+
+    /// group ファイルのパス
+    #[serde(default = "UserAccountConfig::default_group_path")]
+    pub group_path: PathBuf,
+}
+
+impl UserAccountConfig {
+    fn default_scan_interval_secs() -> u64 {
+        60
+    }
+
+    fn default_passwd_path() -> PathBuf {
+        PathBuf::from("/etc/passwd")
+    }
+
+    fn default_group_path() -> PathBuf {
+        PathBuf::from("/etc/group")
+    }
+}
+
+impl Default for UserAccountConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            passwd_path: Self::default_passwd_path(),
+            group_path: Self::default_group_path(),
         }
     }
 }

@@ -6,6 +6,7 @@ use crate::modules::cron_monitor::CronMonitorModule;
 use crate::modules::file_integrity::FileIntegrityModule;
 use crate::modules::kernel_module::KernelModuleMonitor;
 use crate::modules::process_monitor::ProcessMonitorModule;
+use crate::modules::user_account::UserAccountModule;
 use std::time::Duration;
 use tokio::signal::unix::{SignalKind, signal};
 
@@ -80,6 +81,18 @@ impl Daemon {
             None
         };
 
+        // ユーザーアカウント監視モジュールの初期化と起動
+        let ua_cancel_token = if self.config.modules.user_account.enabled {
+            let mut ua = UserAccountModule::new(self.config.modules.user_account.clone());
+            ua.init()?;
+            let cancel_token = ua.cancel_token();
+            ua.start().await?;
+            tracing::info!("ユーザーアカウント監視モジュールを起動しました");
+            Some(cancel_token)
+        } else {
+            None
+        };
+
         tracing::info!("デーモンを起動しました");
 
         if health_enabled {
@@ -140,6 +153,10 @@ impl Daemon {
         if let Some(cancel_token) = cm_cancel_token {
             cancel_token.cancel();
             tracing::info!("Cron ジョブ改ざん検知モジュールを停止しました");
+        }
+        if let Some(cancel_token) = ua_cancel_token {
+            cancel_token.cancel();
+            tracing::info!("ユーザーアカウント監視モジュールを停止しました");
         }
 
         tracing::info!("シャットダウン完了");

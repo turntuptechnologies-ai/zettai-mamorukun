@@ -2,6 +2,7 @@ pub mod cron_monitor;
 pub mod file_integrity;
 pub mod kernel_module;
 pub mod process_monitor;
+pub mod user_account;
 
 use crate::error::AppError;
 

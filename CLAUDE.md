@@ -81,6 +81,7 @@ src/
     file_integrity.rs  # ファイル整合性監視モジュール
     kernel_module.rs   # カーネルモジュール監視モジュール
     process_monitor.rs # プロセス異常検知モジュール
+    user_account.rs    # ユーザーアカウント監視モジュール
 tests/
   integration_test.rs  # 統合テスト
 config.example.toml    # 設定ファイルサンプル
