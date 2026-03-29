@@ -255,6 +255,34 @@ fn test_config_systemd_service_disabled_by_default() {
 }
 
 #[test]
+fn test_config_with_firewall_monitor_section() {
+    use std::io::Write;
+    let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+    write!(
+        tmpfile,
+        r#"
+[modules.firewall_monitor]
+enabled = true
+scan_interval_secs = 30
+watch_paths = ["/proc/net/ip_tables_names", "/proc/net/ip6_tables_names"]
+"#
+    )
+    .unwrap();
+    let config = AppConfig::load(tmpfile.path()).unwrap();
+    assert!(config.modules.firewall_monitor.enabled);
+    assert_eq!(config.modules.firewall_monitor.scan_interval_secs, 30);
+    assert_eq!(config.modules.firewall_monitor.watch_paths.len(), 2);
+}
+
+#[test]
+fn test_config_firewall_monitor_disabled_by_default() {
+    let config = AppConfig::load(Path::new("/tmp/nonexistent-zettai-config.toml")).unwrap();
+    assert!(!config.modules.firewall_monitor.enabled);
+    assert_eq!(config.modules.firewall_monitor.scan_interval_secs, 60);
+    assert_eq!(config.modules.firewall_monitor.watch_paths.len(), 6);
+}
+
+#[test]
 fn test_config_file_integrity_disabled_by_default() {
     let config = AppConfig::load(Path::new("/tmp/nonexistent-zettai-config.toml")).unwrap();
     assert!(!config.modules.file_integrity.enabled);

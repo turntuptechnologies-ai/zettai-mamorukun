@@ -51,6 +51,14 @@ scan_interval_secs = 120
 # 監視対象パスのリスト
 watch_paths = ["/etc/systemd/system", "/usr/lib/systemd/system", "/usr/local/lib/systemd/system"]
 
+[modules.firewall_monitor]
+# ファイアウォールルール監視モジュールの有効/無効
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 60
+# 監視対象パスのリスト
+watch_paths = ["/proc/net/ip_tables_names", "/proc/net/ip6_tables_names", "/proc/net/ip_tables_targets", "/proc/net/ip_tables_matches", "/proc/net/ip6_tables_targets", "/proc/net/ip6_tables_matches"]
+
 [modules.user_account]
 # ユーザーアカウント監視モジュールの有効/無効
 enabled = false

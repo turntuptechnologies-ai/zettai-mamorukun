@@ -1,0 +1,248 @@
+レビュー指摘への対応も完了しました。
+
+## 最終サマリー
+
+### v0.1.0 自律開発サイクル完了
+
+| 工程 | 状態 | リンク |
+|------|------|--------|
+| Issue 作成 | 完了 | [#1](https://github.com/turntuptechnologies-ai/zettai-mamorukun/issues/1) |
+| 設計 | 完了 | Issue #1 コメント |
+| レビュー | 完了（指摘2件修正済み） | Issue #1 コメント |
+| 実装 | 完了 | 全8テスト合格、clippy/fmt クリーン |
+| PR・マージ | 完了 | [PR #2](https://github.com/turntuptechnologies-ai/zettai-mamorukun/pull/2) (squash merge) |
+| リリース | 完了 | [v0.1.0](https://github.com/turntuptechnologies-ai/zettai-mamorukun/releases/tag/v0.1.0) |
+| BACKLOG 更新 | 完了 | 次回候補10項目 |
+| レビュー修正 | 完了 | edition 2024 表記統一、安全性コメント追加 |
+全工程完了しました。
+
+---
+
+## 自律開発サイクル完了サマリー
+
+### 実装した機能
+**ハートビート & セルフヘルスチェック** (Issue #3, PR #4) — BACKLOG を無視して独自アイデアを採用（20%ルール）
+
+### 変更内容
+| ファイル | 内容 |
+|---------|------|
+| `src/core/health.rs` (新規) | `HealthChecker` / `HealthStatus` — `/proc/self/status` から VmRSS を取得し稼働時間・メモリ使用量を監視 |
+| `src/config.rs` | `HealthConfig` 追加（`enabled`, `heartbeat_interval_secs`） |
+| `src/core/daemon.rs` | `tokio::select!` ループにハートビートタイマーを統合 |
+| `config.example.toml` | `[health]` セクション追加 |
+| `Cargo.toml` | tokio `time` feature 追加、バージョン 0.2.0 |
+
+### テスト結果
+- 全 16 テスト通過（単体 11 + 統合 5）
+- clippy / fmt クリーン
+
+### リリース
+- **v0.2.0**: https://github.com/turntuptechnologies-ai/zettai-mamorukun/releases/tag/v0.2.0
+- BACKLOG.md 更新・push 済み（次回候補 10 項目）
+全タスク完了しました。
+
+## 開発サイクル完了サマリー — v0.3.0
+
+### 実装機能: ファイル整合性監視モジュール (File Integrity Monitor)
+
+BACKLOG 外の自由アイデア枠として、AIDE/Tripwire 的なファイル整合性監視を実装しました。
+
+### 成果物
+
+| 項目 | リンク |
+|------|--------|
+| Issue | #5 |
+| PR | #6 (squash merged) |
+| Release | [v0.3.0](https://github.com/turntuptechnologies-ai/zettai-mamorukun/releases/tag/v0.3.0) |
+
+### 主な機能
+- SHA-256 によるファイルハッシュ計算
+- 定期スキャンでベースラインとの差分検知（変更・追加・削除）
+- `walkdir` によるディレクトリ再帰走査（シンボリックリンク非追跡）
+- `canonicalize()` によるパストラバーサル防止
+- `CancellationToken` による安全な停止制御
+- 設定で `watch_paths` を指定して監視対象を制御
+
+### 変更ファイル (10ファイル, +755行)
+- `src/modules/file_integrity.rs` — 新規（モジュール本体）
+- `src/config.rs`, `src/error.rs`, `src/core/daemon.rs`, `src/modules/mod.rs` — 拡張
+- `Cargo.toml` — sha2, walkdir, tokio-util 依存追加
+- `config.example.toml`, `CLAUDE.md`, `BACKLOG.md` — ドキュメント更新
+
+### テスト
+- ユニットテスト 29件 + 統合テスト 7件 = **全36件パス**
+- `cargo clippy -- -D warnings` クリア
+
+### チーム体制
+designer → reviewer → developer → tester + documenter（並行）
+チーム解散完了。全工程が完了しました。
+
+## 完了サマリー
+
+### v0.4.0 — プロセス異常検知モジュール
+
+**Issue**: turntuptechnologies-ai/zettai-mamorukun#7
+**PR**: turntuptechnologies-ai/zettai-mamorukun#8 (squash merge 済み)
+**Release**: [v0.4.0](https://github.com/turntuptechnologies-ai/zettai-mamorukun/releases/tag/v0.4.0)
+
+### 実装内容
+
+`/proc` ファイルシステムを定期スキャンし、以下の不審なプロセスを検知する `ProcessMonitorModule` を追加:
+
+1. **削除済みバイナリ** — `/proc/<pid>/exe` が `(deleted)` を含む
+2. **不審パスからの実行** — `/tmp`, `/dev/shm`, `/var/tmp` 配下
+3. **隠しディレクトリからの実行** — `.` で始まるディレクトリ配下
+
+### 変更ファイル (8ファイル, +544行)
+
+| ファイル | 変更 |
+|---------|------|
+| `src/modules/process_monitor.rs` | 新規: モジュール実装 + 単体テスト 17件 |
+| `src/config.rs` | `ProcessMonitorConfig` 追加 |
+| `src/core/daemon.rs` | モジュール統合 |
+| `src/modules/mod.rs` | モジュール登録 |
+| `config.example.toml` | 設定サンプル追加 |
+| `Cargo.toml` | v0.4.0 |
+| `CLAUDE.md` | ディレクトリ構成更新 |
+| `tests/integration_test.rs` | 統合テスト 2件追加 |
+
+### テスト結果
+
+- 単体テスト 44件 + 統合テスト 9件 = **全 53 テスト通過**
+- clippy 警告なし / rustfmt チェック通過
+
+### BACKLOG.md 更新済み (次回候補 10項目)
+チーム解散完了。全工程が完了しています。
+
+## 最終サマリー — v0.5.0 カーネルモジュール監視モジュール
+
+BACKLOG を無視（秒数10、0-11 の範囲）し、独自アイデアとして **カーネルモジュール監視モジュール** を実装・リリースしました。
+
+### 成果物
+
+| 項目 | リンク |
+|------|--------|
+| Issue | turntuptechnologies-ai/zettai-mamorukun#9 |
+| PR | turntuptechnologies-ai/zettai-mamorukun#10 (squash merge 済み) |
+| Release | [v0.5.0](https://github.com/turntuptechnologies-ai/zettai-mamorukun/releases/tag/v0.5.0) |
+
+### 機能概要
+
+`/proc/modules` を定期スキャン（デフォルト120秒間隔）し、起動時のベースラインと比較してカーネルモジュールの新規ロード（warn）・アンロード（info）を検知しログ記録。ルートキット対策の基本機能。
+
+### 変更ファイル
+
+- `src/modules/kernel_module.rs` — 新規（パース・差分検知・定期スキャン）
+- `src/config.rs` — `KernelModuleConfig` 追加
+- `src/core/daemon.rs` — モジュール組み込み
+- `config.example.toml`, `CLAUDE.md`, `Cargo.toml` — 更新
+- `tests/integration_test.rs` — 統合テスト追加
+
+### テスト結果
+
+全 72 テスト通過（新規16件）、clippy 警告なし、fmt 準拠。BACKLOG.md も更新・push 済み。
+## 完了サマリー: v0.6.0 Cron ジョブ改ざん検知モジュール
+
+全工程が完了しました。
+
+### 実装内容
+**Cron ジョブ改ざん検知モジュール** (`CronMonitorModule`) — 攻撃者がバックドアとして crontab を悪用する手法（MITRE ATT&CK T1053.003）を検知するモジュール。
+
+- `/etc/crontab`, `/etc/cron.d/`, `/etc/cron.{hourly,daily,weekly,monthly}/`, `/var/spool/cron/crontabs/` を定期スキャン
+- SHA-256 ハッシュベースでファイルの追加・変更・削除を検知
+- 既存モジュール（file_integrity 等）と同じアーキテクチャパターン
+
+### 成果物
+| 項目 | リンク |
+|------|--------|
+| Issue | [#11](https://github.com/turntuptechnologies-ai/zettai-mamorukun/issues/11) |
+| PR | [#12](https://github.com/turntuptechnologies-ai/zettai-mamorukun/pull/12) |
+| Release | [v0.6.0](https://github.com/turntuptechnologies-ai/zettai-mamorukun/releases/tag/v0.6.0) |
+
+### テスト結果
+- 全 93 テスト合格（単体 80 + 統合 13）
+- `cargo clippy -- -D warnings` 警告なし
+- `cargo fmt` フォーマット済み
+
+### 変更ファイル（9ファイル, +617/-2 行）
+- `src/modules/cron_monitor.rs` (新規, 490行)
+- `src/config.rs`, `src/core/daemon.rs`, `src/modules/mod.rs`
+- `config.example.toml`, `tests/integration_test.rs`
+- `CLAUDE.md`, `Cargo.toml`, `BACKLOG.md`
+全工程が完了しました。
+
+## v0.7.0 リリースまとめ
+
+### ユーザーアカウント監視モジュール
+
+BACKLOG にない独自アイデアとして、`/etc/passwd` と `/etc/group` を定期パースし不審なアカウント変更を検知するモジュールを実装しました。
+
+**成果物:**
+- **Issue**: turntuptechnologies-ai/zettai-mamorukun#13
+- **PR**: turntuptechnologies-ai/zettai-mamorukun#14 (squash merge 済み)
+- **Release**: [v0.7.0](https://github.com/turntuptechnologies-ai/zettai-mamorukun/releases/tag/v0.7.0)
+
+**検知項目 (10種):**
+- 新規ユーザー追加 / 削除
+- UID 0 ユーザーの出現 (root以外) — CRITICAL
+- シェル / UID / GID / ホームディレクトリ変更
+- グループ追加 / 削除 / メンバー変更 / GID 変更
+
+**品質:**
+- `cargo fmt` / `cargo clippy` / `cargo test` 全パス
+- 単体テスト 18件 + 統合テスト 2件追加
+- 新規依存クレートなし
+- BACKLOG.md 更新済み (次回候補 10項目)
+全工程完了しました。
+
+## v0.8.0 リリースサマリー — ログファイル改ざん検知モジュール
+
+### 実施内容
+| ステップ | 結果 |
+|---|---|
+| Issue 作成 | [#15](https://github.com/turntuptechnologies-ai/zettai-mamorukun/issues/15) |
+| 設計 | メタデータベース（size/inode/permissions）追跡、inode でローテーション判別 |
+| レビュー | LGTM（`copytruncate` の挙動を doc comment に明記する推奨を反映） |
+| 実装 | `log_tamper.rs`(594行) + config/daemon/mod.rs/config.example.toml 変更 |
+| テスト | 単体 16件 + 統合 2件追加、全135テスト通過、clippy/fmt OK |
+| ドキュメント | CLAUDE.md ディレクトリ構成更新 |
+| PR | [#16](https://github.com/turntuptechnologies-ai/zettai-mamorukun/pull/16) → squash merge |
+| リリース | [v0.8.0](https://github.com/turntuptechnologies-ai/zettai-mamorukun/releases/tag/v0.8.0) バイナリ公開 |
+| BACKLOG | 更新済み（次回候補 10 項目） |
+
+### 検知機能
+- サイズ減少（inode同一）→ **warn**（改ざんの可能性）
+- ファイル削除 → **warn**
+- パーミッション変更 → **warn**
+- inode 変更 → **info**（ログローテーション）
+- 新規ファイル → **info**
+全工程が完了しました。
+
+## 完了サマリー: v0.9.0 — systemd サービス監視モジュール
+
+### 実装内容
+**systemd ユニットファイルの改ざん検知モジュール** を追加しました。攻撃者がバックドアを永続化するために systemd サービスを追加・改ざんする攻撃手法を検知します。
+
+| 項目 | 詳細 |
+|------|------|
+| Issue | #17 |
+| PR | #18 (squash merge 済み) |
+| リリース | [v0.9.0](https://github.com/turntuptechnologies-ai/zettai-mamorukun/releases/tag/v0.9.0) |
+| テスト | 単体 137 件 + 統合 19 件 全通過 |
+
+### 変更ファイル
+- `src/modules/systemd_service.rs` — 新規（SHA-256 ハッシュベース変更検知 + テスト 14 件）
+- `src/config.rs` — `SystemdServiceConfig` 追加 + テスト 2 件
+- `src/core/daemon.rs` — モジュール初期化・起動・停止統合
+- `src/modules/mod.rs` — モジュール登録
+- `config.example.toml` — 設定セクション追加
+- `CLAUDE.md` — ディレクトリ構成更新
+- `tests/integration_test.rs` — 統合テスト 2 件追加
+
+### 監視対象
+- `/etc/systemd/system/` — 管理者配置のユニットファイル
+- `/usr/lib/systemd/system/` — パッケージ配置のユニットファイル
+- `/usr/local/lib/systemd/system/` — ローカルインストールのサービス
+
+### BACKLOG.md
+次回候補 10 項目を更新済み。
