@@ -3,6 +3,7 @@ pub mod file_integrity;
 pub mod kernel_module;
 pub mod log_tamper;
 pub mod process_monitor;
+pub mod systemd_service;
 pub mod user_account;
 
 use crate::error::AppError;

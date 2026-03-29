@@ -82,6 +82,7 @@ src/
     kernel_module.rs   # カーネルモジュール監視モジュール
     log_tamper.rs      # ログファイル改ざん検知モジュール
     process_monitor.rs # プロセス異常検知モジュール
+    systemd_service.rs # systemd サービス監視モジュール
     user_account.rs    # ユーザーアカウント監視モジュール
 tests/
   integration_test.rs  # 統合テスト

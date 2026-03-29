@@ -7,6 +7,7 @@ use crate::modules::file_integrity::FileIntegrityModule;
 use crate::modules::kernel_module::KernelModuleMonitor;
 use crate::modules::log_tamper::LogTamperModule;
 use crate::modules::process_monitor::ProcessMonitorModule;
+use crate::modules::systemd_service::SystemdServiceModule;
 use crate::modules::user_account::UserAccountModule;
 use std::time::Duration;
 use tokio::signal::unix::{SignalKind, signal};
@@ -94,6 +95,18 @@ impl Daemon {
             None
         };
 
+        // systemd サービス監視モジュールの初期化と起動
+        let ss_cancel_token = if self.config.modules.systemd_service.enabled {
+            let mut ss = SystemdServiceModule::new(self.config.modules.systemd_service.clone());
+            ss.init()?;
+            let cancel_token = ss.cancel_token();
+            ss.start().await?;
+            tracing::info!("systemd サービス監視モジュールを起動しました");
+            Some(cancel_token)
+        } else {
+            None
+        };
+
         // ユーザーアカウント監視モジュールの初期化と起動
         let ua_cancel_token = if self.config.modules.user_account.enabled {
             let mut ua = UserAccountModule::new(self.config.modules.user_account.clone());
@@ -170,6 +183,10 @@ impl Daemon {
         if let Some(cancel_token) = lt_cancel_token {
             cancel_token.cancel();
             tracing::info!("ログファイル改ざん検知モジュールを停止しました");
+        }
+        if let Some(cancel_token) = ss_cancel_token {
+            cancel_token.cancel();
+            tracing::info!("systemd サービス監視モジュールを停止しました");
         }
         if let Some(cancel_token) = ua_cancel_token {
             cancel_token.cancel();
