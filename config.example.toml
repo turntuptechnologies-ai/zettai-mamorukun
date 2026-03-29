@@ -43,6 +43,14 @@ scan_interval_secs = 30
 # 監視対象パスのリスト
 watch_paths = ["/var/log/syslog", "/var/log/auth.log", "/var/log/kern.log", "/var/log/messages"]
 
+[modules.systemd_service]
+# systemd サービス監視モジュールの有効/無効
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 120
+# 監視対象パスのリスト
+watch_paths = ["/etc/systemd/system", "/usr/lib/systemd/system", "/usr/local/lib/systemd/system"]
+
 [modules.user_account]
 # ユーザーアカウント監視モジュールの有効/無効
 enabled = false
