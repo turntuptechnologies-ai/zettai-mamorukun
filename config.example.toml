@@ -67,6 +67,14 @@ scan_interval_secs = 30
 # 監視対象パスのリスト
 watch_paths = ["/etc/resolv.conf", "/etc/hosts"]
 
+[modules.ssh_key_monitor]
+# SSH公開鍵ファイル監視モジュールの有効/無効
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 120
+# 監視対象の authorized_keys ファイルパスのリスト
+watch_paths = ["/root/.ssh/authorized_keys"]
+
 [modules.user_account]
 # ユーザーアカウント監視モジュールの有効/無効
 enabled = false
