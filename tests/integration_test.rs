@@ -128,6 +128,34 @@ fn test_config_process_monitor_disabled_by_default() {
 }
 
 #[test]
+fn test_config_with_cron_monitor_section() {
+    use std::io::Write;
+    let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+    write!(
+        tmpfile,
+        r#"
+[modules.cron_monitor]
+enabled = true
+scan_interval_secs = 60
+watch_paths = ["/etc/crontab", "/etc/cron.d"]
+"#
+    )
+    .unwrap();
+    let config = AppConfig::load(tmpfile.path()).unwrap();
+    assert!(config.modules.cron_monitor.enabled);
+    assert_eq!(config.modules.cron_monitor.scan_interval_secs, 60);
+    assert_eq!(config.modules.cron_monitor.watch_paths.len(), 2);
+}
+
+#[test]
+fn test_config_cron_monitor_disabled_by_default() {
+    let config = AppConfig::load(Path::new("/tmp/nonexistent-zettai-config.toml")).unwrap();
+    assert!(!config.modules.cron_monitor.enabled);
+    assert_eq!(config.modules.cron_monitor.scan_interval_secs, 120);
+    assert_eq!(config.modules.cron_monitor.watch_paths.len(), 7);
+}
+
+#[test]
 fn test_config_file_integrity_disabled_by_default() {
     let config = AppConfig::load(Path::new("/tmp/nonexistent-zettai-config.toml")).unwrap();
     assert!(!config.modules.file_integrity.enabled);

@@ -2,6 +2,7 @@ use crate::config::AppConfig;
 use crate::core::health::HealthChecker;
 use crate::error::AppError;
 use crate::modules::Module;
+use crate::modules::cron_monitor::CronMonitorModule;
 use crate::modules::file_integrity::FileIntegrityModule;
 use crate::modules::kernel_module::KernelModuleMonitor;
 use crate::modules::process_monitor::ProcessMonitorModule;
@@ -67,6 +68,18 @@ impl Daemon {
             None
         };
 
+        // Cron ジョブ改ざん検知モジュールの初期化と起動
+        let cm_cancel_token = if self.config.modules.cron_monitor.enabled {
+            let mut cm = CronMonitorModule::new(self.config.modules.cron_monitor.clone());
+            cm.init()?;
+            let cancel_token = cm.cancel_token();
+            cm.start().await?;
+            tracing::info!("Cron ジョブ改ざん検知モジュールを起動しました");
+            Some(cancel_token)
+        } else {
+            None
+        };
+
         tracing::info!("デーモンを起動しました");
 
         if health_enabled {
@@ -123,6 +136,10 @@ impl Daemon {
         if let Some(cancel_token) = km_cancel_token {
             cancel_token.cancel();
             tracing::info!("カーネルモジュール監視モジュールを停止しました");
+        }
+        if let Some(cancel_token) = cm_cancel_token {
+            cancel_token.cancel();
+            tracing::info!("Cron ジョブ改ざん検知モジュールを停止しました");
         }
 
         tracing::info!("シャットダウン完了");

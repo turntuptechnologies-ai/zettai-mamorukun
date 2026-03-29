@@ -77,6 +77,7 @@ src/
     event.rs           # イベントバス
   modules/
     mod.rs             # モジュールトレイト・レジストリ
+    cron_monitor.rs    # Cron ジョブ改ざん検知モジュール
     file_integrity.rs  # ファイル整合性監視モジュール
     kernel_module.rs   # カーネルモジュール監視モジュール
     process_monitor.rs # プロセス異常検知モジュール
