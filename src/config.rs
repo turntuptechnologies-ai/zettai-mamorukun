@@ -48,6 +48,10 @@ pub struct ModulesConfig {
     /// ユーザーアカウント監視モジュールの設定
     #[serde(default)]
     pub user_account: UserAccountConfig,
+
+    /// ログファイル改ざん検知モジュールの設定
+    #[serde(default)]
+    pub log_tamper: LogTamperConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -234,6 +238,47 @@ impl Default for UserAccountConfig {
             scan_interval_secs: Self::default_scan_interval_secs(),
             passwd_path: Self::default_passwd_path(),
             group_path: Self::default_group_path(),
+        }
+    }
+}
+
+/// ログファイル改ざん検知モジュールの設定
+#[derive(Debug, Deserialize, Clone)]
+pub struct LogTamperConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "LogTamperConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象パスのリスト
+    #[serde(default = "LogTamperConfig::default_watch_paths")]
+    pub watch_paths: Vec<PathBuf>,
+}
+
+impl LogTamperConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_watch_paths() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/var/log/syslog"),
+            PathBuf::from("/var/log/auth.log"),
+            PathBuf::from("/var/log/kern.log"),
+            PathBuf::from("/var/log/messages"),
+        ]
+    }
+}
+
+impl Default for LogTamperConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            watch_paths: Self::default_watch_paths(),
         }
     }
 }

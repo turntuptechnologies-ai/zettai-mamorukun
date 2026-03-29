@@ -35,6 +35,14 @@ scan_interval_secs = 120
 # 監視対象パスのリスト
 watch_paths = ["/etc/crontab", "/etc/cron.d", "/etc/cron.hourly", "/etc/cron.daily", "/etc/cron.weekly", "/etc/cron.monthly", "/var/spool/cron/crontabs"]
 
+[modules.log_tamper]
+# ログファイル改ざん検知モジュールの有効/無効
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 30
+# 監視対象パスのリスト
+watch_paths = ["/var/log/syslog", "/var/log/auth.log", "/var/log/kern.log", "/var/log/messages"]
+
 [modules.user_account]
 # ユーザーアカウント監視モジュールの有効/無効
 enabled = false

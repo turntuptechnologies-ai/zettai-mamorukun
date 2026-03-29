@@ -5,6 +5,7 @@ use crate::modules::Module;
 use crate::modules::cron_monitor::CronMonitorModule;
 use crate::modules::file_integrity::FileIntegrityModule;
 use crate::modules::kernel_module::KernelModuleMonitor;
+use crate::modules::log_tamper::LogTamperModule;
 use crate::modules::process_monitor::ProcessMonitorModule;
 use crate::modules::user_account::UserAccountModule;
 use std::time::Duration;
@@ -76,6 +77,18 @@ impl Daemon {
             let cancel_token = cm.cancel_token();
             cm.start().await?;
             tracing::info!("Cron ジョブ改ざん検知モジュールを起動しました");
+            Some(cancel_token)
+        } else {
+            None
+        };
+
+        // ログファイル改ざん検知モジュールの初期化と起動
+        let lt_cancel_token = if self.config.modules.log_tamper.enabled {
+            let mut lt = LogTamperModule::new(self.config.modules.log_tamper.clone());
+            lt.init()?;
+            let cancel_token = lt.cancel_token();
+            lt.start().await?;
+            tracing::info!("ログファイル改ざん検知モジュールを起動しました");
             Some(cancel_token)
         } else {
             None
@@ -153,6 +166,10 @@ impl Daemon {
         if let Some(cancel_token) = cm_cancel_token {
             cancel_token.cancel();
             tracing::info!("Cron ジョブ改ざん検知モジュールを停止しました");
+        }
+        if let Some(cancel_token) = lt_cancel_token {
+            cancel_token.cancel();
+            tracing::info!("ログファイル改ざん検知モジュールを停止しました");
         }
         if let Some(cancel_token) = ua_cancel_token {
             cancel_token.cancel();
