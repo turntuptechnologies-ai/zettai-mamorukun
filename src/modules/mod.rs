@@ -1,4 +1,5 @@
 pub mod cron_monitor;
+pub mod dns_monitor;
 pub mod file_integrity;
 pub mod firewall_monitor;
 pub mod kernel_module;

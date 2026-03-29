@@ -60,6 +60,10 @@ pub struct ModulesConfig {
     /// ファイアウォールルール監視モジュールの設定
     #[serde(default)]
     pub firewall_monitor: FirewallMonitorConfig,
+
+    /// DNS設定改ざん検知モジュールの設定
+    #[serde(default)]
+    pub dns_monitor: DnsMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -331,6 +335,45 @@ impl Default for SystemdServiceConfig {
     }
 }
 
+/// DNS設定改ざん検知モジュールの設定
+#[derive(Debug, Deserialize, Clone)]
+pub struct DnsMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "DnsMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象パスのリスト
+    #[serde(default = "DnsMonitorConfig::default_watch_paths")]
+    pub watch_paths: Vec<PathBuf>,
+}
+
+impl DnsMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_watch_paths() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/etc/resolv.conf"),
+            PathBuf::from("/etc/hosts"),
+        ]
+    }
+}
+
+impl Default for DnsMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            watch_paths: Self::default_watch_paths(),
+        }
+    }
+}
+
 /// ファイアウォールルール監視モジュールの設定
 #[derive(Debug, Deserialize, Clone)]
 pub struct FirewallMonitorConfig {
@@ -551,6 +594,28 @@ watch_paths = ["/etc/systemd/system/"]
         assert!(config.modules.systemd_service.enabled);
         assert_eq!(config.modules.systemd_service.scan_interval_secs, 60);
         assert_eq!(config.modules.systemd_service.watch_paths.len(), 1);
+    }
+
+    #[test]
+    fn test_dns_monitor_config_defaults() {
+        let config: AppConfig = toml::from_str("").unwrap();
+        assert!(!config.modules.dns_monitor.enabled);
+        assert_eq!(config.modules.dns_monitor.scan_interval_secs, 30);
+        assert_eq!(config.modules.dns_monitor.watch_paths.len(), 2);
+    }
+
+    #[test]
+    fn test_dns_monitor_config_custom() {
+        let toml_str = r#"
+[modules.dns_monitor]
+enabled = true
+scan_interval_secs = 15
+watch_paths = ["/etc/resolv.conf"]
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.modules.dns_monitor.enabled);
+        assert_eq!(config.modules.dns_monitor.scan_interval_secs, 15);
+        assert_eq!(config.modules.dns_monitor.watch_paths.len(), 1);
     }
 
     #[test]
