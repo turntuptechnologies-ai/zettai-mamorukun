@@ -199,6 +199,34 @@ fn test_config_user_account_disabled_by_default() {
 }
 
 #[test]
+fn test_config_with_log_tamper_section() {
+    use std::io::Write;
+    let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+    write!(
+        tmpfile,
+        r#"
+[modules.log_tamper]
+enabled = true
+scan_interval_secs = 15
+watch_paths = ["/var/log/syslog", "/var/log/auth.log"]
+"#
+    )
+    .unwrap();
+    let config = AppConfig::load(tmpfile.path()).unwrap();
+    assert!(config.modules.log_tamper.enabled);
+    assert_eq!(config.modules.log_tamper.scan_interval_secs, 15);
+    assert_eq!(config.modules.log_tamper.watch_paths.len(), 2);
+}
+
+#[test]
+fn test_config_log_tamper_disabled_by_default() {
+    let config = AppConfig::load(Path::new("/tmp/nonexistent-zettai-config.toml")).unwrap();
+    assert!(!config.modules.log_tamper.enabled);
+    assert_eq!(config.modules.log_tamper.scan_interval_secs, 30);
+    assert_eq!(config.modules.log_tamper.watch_paths.len(), 4);
+}
+
+#[test]
 fn test_config_file_integrity_disabled_by_default() {
     let config = AppConfig::load(Path::new("/tmp/nonexistent-zettai-config.toml")).unwrap();
     assert!(!config.modules.file_integrity.enabled);

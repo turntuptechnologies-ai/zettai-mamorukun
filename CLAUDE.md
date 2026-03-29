@@ -80,6 +80,7 @@ src/
     cron_monitor.rs    # Cron ジョブ改ざん検知モジュール
     file_integrity.rs  # ファイル整合性監視モジュール
     kernel_module.rs   # カーネルモジュール監視モジュール
+    log_tamper.rs      # ログファイル改ざん検知モジュール
     process_monitor.rs # プロセス異常検知モジュール
     user_account.rs    # ユーザーアカウント監視モジュール
 tests/
