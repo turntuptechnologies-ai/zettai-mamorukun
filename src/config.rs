@@ -40,6 +40,10 @@ pub struct ModulesConfig {
     /// カーネルモジュール監視モジュールの設定
     #[serde(default)]
     pub kernel_module: KernelModuleConfig,
+
+    /// Cron ジョブ改ざん検知モジュールの設定
+    #[serde(default)]
+    pub cron_monitor: CronMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -137,6 +141,50 @@ impl Default for KernelModuleConfig {
         Self {
             enabled: false,
             scan_interval_secs: Self::default_scan_interval_secs(),
+        }
+    }
+}
+
+/// Cron ジョブ改ざん検知モジュールの設定
+#[derive(Debug, Deserialize, Clone)]
+pub struct CronMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "CronMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象パスのリスト
+    #[serde(default = "CronMonitorConfig::default_watch_paths")]
+    pub watch_paths: Vec<PathBuf>,
+}
+
+impl CronMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        120
+    }
+
+    fn default_watch_paths() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/etc/crontab"),
+            PathBuf::from("/etc/cron.d"),
+            PathBuf::from("/etc/cron.hourly"),
+            PathBuf::from("/etc/cron.daily"),
+            PathBuf::from("/etc/cron.weekly"),
+            PathBuf::from("/etc/cron.monthly"),
+            PathBuf::from("/var/spool/cron/crontabs"),
+        ]
+    }
+}
+
+impl Default for CronMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            watch_paths: Self::default_watch_paths(),
         }
     }
 }
@@ -274,5 +322,27 @@ log_level = "warn"
         .unwrap();
         let config = AppConfig::load(tmpfile.path()).unwrap();
         assert_eq!(config.general.log_level, "warn");
+    }
+
+    #[test]
+    fn test_cron_monitor_config_defaults() {
+        let config: AppConfig = toml::from_str("").unwrap();
+        assert!(!config.modules.cron_monitor.enabled);
+        assert_eq!(config.modules.cron_monitor.scan_interval_secs, 120);
+        assert_eq!(config.modules.cron_monitor.watch_paths.len(), 7);
+    }
+
+    #[test]
+    fn test_cron_monitor_config_custom() {
+        let toml_str = r#"
+[modules.cron_monitor]
+enabled = true
+scan_interval_secs = 60
+watch_paths = ["/etc/crontab", "/etc/cron.d"]
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.modules.cron_monitor.enabled);
+        assert_eq!(config.modules.cron_monitor.scan_interval_secs, 60);
+        assert_eq!(config.modules.cron_monitor.watch_paths.len(), 2);
     }
 }

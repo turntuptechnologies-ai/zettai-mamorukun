@@ -1,3 +1,4 @@
+pub mod cron_monitor;
 pub mod file_integrity;
 pub mod kernel_module;
 pub mod process_monitor;
