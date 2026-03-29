@@ -59,6 +59,14 @@ scan_interval_secs = 60
 # 監視対象パスのリスト
 watch_paths = ["/proc/net/ip_tables_names", "/proc/net/ip6_tables_names", "/proc/net/ip_tables_targets", "/proc/net/ip_tables_matches", "/proc/net/ip6_tables_targets", "/proc/net/ip6_tables_matches"]
 
+[modules.dns_monitor]
+# DNS設定改ざん検知モジュールの有効/無効
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 30
+# 監視対象パスのリスト
+watch_paths = ["/etc/resolv.conf", "/etc/hosts"]
+
 [modules.user_account]
 # ユーザーアカウント監視モジュールの有効/無効
 enabled = false

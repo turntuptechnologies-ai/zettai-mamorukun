@@ -3,6 +3,7 @@ use crate::core::health::HealthChecker;
 use crate::error::AppError;
 use crate::modules::Module;
 use crate::modules::cron_monitor::CronMonitorModule;
+use crate::modules::dns_monitor::DnsMonitorModule;
 use crate::modules::file_integrity::FileIntegrityModule;
 use crate::modules::firewall_monitor::FirewallMonitorModule;
 use crate::modules::kernel_module::KernelModuleMonitor;
@@ -120,6 +121,18 @@ impl Daemon {
             None
         };
 
+        // DNS設定改ざん検知モジュールの初期化と起動
+        let dns_cancel_token = if self.config.modules.dns_monitor.enabled {
+            let mut dns = DnsMonitorModule::new(self.config.modules.dns_monitor.clone());
+            dns.init()?;
+            let cancel_token = dns.cancel_token();
+            dns.start().await?;
+            tracing::info!("DNS設定改ざん検知モジュールを起動しました");
+            Some(cancel_token)
+        } else {
+            None
+        };
+
         // ユーザーアカウント監視モジュールの初期化と起動
         let ua_cancel_token = if self.config.modules.user_account.enabled {
             let mut ua = UserAccountModule::new(self.config.modules.user_account.clone());
@@ -204,6 +217,10 @@ impl Daemon {
         if let Some(cancel_token) = fw_cancel_token {
             cancel_token.cancel();
             tracing::info!("ファイアウォールルール監視モジュールを停止しました");
+        }
+        if let Some(cancel_token) = dns_cancel_token {
+            cancel_token.cancel();
+            tracing::info!("DNS設定改ざん検知モジュールを停止しました");
         }
         if let Some(cancel_token) = ua_cancel_token {
             cancel_token.cancel();

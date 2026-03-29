@@ -78,6 +78,7 @@ src/
   modules/
     mod.rs             # モジュールトレイト・レジストリ
     cron_monitor.rs    # Cron ジョブ改ざん検知モジュール
+    dns_monitor.rs     # DNS設定改ざん検知モジュール
     file_integrity.rs  # ファイル整合性監視モジュール
     firewall_monitor.rs # ファイアウォールルール監視モジュール
     kernel_module.rs   # カーネルモジュール監視モジュール
