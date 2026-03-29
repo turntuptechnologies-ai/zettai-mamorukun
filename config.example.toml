@@ -21,6 +21,12 @@ scan_interval_secs = 60
 # 不審とみなすパスのリスト
 suspicious_paths = ["/tmp", "/dev/shm", "/var/tmp"]
 
+[modules.kernel_module]
+# カーネルモジュール監視モジュールの有効/無効
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 120
+
 [health]
 # ハートビート（定期的なヘルスチェックログ出力）の有効/無効
 enabled = true

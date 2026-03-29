@@ -78,6 +78,7 @@ src/
   modules/
     mod.rs             # モジュールトレイト・レジストリ
     file_integrity.rs  # ファイル整合性監視モジュール
+    kernel_module.rs   # カーネルモジュール監視モジュール
     process_monitor.rs # プロセス異常検知モジュール
 tests/
   integration_test.rs  # 統合テスト
