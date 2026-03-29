@@ -95,6 +95,31 @@ suspicious_paths = ["/tmp", "/dev/shm"]
 }
 
 #[test]
+fn test_config_with_kernel_module_section() {
+    use std::io::Write;
+    let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+    write!(
+        tmpfile,
+        r#"
+[modules.kernel_module]
+enabled = true
+scan_interval_secs = 60
+"#
+    )
+    .unwrap();
+    let config = AppConfig::load(tmpfile.path()).unwrap();
+    assert!(config.modules.kernel_module.enabled);
+    assert_eq!(config.modules.kernel_module.scan_interval_secs, 60);
+}
+
+#[test]
+fn test_config_kernel_module_disabled_by_default() {
+    let config = AppConfig::load(Path::new("/tmp/nonexistent-zettai-config.toml")).unwrap();
+    assert!(!config.modules.kernel_module.enabled);
+    assert_eq!(config.modules.kernel_module.scan_interval_secs, 120);
+}
+
+#[test]
 fn test_config_process_monitor_disabled_by_default() {
     let config = AppConfig::load(Path::new("/tmp/nonexistent-zettai-config.toml")).unwrap();
     assert!(!config.modules.process_monitor.enabled);

@@ -36,6 +36,10 @@ pub struct ModulesConfig {
     /// プロセス異常検知モジュールの設定
     #[serde(default)]
     pub process_monitor: ProcessMonitorConfig,
+
+    /// カーネルモジュール監視モジュールの設定
+    #[serde(default)]
+    pub kernel_module: KernelModuleConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -106,6 +110,33 @@ impl Default for ProcessMonitorConfig {
             enabled: false,
             scan_interval_secs: Self::default_scan_interval_secs(),
             suspicious_paths: Self::default_suspicious_paths(),
+        }
+    }
+}
+
+/// カーネルモジュール監視モジュールの設定
+#[derive(Debug, Deserialize, Clone)]
+pub struct KernelModuleConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "KernelModuleConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+}
+
+impl KernelModuleConfig {
+    fn default_scan_interval_secs() -> u64 {
+        120
+    }
+}
+
+impl Default for KernelModuleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
         }
     }
 }

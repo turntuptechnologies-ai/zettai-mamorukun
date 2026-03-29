@@ -3,6 +3,7 @@ use crate::core::health::HealthChecker;
 use crate::error::AppError;
 use crate::modules::Module;
 use crate::modules::file_integrity::FileIntegrityModule;
+use crate::modules::kernel_module::KernelModuleMonitor;
 use crate::modules::process_monitor::ProcessMonitorModule;
 use std::time::Duration;
 use tokio::signal::unix::{SignalKind, signal};
@@ -49,6 +50,18 @@ impl Daemon {
             let cancel_token = pm.cancel_token();
             pm.start().await?;
             tracing::info!("プロセス異常検知モジュールを起動しました");
+            Some(cancel_token)
+        } else {
+            None
+        };
+
+        // カーネルモジュール監視モジュールの初期化と起動
+        let km_cancel_token = if self.config.modules.kernel_module.enabled {
+            let mut km = KernelModuleMonitor::new(self.config.modules.kernel_module.clone());
+            km.init()?;
+            let cancel_token = km.cancel_token();
+            km.start().await?;
+            tracing::info!("カーネルモジュール監視モジュールを起動しました");
             Some(cancel_token)
         } else {
             None
@@ -106,6 +119,10 @@ impl Daemon {
         if let Some(cancel_token) = pm_cancel_token {
             cancel_token.cancel();
             tracing::info!("プロセス異常検知モジュールを停止しました");
+        }
+        if let Some(cancel_token) = km_cancel_token {
+            cancel_token.cancel();
+            tracing::info!("カーネルモジュール監視モジュールを停止しました");
         }
 
         tracing::info!("シャットダウン完了");

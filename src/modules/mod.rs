@@ -1,4 +1,5 @@
 pub mod file_integrity;
+pub mod kernel_module;
 pub mod process_monitor;
 
 use crate::error::AppError;
