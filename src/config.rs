@@ -56,6 +56,10 @@ pub struct ModulesConfig {
     /// systemd サービス監視モジュールの設定
     #[serde(default)]
     pub systemd_service: SystemdServiceConfig,
+
+    /// ファイアウォールルール監視モジュールの設定
+    #[serde(default)]
+    pub firewall_monitor: FirewallMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -327,6 +331,49 @@ impl Default for SystemdServiceConfig {
     }
 }
 
+/// ファイアウォールルール監視モジュールの設定
+#[derive(Debug, Deserialize, Clone)]
+pub struct FirewallMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "FirewallMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象パスのリスト
+    #[serde(default = "FirewallMonitorConfig::default_watch_paths")]
+    pub watch_paths: Vec<PathBuf>,
+}
+
+impl FirewallMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        60
+    }
+
+    fn default_watch_paths() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/proc/net/ip_tables_names"),
+            PathBuf::from("/proc/net/ip6_tables_names"),
+            PathBuf::from("/proc/net/ip_tables_targets"),
+            PathBuf::from("/proc/net/ip_tables_matches"),
+            PathBuf::from("/proc/net/ip6_tables_targets"),
+            PathBuf::from("/proc/net/ip6_tables_matches"),
+        ]
+    }
+}
+
+impl Default for FirewallMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            watch_paths: Self::default_watch_paths(),
+        }
+    }
+}
+
 /// ヘルスチェック設定
 #[derive(Debug, Deserialize)]
 pub struct HealthConfig {
@@ -504,5 +551,27 @@ watch_paths = ["/etc/systemd/system/"]
         assert!(config.modules.systemd_service.enabled);
         assert_eq!(config.modules.systemd_service.scan_interval_secs, 60);
         assert_eq!(config.modules.systemd_service.watch_paths.len(), 1);
+    }
+
+    #[test]
+    fn test_firewall_monitor_config_defaults() {
+        let config: AppConfig = toml::from_str("").unwrap();
+        assert!(!config.modules.firewall_monitor.enabled);
+        assert_eq!(config.modules.firewall_monitor.scan_interval_secs, 60);
+        assert_eq!(config.modules.firewall_monitor.watch_paths.len(), 6);
+    }
+
+    #[test]
+    fn test_firewall_monitor_config_custom() {
+        let toml_str = r#"
+[modules.firewall_monitor]
+enabled = true
+scan_interval_secs = 30
+watch_paths = ["/proc/net/ip_tables_names", "/proc/net/ip6_tables_names"]
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.modules.firewall_monitor.enabled);
+        assert_eq!(config.modules.firewall_monitor.scan_interval_secs, 30);
+        assert_eq!(config.modules.firewall_monitor.watch_paths.len(), 2);
     }
 }

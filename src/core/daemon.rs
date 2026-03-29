@@ -4,6 +4,7 @@ use crate::error::AppError;
 use crate::modules::Module;
 use crate::modules::cron_monitor::CronMonitorModule;
 use crate::modules::file_integrity::FileIntegrityModule;
+use crate::modules::firewall_monitor::FirewallMonitorModule;
 use crate::modules::kernel_module::KernelModuleMonitor;
 use crate::modules::log_tamper::LogTamperModule;
 use crate::modules::process_monitor::ProcessMonitorModule;
@@ -107,6 +108,18 @@ impl Daemon {
             None
         };
 
+        // ファイアウォールルール監視モジュールの初期化と起動
+        let fw_cancel_token = if self.config.modules.firewall_monitor.enabled {
+            let mut fw = FirewallMonitorModule::new(self.config.modules.firewall_monitor.clone());
+            fw.init()?;
+            let cancel_token = fw.cancel_token();
+            fw.start().await?;
+            tracing::info!("ファイアウォールルール監視モジュールを起動しました");
+            Some(cancel_token)
+        } else {
+            None
+        };
+
         // ユーザーアカウント監視モジュールの初期化と起動
         let ua_cancel_token = if self.config.modules.user_account.enabled {
             let mut ua = UserAccountModule::new(self.config.modules.user_account.clone());
@@ -187,6 +200,10 @@ impl Daemon {
         if let Some(cancel_token) = ss_cancel_token {
             cancel_token.cancel();
             tracing::info!("systemd サービス監視モジュールを停止しました");
+        }
+        if let Some(cancel_token) = fw_cancel_token {
+            cancel_token.cancel();
+            tracing::info!("ファイアウォールルール監視モジュールを停止しました");
         }
         if let Some(cancel_token) = ua_cancel_token {
             cancel_token.cancel();
