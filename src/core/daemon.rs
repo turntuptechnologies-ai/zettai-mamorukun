@@ -9,6 +9,7 @@ use crate::modules::firewall_monitor::FirewallMonitorModule;
 use crate::modules::kernel_module::KernelModuleMonitor;
 use crate::modules::log_tamper::LogTamperModule;
 use crate::modules::process_monitor::ProcessMonitorModule;
+use crate::modules::ssh_key_monitor::SshKeyMonitorModule;
 use crate::modules::systemd_service::SystemdServiceModule;
 use crate::modules::user_account::UserAccountModule;
 use std::time::Duration;
@@ -133,6 +134,18 @@ impl Daemon {
             None
         };
 
+        // SSH公開鍵ファイル監視モジュールの初期化と起動
+        let ssh_cancel_token = if self.config.modules.ssh_key_monitor.enabled {
+            let mut ssh = SshKeyMonitorModule::new(self.config.modules.ssh_key_monitor.clone());
+            ssh.init()?;
+            let cancel_token = ssh.cancel_token();
+            ssh.start().await?;
+            tracing::info!("SSH公開鍵ファイル監視モジュールを起動しました");
+            Some(cancel_token)
+        } else {
+            None
+        };
+
         // ユーザーアカウント監視モジュールの初期化と起動
         let ua_cancel_token = if self.config.modules.user_account.enabled {
             let mut ua = UserAccountModule::new(self.config.modules.user_account.clone());
@@ -221,6 +234,10 @@ impl Daemon {
         if let Some(cancel_token) = dns_cancel_token {
             cancel_token.cancel();
             tracing::info!("DNS設定改ざん検知モジュールを停止しました");
+        }
+        if let Some(cancel_token) = ssh_cancel_token {
+            cancel_token.cancel();
+            tracing::info!("SSH公開鍵ファイル監視モジュールを停止しました");
         }
         if let Some(cancel_token) = ua_cancel_token {
             cancel_token.cancel();

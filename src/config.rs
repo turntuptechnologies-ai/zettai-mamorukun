@@ -64,6 +64,10 @@ pub struct ModulesConfig {
     /// DNS設定改ざん検知モジュールの設定
     #[serde(default)]
     pub dns_monitor: DnsMonitorConfig,
+
+    /// SSH公開鍵ファイル監視モジュールの設定
+    #[serde(default)]
+    pub ssh_key_monitor: SshKeyMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -417,6 +421,42 @@ impl Default for FirewallMonitorConfig {
     }
 }
 
+/// SSH公開鍵ファイル監視モジュールの設定
+#[derive(Debug, Deserialize, Clone)]
+pub struct SshKeyMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "SshKeyMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象の authorized_keys ファイルパスのリスト
+    #[serde(default = "SshKeyMonitorConfig::default_watch_paths")]
+    pub watch_paths: Vec<PathBuf>,
+}
+
+impl SshKeyMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        120
+    }
+
+    fn default_watch_paths() -> Vec<PathBuf> {
+        vec![PathBuf::from("/root/.ssh/authorized_keys")]
+    }
+}
+
+impl Default for SshKeyMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            watch_paths: Self::default_watch_paths(),
+        }
+    }
+}
+
 /// ヘルスチェック設定
 #[derive(Debug, Deserialize)]
 pub struct HealthConfig {
@@ -638,5 +678,31 @@ watch_paths = ["/proc/net/ip_tables_names", "/proc/net/ip6_tables_names"]
         assert!(config.modules.firewall_monitor.enabled);
         assert_eq!(config.modules.firewall_monitor.scan_interval_secs, 30);
         assert_eq!(config.modules.firewall_monitor.watch_paths.len(), 2);
+    }
+
+    #[test]
+    fn test_ssh_key_monitor_config_defaults() {
+        let config: AppConfig = toml::from_str("").unwrap();
+        assert!(!config.modules.ssh_key_monitor.enabled);
+        assert_eq!(config.modules.ssh_key_monitor.scan_interval_secs, 120);
+        assert_eq!(config.modules.ssh_key_monitor.watch_paths.len(), 1);
+        assert_eq!(
+            config.modules.ssh_key_monitor.watch_paths[0],
+            PathBuf::from("/root/.ssh/authorized_keys")
+        );
+    }
+
+    #[test]
+    fn test_ssh_key_monitor_config_custom() {
+        let toml_str = r#"
+[modules.ssh_key_monitor]
+enabled = true
+scan_interval_secs = 60
+watch_paths = ["/root/.ssh/authorized_keys", "/home/admin/.ssh/authorized_keys"]
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.modules.ssh_key_monitor.enabled);
+        assert_eq!(config.modules.ssh_key_monitor.scan_interval_secs, 60);
+        assert_eq!(config.modules.ssh_key_monitor.watch_paths.len(), 2);
     }
 }
