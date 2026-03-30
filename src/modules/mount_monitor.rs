@@ -8,6 +8,7 @@
 //! - マウントオプションやファイルシステムタイプの変更
 
 use crate::config::MountMonitorConfig;
+use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::Module;
 use std::collections::HashMap;
@@ -42,14 +43,16 @@ impl ChangeReport {
 /// `/proc/mounts` を定期スキャンし、ベースラインとの差分を検知する。
 pub struct MountMonitorModule {
     config: MountMonitorConfig,
+    event_bus: Option<EventBus>,
     cancel_token: CancellationToken,
 }
 
 impl MountMonitorModule {
     /// 新しいマウントポイント監視モジュールを作成する
-    pub fn new(config: MountMonitorConfig) -> Self {
+    pub fn new(config: MountMonitorConfig, event_bus: Option<EventBus>) -> Self {
         Self {
             config,
+            event_bus,
             cancel_token: CancellationToken::new(),
         }
     }
@@ -172,6 +175,7 @@ impl Module for MountMonitorModule {
         let mounts_path = self.config.mounts_path.clone();
         let scan_interval_secs = self.config.scan_interval_secs;
         let cancel_token = self.cancel_token.clone();
+        let event_bus = self.event_bus.clone();
 
         tokio::spawn(async move {
             let mut interval =
@@ -208,6 +212,17 @@ impl Module for MountMonitorModule {
                                     change = "added",
                                     "新規マウントポイントを検知しました"
                                 );
+                                if let Some(ref bus) = event_bus {
+                                    bus.publish(
+                                        SecurityEvent::new(
+                                            "mount_added",
+                                            Severity::Warning,
+                                            "mount_monitor",
+                                            format!("新規マウントポイントを検知しました: {}", entry.mount_point),
+                                        )
+                                        .with_details(entry.mount_point.clone()),
+                                    );
+                                }
                             }
                             for entry in &report.removed {
                                 tracing::warn!(
@@ -217,6 +232,17 @@ impl Module for MountMonitorModule {
                                     change = "removed",
                                     "マウントポイントの削除を検知しました"
                                 );
+                                if let Some(ref bus) = event_bus {
+                                    bus.publish(
+                                        SecurityEvent::new(
+                                            "mount_removed",
+                                            Severity::Warning,
+                                            "mount_monitor",
+                                            format!("マウントポイントの削除を検知しました: {}", entry.mount_point),
+                                        )
+                                        .with_details(entry.mount_point.clone()),
+                                    );
+                                }
                             }
                             for (old, new) in &report.modified {
                                 tracing::warn!(
@@ -230,6 +256,17 @@ impl Module for MountMonitorModule {
                                     change = "modified",
                                     "マウントポイントの変更を検知しました"
                                 );
+                                if let Some(ref bus) = event_bus {
+                                    bus.publish(
+                                        SecurityEvent::new(
+                                            "mount_modified",
+                                            Severity::Warning,
+                                            "mount_monitor",
+                                            format!("マウントポイントの変更を検知しました: {}", new.mount_point),
+                                        )
+                                        .with_details(new.mount_point.clone()),
+                                    );
+                                }
                             }
                             // ベースラインを更新
                             baseline = current;
@@ -508,7 +545,7 @@ mod tests {
             scan_interval_secs: 0,
             mounts_path: PathBuf::from("/proc/mounts"),
         };
-        let mut module = MountMonitorModule::new(config);
+        let mut module = MountMonitorModule::new(config, None);
         let result = module.init();
         assert!(result.is_err());
     }
@@ -520,7 +557,7 @@ mod tests {
             scan_interval_secs: 30,
             mounts_path: PathBuf::from("/proc/mounts"),
         };
-        let mut module = MountMonitorModule::new(config);
+        let mut module = MountMonitorModule::new(config, None);
         let result = module.init();
         assert!(result.is_ok());
     }
@@ -557,7 +594,7 @@ mod tests {
             scan_interval_secs: 3600,
             mounts_path: tmpfile.path().to_path_buf(),
         };
-        let mut module = MountMonitorModule::new(config);
+        let mut module = MountMonitorModule::new(config, None);
         module.init().unwrap();
 
         let cancel_token = module.cancel_token();

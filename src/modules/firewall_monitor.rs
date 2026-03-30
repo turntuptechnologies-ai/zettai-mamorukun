@@ -8,6 +8,7 @@
 //! - 削除されたファイアウォール関連ファイル
 
 use crate::config::FirewallMonitorConfig;
+use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::Module;
 use sha2::{Digest, Sha256};
@@ -34,15 +35,17 @@ impl ChangeReport {
 /// procfs 上のファイアウォール関連ファイルを定期スキャンし、ベースラインとの差分を検知する。
 pub struct FirewallMonitorModule {
     config: FirewallMonitorConfig,
+    event_bus: Option<EventBus>,
     baseline: Option<HashMap<PathBuf, String>>,
     cancel_token: CancellationToken,
 }
 
 impl FirewallMonitorModule {
     /// 新しいファイアウォールルール監視モジュールを作成する
-    pub fn new(config: FirewallMonitorConfig) -> Self {
+    pub fn new(config: FirewallMonitorConfig, event_bus: Option<EventBus>) -> Self {
         Self {
             config,
+            event_bus,
             baseline: None,
             cancel_token: CancellationToken::new(),
         }
@@ -159,6 +162,7 @@ impl Module for FirewallMonitorModule {
         let watch_paths = self.config.watch_paths.clone();
         let scan_interval_secs = self.config.scan_interval_secs;
         let cancel_token = self.cancel_token.clone();
+        let event_bus = self.event_bus.clone();
 
         tokio::spawn(async move {
             let mut interval =
@@ -179,12 +183,45 @@ impl Module for FirewallMonitorModule {
                         if report.has_changes() {
                             for path in &report.modified {
                                 tracing::warn!(path = %path.display(), change = "modified", "ファイアウォールルールの変更を検知しました");
+                                if let Some(ref bus) = event_bus {
+                                    bus.publish(
+                                        SecurityEvent::new(
+                                            "firewall_modified",
+                                            Severity::Warning,
+                                            "firewall_monitor",
+                                            format!("ファイアウォールルールの変更を検知しました: {}", path.display()),
+                                        )
+                                        .with_details(path.display().to_string()),
+                                    );
+                                }
                             }
                             for path in &report.added {
                                 tracing::warn!(path = %path.display(), change = "added", "ファイアウォールルール関連ファイルの追加を検知しました");
+                                if let Some(ref bus) = event_bus {
+                                    bus.publish(
+                                        SecurityEvent::new(
+                                            "firewall_added",
+                                            Severity::Warning,
+                                            "firewall_monitor",
+                                            format!("ファイアウォールルール関連ファイルの追加を検知しました: {}", path.display()),
+                                        )
+                                        .with_details(path.display().to_string()),
+                                    );
+                                }
                             }
                             for path in &report.removed {
                                 tracing::warn!(path = %path.display(), change = "removed", "ファイアウォールルール関連ファイルの削除を検知しました");
+                                if let Some(ref bus) = event_bus {
+                                    bus.publish(
+                                        SecurityEvent::new(
+                                            "firewall_removed",
+                                            Severity::Warning,
+                                            "firewall_monitor",
+                                            format!("ファイアウォールルール関連ファイルの削除を検知しました: {}", path.display()),
+                                        )
+                                        .with_details(path.display().to_string()),
+                                    );
+                                }
                             }
                             // ベースラインを更新
                             baseline = current;
@@ -386,7 +423,7 @@ mod tests {
             scan_interval_secs: 0,
             watch_paths: vec![],
         };
-        let mut module = FirewallMonitorModule::new(config);
+        let mut module = FirewallMonitorModule::new(config, None);
         let result = module.init();
         assert!(result.is_err());
     }
@@ -398,7 +435,7 @@ mod tests {
             scan_interval_secs: 60,
             watch_paths: vec![PathBuf::from("/proc/net/ip_tables_names")],
         };
-        let mut module = FirewallMonitorModule::new(config);
+        let mut module = FirewallMonitorModule::new(config, None);
         let result = module.init();
         assert!(result.is_ok());
     }
@@ -413,7 +450,7 @@ mod tests {
             scan_interval_secs: 3600,
             watch_paths: vec![tmpfile.path().to_path_buf()],
         };
-        let mut module = FirewallMonitorModule::new(config);
+        let mut module = FirewallMonitorModule::new(config, None);
         module.init().unwrap();
 
         let cancel_token = module.cancel_token();

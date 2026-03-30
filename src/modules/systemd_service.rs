@@ -8,6 +8,7 @@
 //! - 削除された systemd ユニットファイル
 
 use crate::config::SystemdServiceConfig;
+use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::Module;
 use sha2::{Digest, Sha256};
@@ -35,15 +36,17 @@ impl ChangeReport {
 /// systemd ユニットファイルを定期スキャンし、ベースラインとの差分を検知する。
 pub struct SystemdServiceModule {
     config: SystemdServiceConfig,
+    event_bus: Option<EventBus>,
     baseline: Option<HashMap<PathBuf, String>>,
     cancel_token: CancellationToken,
 }
 
 impl SystemdServiceModule {
     /// 新しい systemd サービス監視モジュールを作成する
-    pub fn new(config: SystemdServiceConfig) -> Self {
+    pub fn new(config: SystemdServiceConfig, event_bus: Option<EventBus>) -> Self {
         Self {
             config,
+            event_bus,
             baseline: None,
             cancel_token: CancellationToken::new(),
         }
@@ -194,6 +197,7 @@ impl Module for SystemdServiceModule {
         let watch_paths = self.config.watch_paths.clone();
         let scan_interval_secs = self.config.scan_interval_secs;
         let cancel_token = self.cancel_token.clone();
+        let event_bus = self.event_bus.clone();
 
         tokio::spawn(async move {
             let mut interval =
@@ -214,12 +218,45 @@ impl Module for SystemdServiceModule {
                         if report.has_changes() {
                             for path in &report.modified {
                                 tracing::warn!(path = %path.display(), change = "modified", "systemd ユニットファイルの変更を検知しました");
+                                if let Some(ref bus) = event_bus {
+                                    bus.publish(
+                                        SecurityEvent::new(
+                                            "systemd_modified",
+                                            Severity::Warning,
+                                            "systemd_service",
+                                            format!("systemd ユニットファイルの変更を検知しました: {}", path.display()),
+                                        )
+                                        .with_details(path.display().to_string()),
+                                    );
+                                }
                             }
                             for path in &report.added {
                                 tracing::warn!(path = %path.display(), change = "added", "systemd ユニットファイルの追加を検知しました");
+                                if let Some(ref bus) = event_bus {
+                                    bus.publish(
+                                        SecurityEvent::new(
+                                            "systemd_added",
+                                            Severity::Warning,
+                                            "systemd_service",
+                                            format!("systemd ユニットファイルの追加を検知しました: {}", path.display()),
+                                        )
+                                        .with_details(path.display().to_string()),
+                                    );
+                                }
                             }
                             for path in &report.removed {
                                 tracing::warn!(path = %path.display(), change = "removed", "systemd ユニットファイルの削除を検知しました");
+                                if let Some(ref bus) = event_bus {
+                                    bus.publish(
+                                        SecurityEvent::new(
+                                            "systemd_removed",
+                                            Severity::Warning,
+                                            "systemd_service",
+                                            format!("systemd ユニットファイルの削除を検知しました: {}", path.display()),
+                                        )
+                                        .with_details(path.display().to_string()),
+                                    );
+                                }
                             }
                             // ベースラインを更新
                             baseline = current;
@@ -440,7 +477,7 @@ mod tests {
             scan_interval_secs: 0,
             watch_paths: vec![],
         };
-        let mut module = SystemdServiceModule::new(config);
+        let mut module = SystemdServiceModule::new(config, None);
         let result = module.init();
         assert!(result.is_err());
     }
@@ -453,7 +490,7 @@ mod tests {
             scan_interval_secs: 120,
             watch_paths: vec![dir.path().to_path_buf()],
         };
-        let mut module = SystemdServiceModule::new(config);
+        let mut module = SystemdServiceModule::new(config, None);
         let result = module.init();
         assert!(result.is_ok());
     }
@@ -465,7 +502,7 @@ mod tests {
             scan_interval_secs: 120,
             watch_paths: vec![PathBuf::from("/nonexistent-path-zettai-systemd-test")],
         };
-        let mut module = SystemdServiceModule::new(config);
+        let mut module = SystemdServiceModule::new(config, None);
         let result = module.init();
         assert!(result.is_ok());
         assert!(module.config.watch_paths.is_empty());
@@ -483,7 +520,7 @@ mod tests {
             scan_interval_secs: 120,
             watch_paths: vec![non_canonical],
         };
-        let mut module = SystemdServiceModule::new(config);
+        let mut module = SystemdServiceModule::new(config, None);
         let result = module.init();
         assert!(result.is_ok());
         assert_eq!(module.config.watch_paths.len(), 1);
@@ -502,7 +539,7 @@ mod tests {
             scan_interval_secs: 3600,
             watch_paths: vec![dir.path().to_path_buf()],
         };
-        let mut module = SystemdServiceModule::new(config);
+        let mut module = SystemdServiceModule::new(config, None);
         module.init().unwrap();
 
         let cancel_token = module.cancel_token();

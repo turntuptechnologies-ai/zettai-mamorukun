@@ -8,6 +8,7 @@
 //! - 監視対象ファイルの追加・削除
 
 use crate::config::DnsMonitorConfig;
+use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::Module;
 use sha2::{Digest, Sha256};
@@ -34,15 +35,17 @@ impl ChangeReport {
 /// DNS関連の設定ファイルを定期スキャンし、ベースラインとの差分を検知する。
 pub struct DnsMonitorModule {
     config: DnsMonitorConfig,
+    event_bus: Option<EventBus>,
     baseline: Option<HashMap<PathBuf, String>>,
     cancel_token: CancellationToken,
 }
 
 impl DnsMonitorModule {
     /// 新しいDNS設定改ざん検知モジュールを作成する
-    pub fn new(config: DnsMonitorConfig) -> Self {
+    pub fn new(config: DnsMonitorConfig, event_bus: Option<EventBus>) -> Self {
         Self {
             config,
+            event_bus,
             baseline: None,
             cancel_token: CancellationToken::new(),
         }
@@ -159,6 +162,7 @@ impl Module for DnsMonitorModule {
         let watch_paths = self.config.watch_paths.clone();
         let scan_interval_secs = self.config.scan_interval_secs;
         let cancel_token = self.cancel_token.clone();
+        let event_bus = self.event_bus.clone();
 
         tokio::spawn(async move {
             let mut interval =
@@ -179,12 +183,45 @@ impl Module for DnsMonitorModule {
                         if report.has_changes() {
                             for path in &report.modified {
                                 tracing::warn!(path = %path.display(), change = "modified", "DNS設定ファイルの変更を検知しました");
+                                if let Some(ref bus) = event_bus {
+                                    bus.publish(
+                                        SecurityEvent::new(
+                                            "dns_modified",
+                                            Severity::Warning,
+                                            "dns_monitor",
+                                            format!("DNS設定ファイルの変更を検知しました: {}", path.display()),
+                                        )
+                                        .with_details(path.display().to_string()),
+                                    );
+                                }
                             }
                             for path in &report.added {
                                 tracing::warn!(path = %path.display(), change = "added", "DNS設定ファイルの追加を検知しました");
+                                if let Some(ref bus) = event_bus {
+                                    bus.publish(
+                                        SecurityEvent::new(
+                                            "dns_added",
+                                            Severity::Warning,
+                                            "dns_monitor",
+                                            format!("DNS設定ファイルの追加を検知しました: {}", path.display()),
+                                        )
+                                        .with_details(path.display().to_string()),
+                                    );
+                                }
                             }
                             for path in &report.removed {
                                 tracing::warn!(path = %path.display(), change = "removed", "DNS設定ファイルの削除を検知しました");
+                                if let Some(ref bus) = event_bus {
+                                    bus.publish(
+                                        SecurityEvent::new(
+                                            "dns_removed",
+                                            Severity::Warning,
+                                            "dns_monitor",
+                                            format!("DNS設定ファイルの削除を検知しました: {}", path.display()),
+                                        )
+                                        .with_details(path.display().to_string()),
+                                    );
+                                }
                             }
                             // ベースラインを更新
                             baseline = current;
@@ -350,7 +387,7 @@ mod tests {
             scan_interval_secs: 0,
             watch_paths: vec![],
         };
-        let mut module = DnsMonitorModule::new(config);
+        let mut module = DnsMonitorModule::new(config, None);
         let result = module.init();
         assert!(result.is_err());
     }
@@ -362,7 +399,7 @@ mod tests {
             scan_interval_secs: 30,
             watch_paths: vec![PathBuf::from("/etc/resolv.conf")],
         };
-        let mut module = DnsMonitorModule::new(config);
+        let mut module = DnsMonitorModule::new(config, None);
         let result = module.init();
         assert!(result.is_ok());
     }
@@ -377,7 +414,7 @@ mod tests {
             scan_interval_secs: 3600,
             watch_paths: vec![tmpfile.path().to_path_buf()],
         };
-        let mut module = DnsMonitorModule::new(config);
+        let mut module = DnsMonitorModule::new(config, None);
         module.init().unwrap();
 
         let cancel_token = module.cancel_token();

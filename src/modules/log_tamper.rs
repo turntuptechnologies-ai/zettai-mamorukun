@@ -20,6 +20,7 @@
 //! 検知として扱われる。
 
 use crate::config::LogTamperConfig;
+use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::Module;
 use std::collections::HashMap;
@@ -69,15 +70,17 @@ impl ChangeReport {
 pub struct LogTamperModule {
     config: LogTamperConfig,
     baseline: Option<HashMap<PathBuf, FileState>>,
+    event_bus: Option<EventBus>,
     cancel_token: CancellationToken,
 }
 
 impl LogTamperModule {
     /// 新しいログファイル改ざん検知モジュールを作成する
-    pub fn new(config: LogTamperConfig) -> Self {
+    pub fn new(config: LogTamperConfig, event_bus: Option<EventBus>) -> Self {
         Self {
             config,
             baseline: None,
+            event_bus,
             cancel_token: CancellationToken::new(),
         }
     }
@@ -223,6 +226,7 @@ impl Module for LogTamperModule {
         let watch_paths = self.config.watch_paths.clone();
         let scan_interval_secs = self.config.scan_interval_secs;
         let cancel_token = self.cancel_token.clone();
+        let event_bus = self.event_bus.clone();
 
         tokio::spawn(async move {
             let mut interval =
@@ -247,6 +251,17 @@ impl Module for LogTamperModule {
                                     change = "size_decreased",
                                     "ログファイルのサイズ減少を検知しました（切り詰め・改ざんの可能性）"
                                 );
+                                if let Some(ref bus) = event_bus {
+                                    bus.publish(
+                                        SecurityEvent::new(
+                                            "log_size_decreased",
+                                            Severity::Warning,
+                                            "log_tamper",
+                                            format!("ログファイルのサイズ減少を検知しました: {}", path.display()),
+                                        )
+                                        .with_details(path.display().to_string()),
+                                    );
+                                }
                             }
                             for path in &report.deleted {
                                 tracing::warn!(
@@ -254,6 +269,17 @@ impl Module for LogTamperModule {
                                     change = "deleted",
                                     "ログファイルの削除を検知しました"
                                 );
+                                if let Some(ref bus) = event_bus {
+                                    bus.publish(
+                                        SecurityEvent::new(
+                                            "log_deleted",
+                                            Severity::Warning,
+                                            "log_tamper",
+                                            format!("ログファイルの削除を検知しました: {}", path.display()),
+                                        )
+                                        .with_details(path.display().to_string()),
+                                    );
+                                }
                             }
                             for path in &report.permission_changed {
                                 tracing::warn!(
@@ -261,6 +287,17 @@ impl Module for LogTamperModule {
                                     change = "permission_changed",
                                     "ログファイルのパーミッション変更を検知しました"
                                 );
+                                if let Some(ref bus) = event_bus {
+                                    bus.publish(
+                                        SecurityEvent::new(
+                                            "log_permission_changed",
+                                            Severity::Warning,
+                                            "log_tamper",
+                                            format!("ログファイルのパーミッション変更を検知しました: {}", path.display()),
+                                        )
+                                        .with_details(path.display().to_string()),
+                                    );
+                                }
                             }
                             for path in &report.rotated {
                                 tracing::info!(
@@ -268,6 +305,17 @@ impl Module for LogTamperModule {
                                     change = "rotated",
                                     "ログファイルのローテーションを検知しました"
                                 );
+                                if let Some(ref bus) = event_bus {
+                                    bus.publish(
+                                        SecurityEvent::new(
+                                            "log_rotated",
+                                            Severity::Info,
+                                            "log_tamper",
+                                            format!("ログファイルのローテーションを検知しました: {}", path.display()),
+                                        )
+                                        .with_details(path.display().to_string()),
+                                    );
+                                }
                             }
                             for path in &report.new_files {
                                 tracing::info!(
@@ -275,6 +323,17 @@ impl Module for LogTamperModule {
                                     change = "new_file",
                                     "新規ログファイルを検知しました"
                                 );
+                                if let Some(ref bus) = event_bus {
+                                    bus.publish(
+                                        SecurityEvent::new(
+                                            "log_new_file",
+                                            Severity::Info,
+                                            "log_tamper",
+                                            format!("新規ログファイルを検知しました: {}", path.display()),
+                                        )
+                                        .with_details(path.display().to_string()),
+                                    );
+                                }
                             }
                             // ベースラインを更新
                             baseline = current;
@@ -479,7 +538,7 @@ mod tests {
             scan_interval_secs: 0,
             watch_paths: vec![],
         };
-        let mut module = LogTamperModule::new(config);
+        let mut module = LogTamperModule::new(config, None);
         let result = module.init();
         assert!(result.is_err());
     }
@@ -495,7 +554,7 @@ mod tests {
             scan_interval_secs: 30,
             watch_paths: vec![file],
         };
-        let mut module = LogTamperModule::new(config);
+        let mut module = LogTamperModule::new(config, None);
         let result = module.init();
         assert!(result.is_ok());
     }
@@ -507,7 +566,7 @@ mod tests {
             scan_interval_secs: 30,
             watch_paths: vec![PathBuf::from("/nonexistent-path-zettai-log-test")],
         };
-        let mut module = LogTamperModule::new(config);
+        let mut module = LogTamperModule::new(config, None);
         let result = module.init();
         assert!(result.is_ok());
         assert!(module.config.watch_paths.is_empty());
@@ -532,7 +591,7 @@ mod tests {
             scan_interval_secs: 30,
             watch_paths: vec![non_canonical],
         };
-        let mut module = LogTamperModule::new(config);
+        let mut module = LogTamperModule::new(config, None);
         let result = module.init();
         assert!(result.is_ok());
         assert_eq!(module.config.watch_paths.len(), 1);
@@ -551,7 +610,7 @@ mod tests {
             scan_interval_secs: 3600,
             watch_paths: vec![file],
         };
-        let mut module = LogTamperModule::new(config);
+        let mut module = LogTamperModule::new(config, None);
         module.init().unwrap();
 
         let cancel_token = module.cancel_token();

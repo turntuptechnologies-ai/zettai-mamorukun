@@ -10,6 +10,7 @@
 //! - ファイル所有者(uid)の変更
 
 use crate::config::SuidSgidMonitorConfig;
+use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::Module;
 use std::collections::HashMap;
@@ -45,14 +46,16 @@ struct SuidSgidSnapshot {
 pub struct SuidSgidMonitorModule {
     config: SuidSgidMonitorConfig,
     cancel_token: CancellationToken,
+    event_bus: Option<EventBus>,
 }
 
 impl SuidSgidMonitorModule {
     /// 新しい SUID/SGID ファイル監視モジュールを作成する
-    pub fn new(config: SuidSgidMonitorConfig) -> Self {
+    pub fn new(config: SuidSgidMonitorConfig, event_bus: Option<EventBus>) -> Self {
         Self {
             config,
             cancel_token: CancellationToken::new(),
+            event_bus,
         }
     }
 
@@ -118,7 +121,11 @@ impl SuidSgidMonitorModule {
 
     /// ベースラインと現在のスナップショットを比較し、変更を検知してログ出力する。
     /// 変更があった場合は `true` を返す。
-    fn detect_and_report(baseline: &SuidSgidSnapshot, current: &SuidSgidSnapshot) -> bool {
+    fn detect_and_report(
+        baseline: &SuidSgidSnapshot,
+        current: &SuidSgidSnapshot,
+        event_bus: &Option<EventBus>,
+    ) -> bool {
         let mut has_changes = false;
 
         // 新規出現の検知
@@ -132,6 +139,17 @@ impl SuidSgidMonitorModule {
                     suid_sgid_type = Self::suid_sgid_type(info.mode),
                     "SUID/SGID ファイルが新たに出現しました"
                 );
+                if let Some(bus) = event_bus {
+                    bus.publish(
+                        SecurityEvent::new(
+                            "suid_sgid_new",
+                            Severity::Critical,
+                            "suid_sgid_monitor",
+                            "SUID/SGID ファイルが新たに出現しました",
+                        )
+                        .with_details(path.display().to_string()),
+                    );
+                }
                 has_changes = true;
             }
         }
@@ -144,6 +162,17 @@ impl SuidSgidMonitorModule {
                     suid_sgid_type = Self::suid_sgid_type(info.mode),
                     "SUID/SGID ファイルが消失しました（証拠隠滅の可能性）"
                 );
+                if let Some(bus) = event_bus {
+                    bus.publish(
+                        SecurityEvent::new(
+                            "suid_sgid_removed",
+                            Severity::Warning,
+                            "suid_sgid_monitor",
+                            "SUID/SGID ファイルが消失しました（証拠隠滅の可能性）",
+                        )
+                        .with_details(path.display().to_string()),
+                    );
+                }
                 has_changes = true;
             }
         }
@@ -158,6 +187,17 @@ impl SuidSgidMonitorModule {
                         after = current_info.size,
                         "SUID/SGID ファイルのサイズが変更されました"
                     );
+                    if let Some(bus) = event_bus {
+                        bus.publish(
+                            SecurityEvent::new(
+                                "suid_sgid_size_changed",
+                                Severity::Warning,
+                                "suid_sgid_monitor",
+                                "SUID/SGID ファイルのサイズが変更されました",
+                            )
+                            .with_details(path.display().to_string()),
+                        );
+                    }
                     has_changes = true;
                 }
                 if baseline_info.mode != current_info.mode {
@@ -167,6 +207,17 @@ impl SuidSgidMonitorModule {
                         after = format!("{:o}", current_info.mode),
                         "SUID/SGID ファイルのパーミッションが変更されました"
                     );
+                    if let Some(bus) = event_bus {
+                        bus.publish(
+                            SecurityEvent::new(
+                                "suid_sgid_permission_changed",
+                                Severity::Warning,
+                                "suid_sgid_monitor",
+                                "SUID/SGID ファイルのパーミッションが変更されました",
+                            )
+                            .with_details(path.display().to_string()),
+                        );
+                    }
                     has_changes = true;
                 }
                 if baseline_info.uid != current_info.uid {
@@ -176,6 +227,17 @@ impl SuidSgidMonitorModule {
                         after = current_info.uid,
                         "SUID/SGID ファイルの所有者が変更されました"
                     );
+                    if let Some(bus) = event_bus {
+                        bus.publish(
+                            SecurityEvent::new(
+                                "suid_sgid_owner_changed",
+                                Severity::Critical,
+                                "suid_sgid_monitor",
+                                "SUID/SGID ファイルの所有者が変更されました",
+                            )
+                            .with_details(path.display().to_string()),
+                        );
+                    }
                     has_changes = true;
                 }
             }
@@ -225,6 +287,7 @@ impl Module for SuidSgidMonitorModule {
         let watch_dirs = self.config.watch_dirs.clone();
         let scan_interval_secs = self.config.scan_interval_secs;
         let cancel_token = self.cancel_token.clone();
+        let event_bus = self.event_bus.clone();
 
         tokio::spawn(async move {
             let mut interval =
@@ -241,7 +304,7 @@ impl Module for SuidSgidMonitorModule {
                     }
                     _ = interval.tick() => {
                         let current = SuidSgidMonitorModule::scan_dirs(&watch_dirs);
-                        let changed = SuidSgidMonitorModule::detect_and_report(&baseline, &current);
+                        let changed = SuidSgidMonitorModule::detect_and_report(&baseline, &current, &event_bus);
 
                         if changed {
                             baseline = current;
@@ -358,7 +421,7 @@ mod tests {
             files: current_files,
         };
         assert!(SuidSgidMonitorModule::detect_and_report(
-            &baseline, &current
+            &baseline, &current, &None
         ));
     }
 
@@ -380,7 +443,7 @@ mod tests {
             files: HashMap::new(),
         };
         assert!(SuidSgidMonitorModule::detect_and_report(
-            &baseline, &current
+            &baseline, &current, &None
         ));
     }
 
@@ -413,7 +476,7 @@ mod tests {
             files: current_files,
         };
         assert!(SuidSgidMonitorModule::detect_and_report(
-            &baseline, &current
+            &baseline, &current, &None
         ));
     }
 
@@ -446,7 +509,7 @@ mod tests {
             files: current_files,
         };
         assert!(SuidSgidMonitorModule::detect_and_report(
-            &baseline, &current
+            &baseline, &current, &None
         ));
     }
 
@@ -479,7 +542,7 @@ mod tests {
             files: current_files,
         };
         assert!(SuidSgidMonitorModule::detect_and_report(
-            &baseline, &current
+            &baseline, &current, &None
         ));
     }
 
@@ -504,7 +567,7 @@ mod tests {
             files: current_files,
         };
         assert!(!SuidSgidMonitorModule::detect_and_report(
-            &baseline, &current
+            &baseline, &current, &None
         ));
     }
 
@@ -515,7 +578,7 @@ mod tests {
             scan_interval_secs: 0,
             watch_dirs: vec![],
         };
-        let mut module = SuidSgidMonitorModule::new(config);
+        let mut module = SuidSgidMonitorModule::new(config, None);
         assert!(module.init().is_err());
     }
 
@@ -527,7 +590,7 @@ mod tests {
             scan_interval_secs: 300,
             watch_dirs: vec![dir.path().to_path_buf()],
         };
-        let mut module = SuidSgidMonitorModule::new(config);
+        let mut module = SuidSgidMonitorModule::new(config, None);
         assert!(module.init().is_ok());
     }
 
@@ -539,7 +602,7 @@ mod tests {
             scan_interval_secs: 3600,
             watch_dirs: vec![dir.path().to_path_buf()],
         };
-        let mut module = SuidSgidMonitorModule::new(config);
+        let mut module = SuidSgidMonitorModule::new(config, None);
         module.init().unwrap();
 
         let cancel_token = module.cancel_token();

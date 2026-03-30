@@ -9,6 +9,7 @@
 //! - ファイルサイズ・パーミッションの変更
 
 use crate::config::TmpExecMonitorConfig;
+use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::Module;
 use std::collections::HashMap;
@@ -38,14 +39,16 @@ struct TmpExecSnapshot {
 pub struct TmpExecMonitorModule {
     config: TmpExecMonitorConfig,
     cancel_token: CancellationToken,
+    event_bus: Option<EventBus>,
 }
 
 impl TmpExecMonitorModule {
     /// 新しい一時ディレクトリ実行ファイル検知モジュールを作成する
-    pub fn new(config: TmpExecMonitorConfig) -> Self {
+    pub fn new(config: TmpExecMonitorConfig, event_bus: Option<EventBus>) -> Self {
         Self {
             config,
             cancel_token: CancellationToken::new(),
+            event_bus,
         }
     }
 
@@ -100,7 +103,11 @@ impl TmpExecMonitorModule {
 
     /// ベースラインと現在のスナップショットを比較し、変更を検知してログ出力する。
     /// 変更があった場合は `true` を返す。
-    fn detect_and_report(baseline: &TmpExecSnapshot, current: &TmpExecSnapshot) -> bool {
+    fn detect_and_report(
+        baseline: &TmpExecSnapshot,
+        current: &TmpExecSnapshot,
+        event_bus: &Option<EventBus>,
+    ) -> bool {
         let mut has_changes = false;
 
         // 新規出現の検知
@@ -112,6 +119,17 @@ impl TmpExecMonitorModule {
                     mode = format!("{:o}", info.mode),
                     "一時ディレクトリに実行可能ファイルが出現しました"
                 );
+                if let Some(bus) = event_bus {
+                    bus.publish(
+                        SecurityEvent::new(
+                            "tmp_exec_new",
+                            Severity::Warning,
+                            "tmp_exec_monitor",
+                            "一時ディレクトリに実行可能ファイルが出現しました",
+                        )
+                        .with_details(path.display().to_string()),
+                    );
+                }
                 has_changes = true;
             }
         }
@@ -123,6 +141,17 @@ impl TmpExecMonitorModule {
                     path = %path.display(),
                     "一時ディレクトリから実行可能ファイルが消失しました（証拠隠滅の可能性）"
                 );
+                if let Some(bus) = event_bus {
+                    bus.publish(
+                        SecurityEvent::new(
+                            "tmp_exec_removed",
+                            Severity::Warning,
+                            "tmp_exec_monitor",
+                            "一時ディレクトリから実行可能ファイルが消失しました（証拠隠滅の可能性）",
+                        )
+                        .with_details(path.display().to_string()),
+                    );
+                }
                 has_changes = true;
             }
         }
@@ -137,6 +166,17 @@ impl TmpExecMonitorModule {
                         after = current_info.size,
                         "一時ディレクトリの実行可能ファイルのサイズが変更されました"
                     );
+                    if let Some(bus) = event_bus {
+                        bus.publish(
+                            SecurityEvent::new(
+                                "tmp_exec_size_changed",
+                                Severity::Warning,
+                                "tmp_exec_monitor",
+                                "一時ディレクトリの実行可能ファイルのサイズが変更されました",
+                            )
+                            .with_details(path.display().to_string()),
+                        );
+                    }
                     has_changes = true;
                 }
                 if baseline_info.mode != current_info.mode {
@@ -146,6 +186,17 @@ impl TmpExecMonitorModule {
                         after = format!("{:o}", current_info.mode),
                         "一時ディレクトリの実行可能ファイルのパーミッションが変更されました"
                     );
+                    if let Some(bus) = event_bus {
+                        bus.publish(
+                            SecurityEvent::new(
+                                "tmp_exec_permission_changed",
+                                Severity::Warning,
+                                "tmp_exec_monitor",
+                                "一時ディレクトリの実行可能ファイルのパーミッションが変更されました",
+                            )
+                            .with_details(path.display().to_string()),
+                        );
+                    }
                     has_changes = true;
                 }
             }
@@ -195,6 +246,7 @@ impl Module for TmpExecMonitorModule {
         let watch_dirs = self.config.watch_dirs.clone();
         let scan_interval_secs = self.config.scan_interval_secs;
         let cancel_token = self.cancel_token.clone();
+        let event_bus = self.event_bus.clone();
 
         tokio::spawn(async move {
             let mut interval =
@@ -211,7 +263,7 @@ impl Module for TmpExecMonitorModule {
                     }
                     _ = interval.tick() => {
                         let current = TmpExecMonitorModule::scan_dirs(&watch_dirs);
-                        let changed = TmpExecMonitorModule::detect_and_report(&baseline, &current);
+                        let changed = TmpExecMonitorModule::detect_and_report(&baseline, &current, &event_bus);
 
                         if changed {
                             baseline = current;
@@ -306,7 +358,9 @@ mod tests {
         let current = TmpExecSnapshot {
             files: current_files,
         };
-        assert!(TmpExecMonitorModule::detect_and_report(&baseline, &current));
+        assert!(TmpExecMonitorModule::detect_and_report(
+            &baseline, &current, &None
+        ));
     }
 
     #[test]
@@ -325,7 +379,9 @@ mod tests {
         let current = TmpExecSnapshot {
             files: HashMap::new(),
         };
-        assert!(TmpExecMonitorModule::detect_and_report(&baseline, &current));
+        assert!(TmpExecMonitorModule::detect_and_report(
+            &baseline, &current, &None
+        ));
     }
 
     #[test]
@@ -354,7 +410,9 @@ mod tests {
         let current = TmpExecSnapshot {
             files: current_files,
         };
-        assert!(TmpExecMonitorModule::detect_and_report(&baseline, &current));
+        assert!(TmpExecMonitorModule::detect_and_report(
+            &baseline, &current, &None
+        ));
     }
 
     #[test]
@@ -383,7 +441,9 @@ mod tests {
         let current = TmpExecSnapshot {
             files: current_files,
         };
-        assert!(TmpExecMonitorModule::detect_and_report(&baseline, &current));
+        assert!(TmpExecMonitorModule::detect_and_report(
+            &baseline, &current, &None
+        ));
     }
 
     #[test]
@@ -406,7 +466,7 @@ mod tests {
             files: current_files,
         };
         assert!(!TmpExecMonitorModule::detect_and_report(
-            &baseline, &current
+            &baseline, &current, &None
         ));
     }
 
@@ -417,7 +477,7 @@ mod tests {
             scan_interval_secs: 0,
             watch_dirs: vec![],
         };
-        let mut module = TmpExecMonitorModule::new(config);
+        let mut module = TmpExecMonitorModule::new(config, None);
         assert!(module.init().is_err());
     }
 
@@ -429,7 +489,7 @@ mod tests {
             scan_interval_secs: 60,
             watch_dirs: vec![dir.path().to_path_buf()],
         };
-        let mut module = TmpExecMonitorModule::new(config);
+        let mut module = TmpExecMonitorModule::new(config, None);
         assert!(module.init().is_ok());
     }
 
@@ -441,7 +501,7 @@ mod tests {
             scan_interval_secs: 3600,
             watch_dirs: vec![dir.path().to_path_buf()],
         };
-        let mut module = TmpExecMonitorModule::new(config);
+        let mut module = TmpExecMonitorModule::new(config, None);
         module.init().unwrap();
 
         let cancel_token = module.cancel_token();

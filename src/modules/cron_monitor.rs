@@ -8,6 +8,7 @@
 //! - 削除された cron ファイル
 
 use crate::config::CronMonitorConfig;
+use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::Module;
 use sha2::{Digest, Sha256};
@@ -37,15 +38,17 @@ pub struct CronMonitorModule {
     config: CronMonitorConfig,
     baseline: Option<HashMap<PathBuf, String>>,
     cancel_token: CancellationToken,
+    event_bus: Option<EventBus>,
 }
 
 impl CronMonitorModule {
     /// 新しい Cron ジョブ改ざん検知モジュールを作成する
-    pub fn new(config: CronMonitorConfig) -> Self {
+    pub fn new(config: CronMonitorConfig, event_bus: Option<EventBus>) -> Self {
         Self {
             config,
             baseline: None,
             cancel_token: CancellationToken::new(),
+            event_bus,
         }
     }
 
@@ -194,6 +197,7 @@ impl Module for CronMonitorModule {
         let watch_paths = self.config.watch_paths.clone();
         let scan_interval_secs = self.config.scan_interval_secs;
         let cancel_token = self.cancel_token.clone();
+        let event_bus = self.event_bus.clone();
 
         tokio::spawn(async move {
             let mut interval =
@@ -214,12 +218,45 @@ impl Module for CronMonitorModule {
                         if report.has_changes() {
                             for path in &report.modified {
                                 tracing::warn!(path = %path.display(), change = "modified", "cron ファイルの変更を検知しました");
+                                if let Some(ref bus) = event_bus {
+                                    bus.publish(
+                                        SecurityEvent::new(
+                                            "cron_modified",
+                                            Severity::Warning,
+                                            "cron_monitor",
+                                            format!("cron ファイルの変更を検知しました: {}", path.display()),
+                                        )
+                                        .with_details(path.display().to_string()),
+                                    );
+                                }
                             }
                             for path in &report.added {
                                 tracing::warn!(path = %path.display(), change = "added", "cron ファイルの追加を検知しました");
+                                if let Some(ref bus) = event_bus {
+                                    bus.publish(
+                                        SecurityEvent::new(
+                                            "cron_added",
+                                            Severity::Warning,
+                                            "cron_monitor",
+                                            format!("cron ファイルの追加を検知しました: {}", path.display()),
+                                        )
+                                        .with_details(path.display().to_string()),
+                                    );
+                                }
                             }
                             for path in &report.removed {
                                 tracing::warn!(path = %path.display(), change = "removed", "cron ファイルの削除を検知しました");
+                                if let Some(ref bus) = event_bus {
+                                    bus.publish(
+                                        SecurityEvent::new(
+                                            "cron_removed",
+                                            Severity::Warning,
+                                            "cron_monitor",
+                                            format!("cron ファイルの削除を検知しました: {}", path.display()),
+                                        )
+                                        .with_details(path.display().to_string()),
+                                    );
+                                }
                             }
                             // ベースラインを更新
                             baseline = current;
@@ -406,7 +443,7 @@ mod tests {
             scan_interval_secs: 0,
             watch_paths: vec![],
         };
-        let mut module = CronMonitorModule::new(config);
+        let mut module = CronMonitorModule::new(config, None);
         let result = module.init();
         assert!(result.is_err());
     }
@@ -419,7 +456,7 @@ mod tests {
             scan_interval_secs: 120,
             watch_paths: vec![dir.path().to_path_buf()],
         };
-        let mut module = CronMonitorModule::new(config);
+        let mut module = CronMonitorModule::new(config, None);
         let result = module.init();
         assert!(result.is_ok());
     }
@@ -431,7 +468,7 @@ mod tests {
             scan_interval_secs: 120,
             watch_paths: vec![PathBuf::from("/nonexistent-path-zettai-cron-test")],
         };
-        let mut module = CronMonitorModule::new(config);
+        let mut module = CronMonitorModule::new(config, None);
         let result = module.init();
         assert!(result.is_ok());
         assert!(module.config.watch_paths.is_empty());
@@ -449,7 +486,7 @@ mod tests {
             scan_interval_secs: 120,
             watch_paths: vec![non_canonical],
         };
-        let mut module = CronMonitorModule::new(config);
+        let mut module = CronMonitorModule::new(config, None);
         let result = module.init();
         assert!(result.is_ok());
         assert_eq!(module.config.watch_paths.len(), 1);
@@ -468,7 +505,7 @@ mod tests {
             scan_interval_secs: 3600,
             watch_paths: vec![dir.path().to_path_buf()],
         };
-        let mut module = CronMonitorModule::new(config);
+        let mut module = CronMonitorModule::new(config, None);
         module.init().unwrap();
 
         let cancel_token = module.cancel_token();
