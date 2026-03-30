@@ -1,4 +1,5 @@
 use crate::config::AppConfig;
+use crate::core::action::ActionEngine;
 use crate::core::event::{self, EventBus};
 use crate::core::health::HealthChecker;
 use crate::error::AppError;
@@ -48,6 +49,19 @@ impl Daemon {
         let event_bus = if self.config.event_bus.enabled {
             let bus = EventBus::new(self.config.event_bus.channel_capacity);
             event::spawn_log_subscriber(&bus);
+            // アクションエンジンの起動
+            if self.config.actions.enabled {
+                match ActionEngine::new(&self.config.actions, &bus) {
+                    Ok(engine) => {
+                        engine.spawn();
+                        tracing::info!("アクションエンジンを起動しました");
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "アクションエンジンの初期化に失敗しました");
+                    }
+                }
+            }
+
             tracing::info!(
                 channel_capacity = self.config.event_bus.channel_capacity,
                 "イベントバスを起動しました"
@@ -56,6 +70,10 @@ impl Daemon {
         } else {
             None
         };
+
+        if event_bus.is_none() && self.config.actions.enabled {
+            tracing::warn!("アクションエンジンはイベントバスが無効のため起動できません");
+        }
 
         // ファイル整合性監視モジュールの初期化と起動
         let fim_cancel_token = if self.config.modules.file_integrity.enabled {

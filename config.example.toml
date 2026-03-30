@@ -131,6 +131,22 @@ enabled = false
 # ブロードキャストチャネルの容量
 channel_capacity = 1024
 
+[actions]
+# アクションエンジンの有効/無効
+enabled = false
+
+# [[actions.rules]]
+# name = "critical_command"
+# severity = "Critical"
+# action = "command"
+# command = "/usr/local/bin/alert.sh '{{message}}'"
+# timeout_secs = 30
+
+# [[actions.rules]]
+# name = "warning_log"
+# severity = "Warning"
+# action = "log"
+
 [health]
 # ハートビート（定期的なヘルスチェックログ出力）の有効/無効
 enabled = true

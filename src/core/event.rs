@@ -16,6 +16,18 @@ pub enum Severity {
     Critical,
 }
 
+impl Severity {
+    /// 文字列から Severity を解析する
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "info" => Some(Severity::Info),
+            "warning" => Some(Severity::Warning),
+            "critical" => Some(Severity::Critical),
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Display for Severity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

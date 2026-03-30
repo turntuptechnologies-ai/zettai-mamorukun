@@ -20,6 +20,10 @@ pub struct AppConfig {
     /// イベントバス設定
     #[serde(default)]
     pub event_bus: EventBusConfig,
+
+    /// アクションエンジン設定
+    #[serde(default)]
+    pub actions: ActionConfig,
 }
 
 /// 一般設定
@@ -679,6 +683,42 @@ impl Default for SuidSgidMonitorConfig {
     }
 }
 
+/// アクションエンジン設定
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct ActionConfig {
+    /// アクションエンジンの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// アクションルールのリスト
+    #[serde(default)]
+    pub rules: Vec<ActionRuleConfig>,
+}
+
+/// アクションルールの設定
+#[derive(Debug, Deserialize, Clone)]
+pub struct ActionRuleConfig {
+    /// ルール名
+    pub name: String,
+    /// Severity フィルタ
+    pub severity: Option<String>,
+    /// モジュール名フィルタ
+    pub module: Option<String>,
+    /// アクション種別（"log", "command"）
+    pub action: String,
+    /// 実行コマンド
+    pub command: Option<String>,
+    /// コマンドタイムアウト（秒）
+    #[serde(default = "ActionRuleConfig::default_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl ActionRuleConfig {
+    fn default_timeout_secs() -> u64 {
+        30
+    }
+}
+
 /// ヘルスチェック設定
 #[derive(Debug, Deserialize)]
 pub struct HealthConfig {
@@ -1069,6 +1109,48 @@ watch_dirs = ["/usr/bin", "/usr/sbin"]
         assert!(config.modules.suid_sgid_monitor.enabled);
         assert_eq!(config.modules.suid_sgid_monitor.scan_interval_secs, 120);
         assert_eq!(config.modules.suid_sgid_monitor.watch_dirs.len(), 2);
+    }
+
+    #[test]
+    fn test_action_config_defaults() {
+        let config: AppConfig = toml::from_str("").unwrap();
+        assert!(!config.actions.enabled);
+        assert!(config.actions.rules.is_empty());
+    }
+
+    #[test]
+    fn test_action_config_custom() {
+        let toml_str = r#"
+[actions]
+enabled = true
+
+[[actions.rules]]
+name = "critical_log"
+severity = "Critical"
+action = "log"
+
+[[actions.rules]]
+name = "alert_command"
+severity = "Warning"
+module = "file_integrity"
+action = "command"
+command = "/usr/local/bin/alert.sh '{{message}}'"
+timeout_secs = 10
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.actions.enabled);
+        assert_eq!(config.actions.rules.len(), 2);
+        assert_eq!(config.actions.rules[0].name, "critical_log");
+        assert_eq!(
+            config.actions.rules[0].severity,
+            Some("Critical".to_string())
+        );
+        assert_eq!(config.actions.rules[0].action, "log");
+        assert!(config.actions.rules[0].command.is_none());
+        assert_eq!(config.actions.rules[0].timeout_secs, 30); // default
+        assert_eq!(config.actions.rules[1].name, "alert_command");
+        assert_eq!(config.actions.rules[1].timeout_secs, 10);
+        assert!(config.actions.rules[1].command.is_some());
     }
 
     #[test]
