@@ -13,6 +13,7 @@ use crate::modules::process_monitor::ProcessMonitorModule;
 use crate::modules::shell_config_monitor::ShellConfigMonitorModule;
 use crate::modules::ssh_key_monitor::SshKeyMonitorModule;
 use crate::modules::sudoers_monitor::SudoersMonitorModule;
+use crate::modules::suid_sgid_monitor::SuidSgidMonitorModule;
 use crate::modules::systemd_service::SystemdServiceModule;
 use crate::modules::tmp_exec_monitor::TmpExecMonitorModule;
 use crate::modules::user_account::UserAccountModule;
@@ -187,6 +188,18 @@ impl Daemon {
             None
         };
 
+        // SUID/SGID ファイル監視モジュールの初期化と起動
+        let ssg_cancel_token = if self.config.modules.suid_sgid_monitor.enabled {
+            let mut ssg = SuidSgidMonitorModule::new(self.config.modules.suid_sgid_monitor.clone());
+            ssg.init()?;
+            let cancel_token = ssg.cancel_token();
+            ssg.start().await?;
+            tracing::info!("SUID/SGID ファイル監視モジュールを起動しました");
+            Some(cancel_token)
+        } else {
+            None
+        };
+
         // マウントポイント監視モジュールの初期化と起動
         let mnt_cancel_token = if self.config.modules.mount_monitor.enabled {
             let mut mnt = MountMonitorModule::new(self.config.modules.mount_monitor.clone());
@@ -311,6 +324,10 @@ impl Daemon {
         if let Some(cancel_token) = sud_cancel_token {
             cancel_token.cancel();
             tracing::info!("sudoers ファイル監視モジュールを停止しました");
+        }
+        if let Some(cancel_token) = ssg_cancel_token {
+            cancel_token.cancel();
+            tracing::info!("SUID/SGID ファイル監視モジュールを停止しました");
         }
 
         tracing::info!("シャットダウン完了");
