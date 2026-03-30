@@ -76,6 +76,10 @@ pub struct ModulesConfig {
     /// シェル設定ファイル監視モジュールの設定
     #[serde(default)]
     pub shell_config_monitor: ShellConfigMonitorConfig,
+
+    /// 一時ディレクトリ実行ファイル検知モジュールの設定
+    #[serde(default)]
+    pub tmp_exec_monitor: TmpExecMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -543,6 +547,46 @@ impl Default for ShellConfigMonitorConfig {
     }
 }
 
+/// 一時ディレクトリ実行ファイル検知モジュールの設定
+#[derive(Debug, Deserialize, Clone)]
+pub struct TmpExecMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "TmpExecMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象ディレクトリのリスト
+    #[serde(default = "TmpExecMonitorConfig::default_watch_dirs")]
+    pub watch_dirs: Vec<PathBuf>,
+}
+
+impl TmpExecMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        60
+    }
+
+    fn default_watch_dirs() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/tmp"),
+            PathBuf::from("/dev/shm"),
+            PathBuf::from("/var/tmp"),
+        ]
+    }
+}
+
+impl Default for TmpExecMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            watch_dirs: Self::default_watch_dirs(),
+        }
+    }
+}
+
 /// ヘルスチェック設定
 #[derive(Debug, Deserialize)]
 pub struct HealthConfig {
@@ -818,6 +862,28 @@ mounts_path = "/proc/self/mounts"
             config.modules.mount_monitor.mounts_path,
             PathBuf::from("/proc/self/mounts")
         );
+    }
+
+    #[test]
+    fn test_tmp_exec_monitor_config_defaults() {
+        let config: AppConfig = toml::from_str("").unwrap();
+        assert!(!config.modules.tmp_exec_monitor.enabled);
+        assert_eq!(config.modules.tmp_exec_monitor.scan_interval_secs, 60);
+        assert_eq!(config.modules.tmp_exec_monitor.watch_dirs.len(), 3);
+    }
+
+    #[test]
+    fn test_tmp_exec_monitor_config_custom() {
+        let toml_str = r#"
+[modules.tmp_exec_monitor]
+enabled = true
+scan_interval_secs = 30
+watch_dirs = ["/tmp", "/dev/shm"]
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.modules.tmp_exec_monitor.enabled);
+        assert_eq!(config.modules.tmp_exec_monitor.scan_interval_secs, 30);
+        assert_eq!(config.modules.tmp_exec_monitor.watch_dirs.len(), 2);
     }
 
     #[test]

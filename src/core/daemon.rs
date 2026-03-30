@@ -13,6 +13,7 @@ use crate::modules::process_monitor::ProcessMonitorModule;
 use crate::modules::shell_config_monitor::ShellConfigMonitorModule;
 use crate::modules::ssh_key_monitor::SshKeyMonitorModule;
 use crate::modules::systemd_service::SystemdServiceModule;
+use crate::modules::tmp_exec_monitor::TmpExecMonitorModule;
 use crate::modules::user_account::UserAccountModule;
 use std::time::Duration;
 use tokio::signal::unix::{SignalKind, signal};
@@ -161,6 +162,18 @@ impl Daemon {
             None
         };
 
+        // 一時ディレクトリ実行ファイル検知モジュールの初期化と起動
+        let te_cancel_token = if self.config.modules.tmp_exec_monitor.enabled {
+            let mut te = TmpExecMonitorModule::new(self.config.modules.tmp_exec_monitor.clone());
+            te.init()?;
+            let cancel_token = te.cancel_token();
+            te.start().await?;
+            tracing::info!("一時ディレクトリ実行ファイル検知モジュールを起動しました");
+            Some(cancel_token)
+        } else {
+            None
+        };
+
         // マウントポイント監視モジュールの初期化と起動
         let mnt_cancel_token = if self.config.modules.mount_monitor.enabled {
             let mut mnt = MountMonitorModule::new(self.config.modules.mount_monitor.clone());
@@ -269,6 +282,10 @@ impl Daemon {
         if let Some(cancel_token) = sc_cancel_token {
             cancel_token.cancel();
             tracing::info!("シェル設定ファイル監視モジュールを停止しました");
+        }
+        if let Some(cancel_token) = te_cancel_token {
+            cancel_token.cancel();
+            tracing::info!("一時ディレクトリ実行ファイル検知モジュールを停止しました");
         }
         if let Some(cancel_token) = mnt_cancel_token {
             cancel_token.cancel();

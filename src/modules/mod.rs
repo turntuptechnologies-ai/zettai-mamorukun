@@ -9,6 +9,7 @@ pub mod process_monitor;
 pub mod shell_config_monitor;
 pub mod ssh_key_monitor;
 pub mod systemd_service;
+pub mod tmp_exec_monitor;
 pub mod user_account;
 
 use crate::error::AppError;
