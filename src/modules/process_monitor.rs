@@ -8,6 +8,7 @@
 //! - 隠しディレクトリからの実行（パスに `.` で始まるコンポーネントが含まれる）
 
 use crate::config::ProcessMonitorConfig;
+use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::Module;
 use std::collections::HashSet;
@@ -49,14 +50,16 @@ struct ProcessAnomaly {
 pub struct ProcessMonitorModule {
     config: ProcessMonitorConfig,
     cancel_token: CancellationToken,
+    event_bus: Option<EventBus>,
 }
 
 impl ProcessMonitorModule {
     /// 新しいプロセス異常検知モジュールを作成する
-    pub fn new(config: ProcessMonitorConfig) -> Self {
+    pub fn new(config: ProcessMonitorConfig, event_bus: Option<EventBus>) -> Self {
         Self {
             config,
             cancel_token: CancellationToken::new(),
+            event_bus,
         }
     }
 
@@ -201,6 +204,7 @@ impl Module for ProcessMonitorModule {
         let suspicious_paths = self.config.suspicious_paths.clone();
         let scan_interval_secs = self.config.scan_interval_secs;
         let cancel_token = self.cancel_token.clone();
+        let event_bus = self.event_bus.clone();
 
         // 既知の PID を記録し、同じ PID の同じ異常を繰り返し警告しない
         let mut known_anomalies: HashSet<(u32, String)> = HashSet::new();
@@ -234,6 +238,23 @@ impl Module for ProcessMonitorModule {
                                     anomaly_kind = %anomaly.kind,
                                     "不審なプロセスを検知しました"
                                 );
+                                if let Some(ref bus) = event_bus {
+                                    bus.publish(
+                                        SecurityEvent::new(
+                                            "process_anomaly",
+                                            Severity::Warning,
+                                            "process_monitor",
+                                            format!(
+                                                "不審なプロセスを検知しました: PID={}, パス={}, 種別={}",
+                                                anomaly.pid, anomaly.exe_path, anomaly.kind
+                                            ),
+                                        )
+                                        .with_details(format!(
+                                            "pid={}, exe_path={}, anomaly_kind={}",
+                                            anomaly.pid, anomaly.exe_path, anomaly.kind
+                                        )),
+                                    );
+                                }
                             }
                         }
 
@@ -401,7 +422,7 @@ mod tests {
             scan_interval_secs: 0,
             suspicious_paths: vec![],
         };
-        let mut module = ProcessMonitorModule::new(config);
+        let mut module = ProcessMonitorModule::new(config, None);
         let result = module.init();
         assert!(result.is_err());
     }
@@ -413,7 +434,7 @@ mod tests {
             scan_interval_secs: 60,
             suspicious_paths: vec![PathBuf::from("/tmp")],
         };
-        let mut module = ProcessMonitorModule::new(config);
+        let mut module = ProcessMonitorModule::new(config, None);
         let result = module.init();
         assert!(result.is_ok());
     }
@@ -425,7 +446,7 @@ mod tests {
             scan_interval_secs: 3600,
             suspicious_paths: vec![PathBuf::from("/tmp")],
         };
-        let mut module = ProcessMonitorModule::new(config);
+        let mut module = ProcessMonitorModule::new(config, None);
         module.init().unwrap();
 
         let cancel_token = module.cancel_token();
@@ -440,5 +461,28 @@ mod tests {
         assert_eq!(AnomalyKind::DeletedBinary.to_string(), "deleted_binary");
         assert_eq!(AnomalyKind::SuspiciousPath.to_string(), "suspicious_path");
         assert_eq!(AnomalyKind::HiddenDirectory.to_string(), "hidden_directory");
+    }
+
+    #[test]
+    fn test_init_with_event_bus_none() {
+        let config = ProcessMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            suspicious_paths: vec![PathBuf::from("/tmp")],
+        };
+        let mut module = ProcessMonitorModule::new(config, None);
+        assert!(module.init().is_ok());
+    }
+
+    #[test]
+    fn test_init_with_event_bus_some() {
+        let config = ProcessMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            suspicious_paths: vec![PathBuf::from("/tmp")],
+        };
+        let bus = EventBus::new(16);
+        let mut module = ProcessMonitorModule::new(config, Some(bus));
+        assert!(module.init().is_ok());
     }
 }

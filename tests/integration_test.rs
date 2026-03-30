@@ -409,3 +409,28 @@ watch_paths = ["/etc/sudoers"]
     assert_eq!(config.modules.sudoers_monitor.scan_interval_secs, 60);
     assert_eq!(config.modules.sudoers_monitor.watch_paths.len(), 1);
 }
+
+#[test]
+fn test_config_event_bus_defaults() {
+    let config = AppConfig::load(Path::new("/tmp/nonexistent-zettai-config.toml")).unwrap();
+    assert!(!config.event_bus.enabled);
+    assert_eq!(config.event_bus.channel_capacity, 1024);
+}
+
+#[test]
+fn test_config_with_event_bus_section() {
+    use std::io::Write;
+    let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+    write!(
+        tmpfile,
+        r#"
+[event_bus]
+enabled = true
+channel_capacity = 256
+"#
+    )
+    .unwrap();
+    let config = AppConfig::load(tmpfile.path()).unwrap();
+    assert!(config.event_bus.enabled);
+    assert_eq!(config.event_bus.channel_capacity, 256);
+}

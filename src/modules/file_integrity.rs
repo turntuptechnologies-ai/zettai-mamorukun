@@ -4,6 +4,7 @@
 //! SHA-256 ハッシュを用いて変更・追加・削除を検知する。
 
 use crate::config::FileIntegrityConfig;
+use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::Module;
 use sha2::{Digest, Sha256};
@@ -33,15 +34,17 @@ pub struct FileIntegrityModule {
     config: FileIntegrityConfig,
     baseline: Option<HashMap<PathBuf, String>>,
     cancel_token: CancellationToken,
+    event_bus: Option<EventBus>,
 }
 
 impl FileIntegrityModule {
     /// 新しいファイル整合性監視モジュールを作成する
-    pub fn new(config: FileIntegrityConfig) -> Self {
+    pub fn new(config: FileIntegrityConfig, event_bus: Option<EventBus>) -> Self {
         Self {
             config,
             baseline: None,
             cancel_token: CancellationToken::new(),
+            event_bus,
         }
     }
 
@@ -190,6 +193,7 @@ impl Module for FileIntegrityModule {
         let watch_paths = self.config.watch_paths.clone();
         let scan_interval_secs = self.config.scan_interval_secs;
         let cancel_token = self.cancel_token.clone();
+        let event_bus = self.event_bus.clone();
 
         tokio::spawn(async move {
             let mut interval =
@@ -210,12 +214,45 @@ impl Module for FileIntegrityModule {
                         if report.has_changes() {
                             for path in &report.modified {
                                 tracing::warn!(path = %path.display(), change = "modified", "ファイルの変更を検知しました");
+                                if let Some(ref bus) = event_bus {
+                                    bus.publish(
+                                        SecurityEvent::new(
+                                            "file_modified",
+                                            Severity::Warning,
+                                            "file_integrity",
+                                            format!("ファイルの変更を検知しました: {}", path.display()),
+                                        )
+                                        .with_details(path.display().to_string()),
+                                    );
+                                }
                             }
                             for path in &report.added {
                                 tracing::warn!(path = %path.display(), change = "added", "ファイルの追加を検知しました");
+                                if let Some(ref bus) = event_bus {
+                                    bus.publish(
+                                        SecurityEvent::new(
+                                            "file_added",
+                                            Severity::Warning,
+                                            "file_integrity",
+                                            format!("ファイルの追加を検知しました: {}", path.display()),
+                                        )
+                                        .with_details(path.display().to_string()),
+                                    );
+                                }
                             }
                             for path in &report.removed {
                                 tracing::warn!(path = %path.display(), change = "removed", "ファイルの削除を検知しました");
+                                if let Some(ref bus) = event_bus {
+                                    bus.publish(
+                                        SecurityEvent::new(
+                                            "file_removed",
+                                            Severity::Warning,
+                                            "file_integrity",
+                                            format!("ファイルの削除を検知しました: {}", path.display()),
+                                        )
+                                        .with_details(path.display().to_string()),
+                                    );
+                                }
                             }
                             // ベースラインを更新
                             baseline = current;
@@ -341,7 +378,7 @@ mod tests {
             scan_interval_secs: 0,
             watch_paths: vec![],
         };
-        let mut module = FileIntegrityModule::new(config);
+        let mut module = FileIntegrityModule::new(config, None);
         let result = module.init();
         assert!(result.is_err());
     }
@@ -353,7 +390,7 @@ mod tests {
             scan_interval_secs: 300,
             watch_paths: vec![PathBuf::from("/nonexistent-path-zettai-test")],
         };
-        let mut module = FileIntegrityModule::new(config);
+        let mut module = FileIntegrityModule::new(config, None);
         // Should succeed but skip the nonexistent path
         let result = module.init();
         assert!(result.is_ok());
@@ -373,7 +410,7 @@ mod tests {
             scan_interval_secs: 300,
             watch_paths: vec![non_canonical],
         };
-        let mut module = FileIntegrityModule::new(config);
+        let mut module = FileIntegrityModule::new(config, None);
         let result = module.init();
         assert!(result.is_ok());
         assert_eq!(module.config.watch_paths.len(), 1);
@@ -442,7 +479,7 @@ mod tests {
             scan_interval_secs: 300,
             watch_paths: vec![],
         };
-        let mut module = FileIntegrityModule::new(config);
+        let mut module = FileIntegrityModule::new(config, None);
         let result = module.init();
         assert!(result.is_ok());
         assert!(module.config.watch_paths.is_empty());
@@ -459,7 +496,7 @@ mod tests {
             scan_interval_secs: 3600,
             watch_paths: vec![dir.path().to_path_buf()],
         };
-        let mut module = FileIntegrityModule::new(config);
+        let mut module = FileIntegrityModule::new(config, None);
         module.init().unwrap();
 
         let cancel_token = module.cancel_token();
@@ -500,5 +537,30 @@ mod tests {
         assert!(report.modified.contains(&PathBuf::from("/to_modify")));
         assert!(report.added.contains(&PathBuf::from("/new_file")));
         assert!(report.removed.contains(&PathBuf::from("/to_remove")));
+    }
+
+    #[test]
+    fn test_init_with_event_bus_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = FileIntegrityConfig {
+            enabled: true,
+            scan_interval_secs: 300,
+            watch_paths: vec![dir.path().to_path_buf()],
+        };
+        let mut module = FileIntegrityModule::new(config, None);
+        assert!(module.init().is_ok());
+    }
+
+    #[test]
+    fn test_init_with_event_bus_some() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = FileIntegrityConfig {
+            enabled: true,
+            scan_interval_secs: 300,
+            watch_paths: vec![dir.path().to_path_buf()],
+        };
+        let bus = EventBus::new(16);
+        let mut module = FileIntegrityModule::new(config, Some(bus));
+        assert!(module.init().is_ok());
     }
 }

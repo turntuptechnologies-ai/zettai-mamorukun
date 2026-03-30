@@ -125,6 +125,12 @@ passwd_path = "/etc/passwd"
 # group ファイルのパス
 group_path = "/etc/group"
 
+[event_bus]
+# イベントバスの有効/無効
+enabled = false
+# ブロードキャストチャネルの容量
+channel_capacity = 1024
+
 [health]
 # ハートビート（定期的なヘルスチェックログ出力）の有効/無効
 enabled = true

@@ -16,6 +16,10 @@ pub struct AppConfig {
     /// ヘルスチェック設定
     #[serde(default)]
     pub health: HealthConfig,
+
+    /// イベントバス設定
+    #[serde(default)]
+    pub event_bus: EventBusConfig,
 }
 
 /// 一般設定
@@ -706,6 +710,33 @@ impl Default for HealthConfig {
     }
 }
 
+/// イベントバス設定
+#[derive(Debug, Deserialize, Clone)]
+pub struct EventBusConfig {
+    /// イベントバスの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// ブロードキャストチャネルの容量
+    #[serde(default = "EventBusConfig::default_channel_capacity")]
+    pub channel_capacity: usize,
+}
+
+impl EventBusConfig {
+    fn default_channel_capacity() -> usize {
+        1024
+    }
+}
+
+impl Default for EventBusConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            channel_capacity: Self::default_channel_capacity(),
+        }
+    }
+}
+
 impl GeneralConfig {
     fn default_log_level() -> String {
         "info".to_string()
@@ -1038,5 +1069,24 @@ watch_dirs = ["/usr/bin", "/usr/sbin"]
         assert!(config.modules.suid_sgid_monitor.enabled);
         assert_eq!(config.modules.suid_sgid_monitor.scan_interval_secs, 120);
         assert_eq!(config.modules.suid_sgid_monitor.watch_dirs.len(), 2);
+    }
+
+    #[test]
+    fn test_event_bus_config_defaults() {
+        let config: AppConfig = toml::from_str("").unwrap();
+        assert!(!config.event_bus.enabled);
+        assert_eq!(config.event_bus.channel_capacity, 1024);
+    }
+
+    #[test]
+    fn test_event_bus_config_custom() {
+        let toml_str = r#"
+[event_bus]
+enabled = true
+channel_capacity = 512
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.event_bus.enabled);
+        assert_eq!(config.event_bus.channel_capacity, 512);
     }
 }
