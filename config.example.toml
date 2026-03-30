@@ -75,6 +75,14 @@ scan_interval_secs = 120
 # 監視対象の authorized_keys ファイルパスのリスト
 watch_paths = ["/root/.ssh/authorized_keys"]
 
+[modules.mount_monitor]
+# マウントポイント監視モジュールの有効/無効
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 30
+# マウント情報ファイルのパス
+mounts_path = "/proc/mounts"
+
 [modules.user_account]
 # ユーザーアカウント監視モジュールの有効/無効
 enabled = false
