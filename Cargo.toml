@@ -1,6 +1,6 @@
 [package]
 name = "zettai-mamorukun"
-version = "0.19.0"
+version = "0.20.0"
 edition = "2024"
 description = "Linux サーバ向けサイバー攻撃防御デーモン"
 license = "MIT"
@@ -10,7 +10,7 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "process"] }
 tokio-util = "0.7"
 toml = "0.8"
 tracing = "0.1"

@@ -47,4 +47,12 @@ pub enum AppError {
     /// イベントバスエラー
     #[error("イベントバスエラー: {message}")]
     EventBus { message: String },
+
+    /// アクションルール設定エラー
+    #[error("アクションルール設定エラー: {message}")]
+    ActionConfig { message: String },
+
+    /// アクション実行エラー
+    #[error("アクション実行エラー: {message}")]
+    ActionExecution { message: String },
 }
