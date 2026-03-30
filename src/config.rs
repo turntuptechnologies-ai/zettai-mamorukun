@@ -68,6 +68,10 @@ pub struct ModulesConfig {
     /// SSH公開鍵ファイル監視モジュールの設定
     #[serde(default)]
     pub ssh_key_monitor: SshKeyMonitorConfig,
+
+    /// マウントポイント監視モジュールの設定
+    #[serde(default)]
+    pub mount_monitor: MountMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -457,6 +461,42 @@ impl Default for SshKeyMonitorConfig {
     }
 }
 
+/// マウントポイント監視モジュールの設定
+#[derive(Debug, Deserialize, Clone)]
+pub struct MountMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "MountMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// マウント情報ファイルのパス
+    #[serde(default = "MountMonitorConfig::default_mounts_path")]
+    pub mounts_path: PathBuf,
+}
+
+impl MountMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_mounts_path() -> PathBuf {
+        PathBuf::from("/proc/mounts")
+    }
+}
+
+impl Default for MountMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            mounts_path: Self::default_mounts_path(),
+        }
+    }
+}
+
 /// ヘルスチェック設定
 #[derive(Debug, Deserialize)]
 pub struct HealthConfig {
@@ -704,5 +744,33 @@ watch_paths = ["/root/.ssh/authorized_keys", "/home/admin/.ssh/authorized_keys"]
         assert!(config.modules.ssh_key_monitor.enabled);
         assert_eq!(config.modules.ssh_key_monitor.scan_interval_secs, 60);
         assert_eq!(config.modules.ssh_key_monitor.watch_paths.len(), 2);
+    }
+
+    #[test]
+    fn test_mount_monitor_config_defaults() {
+        let config: AppConfig = toml::from_str("").unwrap();
+        assert!(!config.modules.mount_monitor.enabled);
+        assert_eq!(config.modules.mount_monitor.scan_interval_secs, 30);
+        assert_eq!(
+            config.modules.mount_monitor.mounts_path,
+            PathBuf::from("/proc/mounts")
+        );
+    }
+
+    #[test]
+    fn test_mount_monitor_config_custom() {
+        let toml_str = r#"
+[modules.mount_monitor]
+enabled = true
+scan_interval_secs = 15
+mounts_path = "/proc/self/mounts"
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.modules.mount_monitor.enabled);
+        assert_eq!(config.modules.mount_monitor.scan_interval_secs, 15);
+        assert_eq!(
+            config.modules.mount_monitor.mounts_path,
+            PathBuf::from("/proc/self/mounts")
+        );
     }
 }

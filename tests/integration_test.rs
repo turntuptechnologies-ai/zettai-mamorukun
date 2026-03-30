@@ -283,6 +283,40 @@ fn test_config_firewall_monitor_disabled_by_default() {
 }
 
 #[test]
+fn test_config_with_mount_monitor_section() {
+    use std::io::Write;
+    let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+    write!(
+        tmpfile,
+        r#"
+[modules.mount_monitor]
+enabled = true
+scan_interval_secs = 15
+mounts_path = "/proc/mounts"
+"#
+    )
+    .unwrap();
+    let config = AppConfig::load(tmpfile.path()).unwrap();
+    assert!(config.modules.mount_monitor.enabled);
+    assert_eq!(config.modules.mount_monitor.scan_interval_secs, 15);
+    assert_eq!(
+        config.modules.mount_monitor.mounts_path,
+        std::path::PathBuf::from("/proc/mounts")
+    );
+}
+
+#[test]
+fn test_config_mount_monitor_disabled_by_default() {
+    let config = AppConfig::load(Path::new("/tmp/nonexistent-zettai-config.toml")).unwrap();
+    assert!(!config.modules.mount_monitor.enabled);
+    assert_eq!(config.modules.mount_monitor.scan_interval_secs, 30);
+    assert_eq!(
+        config.modules.mount_monitor.mounts_path,
+        std::path::PathBuf::from("/proc/mounts")
+    );
+}
+
+#[test]
 fn test_config_file_integrity_disabled_by_default() {
     let config = AppConfig::load(Path::new("/tmp/nonexistent-zettai-config.toml")).unwrap();
     assert!(!config.modules.file_integrity.enabled);

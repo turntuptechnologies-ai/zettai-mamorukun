@@ -4,6 +4,7 @@ pub mod file_integrity;
 pub mod firewall_monitor;
 pub mod kernel_module;
 pub mod log_tamper;
+pub mod mount_monitor;
 pub mod process_monitor;
 pub mod ssh_key_monitor;
 pub mod systemd_service;

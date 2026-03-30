@@ -83,6 +83,7 @@ src/
     firewall_monitor.rs # ファイアウォールルール監視モジュール
     kernel_module.rs   # カーネルモジュール監視モジュール
     log_tamper.rs      # ログファイル改ざん検知モジュール
+    mount_monitor.rs   # マウントポイント監視モジュール
     process_monitor.rs # プロセス異常検知モジュール
     ssh_key_monitor.rs # SSH公開鍵ファイル監視モジュール
     systemd_service.rs # systemd サービス監視モジュール
