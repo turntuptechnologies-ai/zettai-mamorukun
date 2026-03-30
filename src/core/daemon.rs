@@ -10,6 +10,7 @@ use crate::modules::kernel_module::KernelModuleMonitor;
 use crate::modules::log_tamper::LogTamperModule;
 use crate::modules::mount_monitor::MountMonitorModule;
 use crate::modules::process_monitor::ProcessMonitorModule;
+use crate::modules::shell_config_monitor::ShellConfigMonitorModule;
 use crate::modules::ssh_key_monitor::SshKeyMonitorModule;
 use crate::modules::systemd_service::SystemdServiceModule;
 use crate::modules::user_account::UserAccountModule;
@@ -147,6 +148,19 @@ impl Daemon {
             None
         };
 
+        // シェル設定ファイル監視モジュールの初期化と起動
+        let sc_cancel_token = if self.config.modules.shell_config_monitor.enabled {
+            let mut sc =
+                ShellConfigMonitorModule::new(self.config.modules.shell_config_monitor.clone());
+            sc.init()?;
+            let cancel_token = sc.cancel_token();
+            sc.start().await?;
+            tracing::info!("シェル設定ファイル監視モジュールを起動しました");
+            Some(cancel_token)
+        } else {
+            None
+        };
+
         // マウントポイント監視モジュールの初期化と起動
         let mnt_cancel_token = if self.config.modules.mount_monitor.enabled {
             let mut mnt = MountMonitorModule::new(self.config.modules.mount_monitor.clone());
@@ -251,6 +265,10 @@ impl Daemon {
         if let Some(cancel_token) = ssh_cancel_token {
             cancel_token.cancel();
             tracing::info!("SSH公開鍵ファイル監視モジュールを停止しました");
+        }
+        if let Some(cancel_token) = sc_cancel_token {
+            cancel_token.cancel();
+            tracing::info!("シェル設定ファイル監視モジュールを停止しました");
         }
         if let Some(cancel_token) = mnt_cancel_token {
             cancel_token.cancel();

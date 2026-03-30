@@ -6,6 +6,7 @@ pub mod kernel_module;
 pub mod log_tamper;
 pub mod mount_monitor;
 pub mod process_monitor;
+pub mod shell_config_monitor;
 pub mod ssh_key_monitor;
 pub mod systemd_service;
 pub mod user_account;
