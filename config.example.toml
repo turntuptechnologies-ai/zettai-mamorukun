@@ -91,6 +91,14 @@ scan_interval_secs = 30
 # マウント情報ファイルのパス
 mounts_path = "/proc/mounts"
 
+[modules.tmp_exec_monitor]
+# 一時ディレクトリ実行ファイル検知モジュールの有効/無効
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 60
+# 監視対象ディレクトリのリスト
+watch_dirs = ["/tmp", "/dev/shm", "/var/tmp"]
+
 [modules.user_account]
 # ユーザーアカウント監視モジュールの有効/無効
 enabled = false
