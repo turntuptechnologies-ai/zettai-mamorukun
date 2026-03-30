@@ -88,6 +88,7 @@ src/
     shell_config_monitor.rs # シェル設定ファイル監視モジュール
     ssh_key_monitor.rs # SSH公開鍵ファイル監視モジュール
     sudoers_monitor.rs # sudoers ファイル監視モジュール
+    suid_sgid_monitor.rs # SUID/SGID ファイル監視モジュール
     systemd_service.rs # systemd サービス監視モジュール
     tmp_exec_monitor.rs # 一時ディレクトリ実行ファイル検知モジュール
     user_account.rs    # ユーザーアカウント監視モジュール

@@ -84,6 +84,10 @@ pub struct ModulesConfig {
     /// sudoers ファイル監視モジュールの設定
     #[serde(default)]
     pub sudoers_monitor: SudoersMonitorConfig,
+
+    /// SUID/SGID ファイル監視モジュールの設定
+    #[serde(default)]
+    pub suid_sgid_monitor: SuidSgidMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -630,6 +634,47 @@ impl Default for SudoersMonitorConfig {
     }
 }
 
+/// SUID/SGID ファイル監視モジュールの設定
+#[derive(Debug, Deserialize, Clone)]
+pub struct SuidSgidMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "SuidSgidMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象ディレクトリのリスト
+    #[serde(default = "SuidSgidMonitorConfig::default_watch_dirs")]
+    pub watch_dirs: Vec<PathBuf>,
+}
+
+impl SuidSgidMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        300
+    }
+
+    fn default_watch_dirs() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/usr/sbin"),
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/usr/local/sbin"),
+        ]
+    }
+}
+
+impl Default for SuidSgidMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            watch_dirs: Self::default_watch_dirs(),
+        }
+    }
+}
+
 /// ヘルスチェック設定
 #[derive(Debug, Deserialize)]
 pub struct HealthConfig {
@@ -971,5 +1016,27 @@ watch_paths = ["/etc/sudoers"]
         assert!(config.modules.sudoers_monitor.enabled);
         assert_eq!(config.modules.sudoers_monitor.scan_interval_secs, 60);
         assert_eq!(config.modules.sudoers_monitor.watch_paths.len(), 1);
+    }
+
+    #[test]
+    fn test_suid_sgid_monitor_config_defaults() {
+        let config: AppConfig = toml::from_str("").unwrap();
+        assert!(!config.modules.suid_sgid_monitor.enabled);
+        assert_eq!(config.modules.suid_sgid_monitor.scan_interval_secs, 300);
+        assert_eq!(config.modules.suid_sgid_monitor.watch_dirs.len(), 4);
+    }
+
+    #[test]
+    fn test_suid_sgid_monitor_config_custom() {
+        let toml_str = r#"
+[modules.suid_sgid_monitor]
+enabled = true
+scan_interval_secs = 120
+watch_dirs = ["/usr/bin", "/usr/sbin"]
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.modules.suid_sgid_monitor.enabled);
+        assert_eq!(config.modules.suid_sgid_monitor.scan_interval_secs, 120);
+        assert_eq!(config.modules.suid_sgid_monitor.watch_dirs.len(), 2);
     }
 }
