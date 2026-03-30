@@ -8,6 +8,7 @@
 //! - 設定行の追加・削除（行レベルの変更検知）
 
 use crate::config::ShellConfigMonitorConfig;
+use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::Module;
 use sha2::{Digest, Sha256};
@@ -42,14 +43,16 @@ struct ShellConfigSnapshot {
 pub struct ShellConfigMonitorModule {
     config: ShellConfigMonitorConfig,
     cancel_token: CancellationToken,
+    event_bus: Option<EventBus>,
 }
 
 impl ShellConfigMonitorModule {
     /// 新しいシェル設定ファイル監視モジュールを作成する
-    pub fn new(config: ShellConfigMonitorConfig) -> Self {
+    pub fn new(config: ShellConfigMonitorConfig, event_bus: Option<EventBus>) -> Self {
         Self {
             config,
             cancel_token: CancellationToken::new(),
+            event_bus,
         }
     }
 
@@ -80,7 +83,11 @@ impl ShellConfigMonitorModule {
 
     /// ベースラインと現在のスナップショットを比較し、変更を検知してログ出力する。
     /// 変更があった場合は `true` を返す。
-    fn detect_and_report(baseline: &ShellConfigSnapshot, current: &ShellConfigSnapshot) -> bool {
+    fn detect_and_report(
+        baseline: &ShellConfigSnapshot,
+        current: &ShellConfigSnapshot,
+        event_bus: &Option<EventBus>,
+    ) -> bool {
         let mut has_changes = false;
 
         // 新しいファイルの検知
@@ -92,6 +99,17 @@ impl ShellConfigMonitorModule {
                     line_count,
                     "シェル設定ファイルが追加されました"
                 );
+                if let Some(bus) = event_bus {
+                    bus.publish(
+                        SecurityEvent::new(
+                            "shell_config_added",
+                            Severity::Warning,
+                            "shell_config_monitor",
+                            format!("シェル設定ファイルが追加されました: {}", path.display()),
+                        )
+                        .with_details(path.display().to_string()),
+                    );
+                }
                 has_changes = true;
             }
         }
@@ -103,6 +121,17 @@ impl ShellConfigMonitorModule {
                     path = %path.display(),
                     "シェル設定ファイルが削除されました"
                 );
+                if let Some(bus) = event_bus {
+                    bus.publish(
+                        SecurityEvent::new(
+                            "shell_config_removed",
+                            Severity::Warning,
+                            "shell_config_monitor",
+                            format!("シェル設定ファイルが削除されました: {}", path.display()),
+                        )
+                        .with_details(path.display().to_string()),
+                    );
+                }
                 has_changes = true;
             }
         }
@@ -126,6 +155,17 @@ impl ShellConfigMonitorModule {
                         added_count,
                         "シェル設定行が追加されました"
                     );
+                    if let Some(bus) = event_bus {
+                        bus.publish(
+                            SecurityEvent::new(
+                                "shell_config_lines_added",
+                                Severity::Warning,
+                                "shell_config_monitor",
+                                format!("シェル設定行が追加されました: {}", path.display()),
+                            )
+                            .with_details(path.display().to_string()),
+                        );
+                    }
                 }
                 if removed_count > 0 {
                     tracing::warn!(
@@ -133,6 +173,17 @@ impl ShellConfigMonitorModule {
                         removed_count,
                         "シェル設定行が削除されました"
                     );
+                    if let Some(bus) = event_bus {
+                        bus.publish(
+                            SecurityEvent::new(
+                                "shell_config_lines_removed",
+                                Severity::Warning,
+                                "shell_config_monitor",
+                                format!("シェル設定行が削除されました: {}", path.display()),
+                            )
+                            .with_details(path.display().to_string()),
+                        );
+                    }
                 }
 
                 tracing::warn!(
@@ -223,6 +274,7 @@ impl Module for ShellConfigMonitorModule {
         let watch_paths = self.config.watch_paths.clone();
         let scan_interval_secs = self.config.scan_interval_secs;
         let cancel_token = self.cancel_token.clone();
+        let event_bus = self.event_bus.clone();
 
         tokio::spawn(async move {
             let mut interval =
@@ -239,7 +291,7 @@ impl Module for ShellConfigMonitorModule {
                     }
                     _ = interval.tick() => {
                         let current = ShellConfigMonitorModule::scan_files(&watch_paths);
-                        let changed = ShellConfigMonitorModule::detect_and_report(&baseline, &current);
+                        let changed = ShellConfigMonitorModule::detect_and_report(&baseline, &current, &event_bus);
 
                         if changed {
                             baseline = current;
@@ -351,7 +403,7 @@ mod tests {
         let watch_paths = vec![path];
         let snapshot1 = ShellConfigMonitorModule::scan_files(&watch_paths);
         let snapshot2 = ShellConfigMonitorModule::scan_files(&watch_paths);
-        let changed = ShellConfigMonitorModule::detect_and_report(&snapshot1, &snapshot2);
+        let changed = ShellConfigMonitorModule::detect_and_report(&snapshot1, &snapshot2, &None);
         assert!(!changed);
     }
 
@@ -371,7 +423,7 @@ mod tests {
         let current = ShellConfigSnapshot {
             files: current_files,
         };
-        let changed = ShellConfigMonitorModule::detect_and_report(&baseline, &current);
+        let changed = ShellConfigMonitorModule::detect_and_report(&baseline, &current, &None);
         assert!(changed);
     }
 
@@ -391,7 +443,7 @@ mod tests {
         let current = ShellConfigSnapshot {
             files: HashMap::new(),
         };
-        let changed = ShellConfigMonitorModule::detect_and_report(&baseline, &current);
+        let changed = ShellConfigMonitorModule::detect_and_report(&baseline, &current, &None);
         assert!(changed);
     }
 
@@ -422,7 +474,7 @@ mod tests {
             files: current_files,
         };
 
-        let changed = ShellConfigMonitorModule::detect_and_report(&baseline, &current);
+        let changed = ShellConfigMonitorModule::detect_and_report(&baseline, &current, &None);
         assert!(changed);
     }
 
@@ -453,7 +505,7 @@ mod tests {
             files: current_files,
         };
 
-        let changed = ShellConfigMonitorModule::detect_and_report(&baseline, &current);
+        let changed = ShellConfigMonitorModule::detect_and_report(&baseline, &current, &None);
         assert!(changed);
     }
 
@@ -464,7 +516,7 @@ mod tests {
             scan_interval_secs: 0,
             watch_paths: vec![],
         };
-        let mut module = ShellConfigMonitorModule::new(config);
+        let mut module = ShellConfigMonitorModule::new(config, None);
         let result = module.init();
         assert!(result.is_err());
     }
@@ -476,7 +528,7 @@ mod tests {
             scan_interval_secs: 120,
             watch_paths: vec![PathBuf::from("/etc/profile")],
         };
-        let mut module = ShellConfigMonitorModule::new(config);
+        let mut module = ShellConfigMonitorModule::new(config, None);
         let result = module.init();
         assert!(result.is_ok());
     }
@@ -491,7 +543,7 @@ mod tests {
             scan_interval_secs: 3600,
             watch_paths: vec![tmpfile.path().to_path_buf()],
         };
-        let mut module = ShellConfigMonitorModule::new(config);
+        let mut module = ShellConfigMonitorModule::new(config, None);
         module.init().unwrap();
 
         let cancel_token = module.cancel_token();

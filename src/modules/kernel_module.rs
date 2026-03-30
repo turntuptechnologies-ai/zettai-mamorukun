@@ -7,6 +7,7 @@
 //! - アンロードされたカーネルモジュール（情報レベルで記録）
 
 use crate::config::KernelModuleConfig;
+use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::Module;
 use std::collections::HashSet;
@@ -30,14 +31,16 @@ struct KernelModuleEntry {
 /// `/proc/modules` を定期スキャンし、モジュールの変化を検知してログに記録する。
 pub struct KernelModuleMonitor {
     config: KernelModuleConfig,
+    event_bus: Option<EventBus>,
     cancel_token: CancellationToken,
 }
 
 impl KernelModuleMonitor {
     /// 新しいカーネルモジュール監視モジュールを作成する
-    pub fn new(config: KernelModuleConfig) -> Self {
+    pub fn new(config: KernelModuleConfig, event_bus: Option<EventBus>) -> Self {
         Self {
             config,
+            event_bus,
             cancel_token: CancellationToken::new(),
         }
     }
@@ -145,6 +148,7 @@ impl Module for KernelModuleMonitor {
 
         let scan_interval_secs = self.config.scan_interval_secs;
         let cancel_token = self.cancel_token.clone();
+        let event_bus = self.event_bus.clone();
 
         tokio::spawn(async move {
             let mut interval =
@@ -190,6 +194,17 @@ impl Module for KernelModuleMonitor {
                                     "新しいカーネルモジュールがロードされました"
                                 );
                             }
+                            if let Some(ref bus) = event_bus {
+                                bus.publish(
+                                    SecurityEvent::new(
+                                        "kernel_module_loaded",
+                                        Severity::Warning,
+                                        "kernel_module",
+                                        format!("新しいカーネルモジュールがロードされました: {}", module_name),
+                                    )
+                                    .with_details(module_name.clone()),
+                                );
+                            }
                         }
 
                         for module_name in &unloaded {
@@ -197,6 +212,17 @@ impl Module for KernelModuleMonitor {
                                 module_name = %module_name,
                                 "カーネルモジュールがアンロードされました"
                             );
+                            if let Some(ref bus) = event_bus {
+                                bus.publish(
+                                    SecurityEvent::new(
+                                        "kernel_module_unloaded",
+                                        Severity::Info,
+                                        "kernel_module",
+                                        format!("カーネルモジュールがアンロードされました: {}", module_name),
+                                    )
+                                    .with_details(module_name.clone()),
+                                );
+                            }
                         }
 
                         if loaded.is_empty() && unloaded.is_empty() {
@@ -362,7 +388,7 @@ ip_tables 32768 0 - Live 0xffffffffc0800000";
             enabled: true,
             scan_interval_secs: 0,
         };
-        let mut module = KernelModuleMonitor::new(config);
+        let mut module = KernelModuleMonitor::new(config, None);
         let result = module.init();
         assert!(result.is_err());
     }
@@ -373,7 +399,7 @@ ip_tables 32768 0 - Live 0xffffffffc0800000";
             enabled: true,
             scan_interval_secs: 120,
         };
-        let mut module = KernelModuleMonitor::new(config);
+        let mut module = KernelModuleMonitor::new(config, None);
         let result = module.init();
         assert!(result.is_ok());
     }
@@ -384,7 +410,7 @@ ip_tables 32768 0 - Live 0xffffffffc0800000";
             enabled: true,
             scan_interval_secs: 3600,
         };
-        let mut module = KernelModuleMonitor::new(config);
+        let mut module = KernelModuleMonitor::new(config, None);
         module.init().unwrap();
 
         let cancel_token = module.cancel_token();

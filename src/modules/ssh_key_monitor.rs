@@ -7,6 +7,7 @@
 //! - SSH鍵の追加・削除（行レベルの変更検知）
 
 use crate::config::SshKeyMonitorConfig;
+use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::Module;
 use sha2::{Digest, Sha256};
@@ -41,14 +42,16 @@ struct AuthorizedKeysSnapshot {
 pub struct SshKeyMonitorModule {
     config: SshKeyMonitorConfig,
     cancel_token: CancellationToken,
+    event_bus: Option<EventBus>,
 }
 
 impl SshKeyMonitorModule {
     /// 新しいSSH公開鍵ファイル監視モジュールを作成する
-    pub fn new(config: SshKeyMonitorConfig) -> Self {
+    pub fn new(config: SshKeyMonitorConfig, event_bus: Option<EventBus>) -> Self {
         Self {
             config,
             cancel_token: CancellationToken::new(),
+            event_bus,
         }
     }
 
@@ -82,6 +85,7 @@ impl SshKeyMonitorModule {
     fn detect_and_report(
         baseline: &AuthorizedKeysSnapshot,
         current: &AuthorizedKeysSnapshot,
+        event_bus: &Option<EventBus>,
     ) -> bool {
         let mut has_changes = false;
 
@@ -94,6 +98,20 @@ impl SshKeyMonitorModule {
                     key_count,
                     "authorized_keys ファイルが追加されました"
                 );
+                if let Some(bus) = event_bus {
+                    bus.publish(
+                        SecurityEvent::new(
+                            "ssh_key_file_added",
+                            Severity::Warning,
+                            "ssh_key_monitor",
+                            format!(
+                                "authorized_keys ファイルが追加されました: {}",
+                                path.display()
+                            ),
+                        )
+                        .with_details(path.display().to_string()),
+                    );
+                }
                 has_changes = true;
             }
         }
@@ -105,6 +123,20 @@ impl SshKeyMonitorModule {
                     path = %path.display(),
                     "authorized_keys ファイルが削除されました"
                 );
+                if let Some(bus) = event_bus {
+                    bus.publish(
+                        SecurityEvent::new(
+                            "ssh_key_file_removed",
+                            Severity::Warning,
+                            "ssh_key_monitor",
+                            format!(
+                                "authorized_keys ファイルが削除されました: {}",
+                                path.display()
+                            ),
+                        )
+                        .with_details(path.display().to_string()),
+                    );
+                }
                 has_changes = true;
             }
         }
@@ -128,6 +160,17 @@ impl SshKeyMonitorModule {
                         added_count,
                         "SSH鍵が追加されました"
                     );
+                    if let Some(bus) = event_bus {
+                        bus.publish(
+                            SecurityEvent::new(
+                                "ssh_key_added",
+                                Severity::Warning,
+                                "ssh_key_monitor",
+                                format!("SSH鍵が追加されました: {}", path.display()),
+                            )
+                            .with_details(path.display().to_string()),
+                        );
+                    }
                 }
                 if removed_count > 0 {
                     tracing::warn!(
@@ -135,6 +178,17 @@ impl SshKeyMonitorModule {
                         removed_count,
                         "SSH鍵が削除されました"
                     );
+                    if let Some(bus) = event_bus {
+                        bus.publish(
+                            SecurityEvent::new(
+                                "ssh_key_removed",
+                                Severity::Warning,
+                                "ssh_key_monitor",
+                                format!("SSH鍵が削除されました: {}", path.display()),
+                            )
+                            .with_details(path.display().to_string()),
+                        );
+                    }
                 }
 
                 tracing::warn!(
@@ -226,6 +280,7 @@ impl Module for SshKeyMonitorModule {
         let watch_paths = self.config.watch_paths.clone();
         let scan_interval_secs = self.config.scan_interval_secs;
         let cancel_token = self.cancel_token.clone();
+        let event_bus = self.event_bus.clone();
 
         tokio::spawn(async move {
             let mut interval =
@@ -243,7 +298,7 @@ impl Module for SshKeyMonitorModule {
                     }
                     _ = interval.tick() => {
                         let current = SshKeyMonitorModule::scan_files(&watch_paths);
-                        let changed = SshKeyMonitorModule::detect_and_report(&baseline, &current);
+                        let changed = SshKeyMonitorModule::detect_and_report(&baseline, &current, &event_bus);
 
                         if changed {
                             baseline = current;
@@ -355,7 +410,7 @@ mod tests {
         let watch_paths = vec![path];
         let snapshot1 = SshKeyMonitorModule::scan_files(&watch_paths);
         let snapshot2 = SshKeyMonitorModule::scan_files(&watch_paths);
-        let changed = SshKeyMonitorModule::detect_and_report(&snapshot1, &snapshot2);
+        let changed = SshKeyMonitorModule::detect_and_report(&snapshot1, &snapshot2, &None);
         assert!(!changed);
     }
 
@@ -375,7 +430,7 @@ mod tests {
         let current = AuthorizedKeysSnapshot {
             files: current_files,
         };
-        let changed = SshKeyMonitorModule::detect_and_report(&baseline, &current);
+        let changed = SshKeyMonitorModule::detect_and_report(&baseline, &current, &None);
         assert!(changed);
     }
 
@@ -395,7 +450,7 @@ mod tests {
         let current = AuthorizedKeysSnapshot {
             files: HashMap::new(),
         };
-        let changed = SshKeyMonitorModule::detect_and_report(&baseline, &current);
+        let changed = SshKeyMonitorModule::detect_and_report(&baseline, &current, &None);
         assert!(changed);
     }
 
@@ -426,7 +481,7 @@ mod tests {
             files: current_files,
         };
 
-        let changed = SshKeyMonitorModule::detect_and_report(&baseline, &current);
+        let changed = SshKeyMonitorModule::detect_and_report(&baseline, &current, &None);
         assert!(changed);
     }
 
@@ -457,7 +512,7 @@ mod tests {
             files: current_files,
         };
 
-        let changed = SshKeyMonitorModule::detect_and_report(&baseline, &current);
+        let changed = SshKeyMonitorModule::detect_and_report(&baseline, &current, &None);
         assert!(changed);
     }
 
@@ -468,7 +523,7 @@ mod tests {
             scan_interval_secs: 0,
             watch_paths: vec![],
         };
-        let mut module = SshKeyMonitorModule::new(config);
+        let mut module = SshKeyMonitorModule::new(config, None);
         let result = module.init();
         assert!(result.is_err());
     }
@@ -480,7 +535,7 @@ mod tests {
             scan_interval_secs: 120,
             watch_paths: vec![PathBuf::from("/root/.ssh/authorized_keys")],
         };
-        let mut module = SshKeyMonitorModule::new(config);
+        let mut module = SshKeyMonitorModule::new(config, None);
         let result = module.init();
         assert!(result.is_ok());
     }
@@ -495,7 +550,7 @@ mod tests {
             scan_interval_secs: 3600,
             watch_paths: vec![tmpfile.path().to_path_buf()],
         };
-        let mut module = SshKeyMonitorModule::new(config);
+        let mut module = SshKeyMonitorModule::new(config, None);
         module.init().unwrap();
 
         let cancel_token = module.cancel_token();

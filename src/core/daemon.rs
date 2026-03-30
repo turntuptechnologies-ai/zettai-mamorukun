@@ -89,7 +89,10 @@ impl Daemon {
 
         // カーネルモジュール監視モジュールの初期化と起動
         let km_cancel_token = if self.config.modules.kernel_module.enabled {
-            let mut km = KernelModuleMonitor::new(self.config.modules.kernel_module.clone());
+            let mut km = KernelModuleMonitor::new(
+                self.config.modules.kernel_module.clone(),
+                event_bus.clone(),
+            );
             km.init()?;
             let cancel_token = km.cancel_token();
             km.start().await?;
@@ -101,7 +104,8 @@ impl Daemon {
 
         // Cron ジョブ改ざん検知モジュールの初期化と起動
         let cm_cancel_token = if self.config.modules.cron_monitor.enabled {
-            let mut cm = CronMonitorModule::new(self.config.modules.cron_monitor.clone());
+            let mut cm =
+                CronMonitorModule::new(self.config.modules.cron_monitor.clone(), event_bus.clone());
             cm.init()?;
             let cancel_token = cm.cancel_token();
             cm.start().await?;
@@ -113,7 +117,8 @@ impl Daemon {
 
         // ログファイル改ざん検知モジュールの初期化と起動
         let lt_cancel_token = if self.config.modules.log_tamper.enabled {
-            let mut lt = LogTamperModule::new(self.config.modules.log_tamper.clone());
+            let mut lt =
+                LogTamperModule::new(self.config.modules.log_tamper.clone(), event_bus.clone());
             lt.init()?;
             let cancel_token = lt.cancel_token();
             lt.start().await?;
@@ -125,7 +130,10 @@ impl Daemon {
 
         // systemd サービス監視モジュールの初期化と起動
         let ss_cancel_token = if self.config.modules.systemd_service.enabled {
-            let mut ss = SystemdServiceModule::new(self.config.modules.systemd_service.clone());
+            let mut ss = SystemdServiceModule::new(
+                self.config.modules.systemd_service.clone(),
+                event_bus.clone(),
+            );
             ss.init()?;
             let cancel_token = ss.cancel_token();
             ss.start().await?;
@@ -137,7 +145,10 @@ impl Daemon {
 
         // ファイアウォールルール監視モジュールの初期化と起動
         let fw_cancel_token = if self.config.modules.firewall_monitor.enabled {
-            let mut fw = FirewallMonitorModule::new(self.config.modules.firewall_monitor.clone());
+            let mut fw = FirewallMonitorModule::new(
+                self.config.modules.firewall_monitor.clone(),
+                event_bus.clone(),
+            );
             fw.init()?;
             let cancel_token = fw.cancel_token();
             fw.start().await?;
@@ -149,7 +160,8 @@ impl Daemon {
 
         // DNS設定改ざん検知モジュールの初期化と起動
         let dns_cancel_token = if self.config.modules.dns_monitor.enabled {
-            let mut dns = DnsMonitorModule::new(self.config.modules.dns_monitor.clone());
+            let mut dns =
+                DnsMonitorModule::new(self.config.modules.dns_monitor.clone(), event_bus.clone());
             dns.init()?;
             let cancel_token = dns.cancel_token();
             dns.start().await?;
@@ -161,7 +173,10 @@ impl Daemon {
 
         // SSH公開鍵ファイル監視モジュールの初期化と起動
         let ssh_cancel_token = if self.config.modules.ssh_key_monitor.enabled {
-            let mut ssh = SshKeyMonitorModule::new(self.config.modules.ssh_key_monitor.clone());
+            let mut ssh = SshKeyMonitorModule::new(
+                self.config.modules.ssh_key_monitor.clone(),
+                event_bus.clone(),
+            );
             ssh.init()?;
             let cancel_token = ssh.cancel_token();
             ssh.start().await?;
@@ -173,8 +188,10 @@ impl Daemon {
 
         // シェル設定ファイル監視モジュールの初期化と起動
         let sc_cancel_token = if self.config.modules.shell_config_monitor.enabled {
-            let mut sc =
-                ShellConfigMonitorModule::new(self.config.modules.shell_config_monitor.clone());
+            let mut sc = ShellConfigMonitorModule::new(
+                self.config.modules.shell_config_monitor.clone(),
+                event_bus.clone(),
+            );
             sc.init()?;
             let cancel_token = sc.cancel_token();
             sc.start().await?;
@@ -186,7 +203,10 @@ impl Daemon {
 
         // 一時ディレクトリ実行ファイル検知モジュールの初期化と起動
         let te_cancel_token = if self.config.modules.tmp_exec_monitor.enabled {
-            let mut te = TmpExecMonitorModule::new(self.config.modules.tmp_exec_monitor.clone());
+            let mut te = TmpExecMonitorModule::new(
+                self.config.modules.tmp_exec_monitor.clone(),
+                event_bus.clone(),
+            );
             te.init()?;
             let cancel_token = te.cancel_token();
             te.start().await?;
@@ -198,7 +218,10 @@ impl Daemon {
 
         // sudoers ファイル監視モジュールの初期化と起動
         let sud_cancel_token = if self.config.modules.sudoers_monitor.enabled {
-            let mut sud = SudoersMonitorModule::new(self.config.modules.sudoers_monitor.clone());
+            let mut sud = SudoersMonitorModule::new(
+                self.config.modules.sudoers_monitor.clone(),
+                event_bus.clone(),
+            );
             sud.init()?;
             let cancel_token = sud.cancel_token();
             sud.start().await?;
@@ -210,7 +233,10 @@ impl Daemon {
 
         // SUID/SGID ファイル監視モジュールの初期化と起動
         let ssg_cancel_token = if self.config.modules.suid_sgid_monitor.enabled {
-            let mut ssg = SuidSgidMonitorModule::new(self.config.modules.suid_sgid_monitor.clone());
+            let mut ssg = SuidSgidMonitorModule::new(
+                self.config.modules.suid_sgid_monitor.clone(),
+                event_bus.clone(),
+            );
             ssg.init()?;
             let cancel_token = ssg.cancel_token();
             ssg.start().await?;
@@ -222,7 +248,10 @@ impl Daemon {
 
         // マウントポイント監視モジュールの初期化と起動
         let mnt_cancel_token = if self.config.modules.mount_monitor.enabled {
-            let mut mnt = MountMonitorModule::new(self.config.modules.mount_monitor.clone());
+            let mut mnt = MountMonitorModule::new(
+                self.config.modules.mount_monitor.clone(),
+                event_bus.clone(),
+            );
             mnt.init()?;
             let cancel_token = mnt.cancel_token();
             mnt.start().await?;
@@ -234,7 +263,8 @@ impl Daemon {
 
         // ユーザーアカウント監視モジュールの初期化と起動
         let ua_cancel_token = if self.config.modules.user_account.enabled {
-            let mut ua = UserAccountModule::new(self.config.modules.user_account.clone());
+            let mut ua =
+                UserAccountModule::new(self.config.modules.user_account.clone(), event_bus.clone());
             ua.init()?;
             let cancel_token = ua.cancel_token();
             ua.start().await?;

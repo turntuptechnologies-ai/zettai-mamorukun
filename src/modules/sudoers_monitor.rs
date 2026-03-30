@@ -8,6 +8,7 @@
 //! - 設定行の追加・削除（行レベルの変更検知）
 
 use crate::config::SudoersMonitorConfig;
+use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::Module;
 use sha2::{Digest, Sha256};
@@ -43,14 +44,16 @@ struct SudoersSnapshot {
 pub struct SudoersMonitorModule {
     config: SudoersMonitorConfig,
     cancel_token: CancellationToken,
+    event_bus: Option<EventBus>,
 }
 
 impl SudoersMonitorModule {
     /// 新しい sudoers ファイル監視モジュールを作成する
-    pub fn new(config: SudoersMonitorConfig) -> Self {
+    pub fn new(config: SudoersMonitorConfig, event_bus: Option<EventBus>) -> Self {
         Self {
             config,
             cancel_token: CancellationToken::new(),
+            event_bus,
         }
     }
 
@@ -102,7 +105,11 @@ impl SudoersMonitorModule {
 
     /// ベースラインと現在のスナップショットを比較し、変更を検知してログ出力する。
     /// 変更があった場合は `true` を返す。
-    fn detect_and_report(baseline: &SudoersSnapshot, current: &SudoersSnapshot) -> bool {
+    fn detect_and_report(
+        baseline: &SudoersSnapshot,
+        current: &SudoersSnapshot,
+        event_bus: &Option<EventBus>,
+    ) -> bool {
         let mut has_changes = false;
 
         // 新しいファイルの検知
@@ -114,6 +121,17 @@ impl SudoersMonitorModule {
                     line_count,
                     "sudoers ファイルが追加されました"
                 );
+                if let Some(bus) = event_bus {
+                    bus.publish(
+                        SecurityEvent::new(
+                            "sudoers_file_added",
+                            Severity::Critical,
+                            "sudoers_monitor",
+                            format!("sudoers ファイルが追加されました: {}", path.display()),
+                        )
+                        .with_details(path.display().to_string()),
+                    );
+                }
                 has_changes = true;
             }
         }
@@ -125,6 +143,17 @@ impl SudoersMonitorModule {
                     path = %path.display(),
                     "sudoers ファイルが削除されました"
                 );
+                if let Some(bus) = event_bus {
+                    bus.publish(
+                        SecurityEvent::new(
+                            "sudoers_file_removed",
+                            Severity::Warning,
+                            "sudoers_monitor",
+                            format!("sudoers ファイルが削除されました: {}", path.display()),
+                        )
+                        .with_details(path.display().to_string()),
+                    );
+                }
                 has_changes = true;
             }
         }
@@ -148,6 +177,17 @@ impl SudoersMonitorModule {
                         added_count,
                         "sudoers 設定行が追加されました"
                     );
+                    if let Some(bus) = event_bus {
+                        bus.publish(
+                            SecurityEvent::new(
+                                "sudoers_lines_added",
+                                Severity::Critical,
+                                "sudoers_monitor",
+                                format!("sudoers 設定行が追加されました: {}", path.display()),
+                            )
+                            .with_details(path.display().to_string()),
+                        );
+                    }
                 }
                 if removed_count > 0 {
                     tracing::warn!(
@@ -155,6 +195,17 @@ impl SudoersMonitorModule {
                         removed_count,
                         "sudoers 設定行が削除されました"
                     );
+                    if let Some(bus) = event_bus {
+                        bus.publish(
+                            SecurityEvent::new(
+                                "sudoers_lines_removed",
+                                Severity::Warning,
+                                "sudoers_monitor",
+                                format!("sudoers 設定行が削除されました: {}", path.display()),
+                            )
+                            .with_details(path.display().to_string()),
+                        );
+                    }
                 }
 
                 tracing::warn!(
@@ -245,6 +296,7 @@ impl Module for SudoersMonitorModule {
         let watch_paths = self.config.watch_paths.clone();
         let scan_interval_secs = self.config.scan_interval_secs;
         let cancel_token = self.cancel_token.clone();
+        let event_bus = self.event_bus.clone();
 
         tokio::spawn(async move {
             let mut interval =
@@ -261,7 +313,7 @@ impl Module for SudoersMonitorModule {
                     }
                     _ = interval.tick() => {
                         let current = SudoersMonitorModule::scan_files(&watch_paths);
-                        let changed = SudoersMonitorModule::detect_and_report(&baseline, &current);
+                        let changed = SudoersMonitorModule::detect_and_report(&baseline, &current, &event_bus);
 
                         if changed {
                             baseline = current;
@@ -384,7 +436,7 @@ mod tests {
         let watch_paths = vec![path];
         let snapshot1 = SudoersMonitorModule::scan_files(&watch_paths);
         let snapshot2 = SudoersMonitorModule::scan_files(&watch_paths);
-        let changed = SudoersMonitorModule::detect_and_report(&snapshot1, &snapshot2);
+        let changed = SudoersMonitorModule::detect_and_report(&snapshot1, &snapshot2, &None);
         assert!(!changed);
     }
 
@@ -404,7 +456,7 @@ mod tests {
         let current = SudoersSnapshot {
             files: current_files,
         };
-        let changed = SudoersMonitorModule::detect_and_report(&baseline, &current);
+        let changed = SudoersMonitorModule::detect_and_report(&baseline, &current, &None);
         assert!(changed);
     }
 
@@ -424,7 +476,7 @@ mod tests {
         let current = SudoersSnapshot {
             files: HashMap::new(),
         };
-        let changed = SudoersMonitorModule::detect_and_report(&baseline, &current);
+        let changed = SudoersMonitorModule::detect_and_report(&baseline, &current, &None);
         assert!(changed);
     }
 
@@ -455,7 +507,7 @@ mod tests {
             files: current_files,
         };
 
-        let changed = SudoersMonitorModule::detect_and_report(&baseline, &current);
+        let changed = SudoersMonitorModule::detect_and_report(&baseline, &current, &None);
         assert!(changed);
     }
 
@@ -486,7 +538,7 @@ mod tests {
             files: current_files,
         };
 
-        let changed = SudoersMonitorModule::detect_and_report(&baseline, &current);
+        let changed = SudoersMonitorModule::detect_and_report(&baseline, &current, &None);
         assert!(changed);
     }
 
@@ -497,7 +549,7 @@ mod tests {
             scan_interval_secs: 0,
             watch_paths: vec![],
         };
-        let mut module = SudoersMonitorModule::new(config);
+        let mut module = SudoersMonitorModule::new(config, None);
         let result = module.init();
         assert!(result.is_err());
     }
@@ -509,7 +561,7 @@ mod tests {
             scan_interval_secs: 120,
             watch_paths: vec![PathBuf::from("/etc/sudoers")],
         };
-        let mut module = SudoersMonitorModule::new(config);
+        let mut module = SudoersMonitorModule::new(config, None);
         let result = module.init();
         assert!(result.is_ok());
     }
@@ -524,7 +576,7 @@ mod tests {
             scan_interval_secs: 3600,
             watch_paths: vec![tmpfile.path().to_path_buf()],
         };
-        let mut module = SudoersMonitorModule::new(config);
+        let mut module = SudoersMonitorModule::new(config, None);
         module.init().unwrap();
 
         let cancel_token = module.cancel_token();
@@ -564,7 +616,7 @@ mod tests {
         let current = SudoersMonitorModule::scan_files(&watch_paths);
         assert_eq!(current.files.len(), 1);
 
-        let changed = SudoersMonitorModule::detect_and_report(&baseline, &current);
+        let changed = SudoersMonitorModule::detect_and_report(&baseline, &current, &None);
         assert!(changed);
     }
 }

@@ -11,6 +11,7 @@
 //! - グループメンバー変更 / グループ GID 変更
 
 use crate::config::UserAccountConfig;
+use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::Module;
 use std::collections::HashMap;
@@ -47,14 +48,16 @@ struct AccountSnapshot {
 pub struct UserAccountModule {
     config: UserAccountConfig,
     cancel_token: CancellationToken,
+    event_bus: Option<EventBus>,
 }
 
 impl UserAccountModule {
     /// 新しいユーザーアカウント監視モジュールを作成する
-    pub fn new(config: UserAccountConfig) -> Self {
+    pub fn new(config: UserAccountConfig, event_bus: Option<EventBus>) -> Self {
         Self {
             config,
             cancel_token: CancellationToken::new(),
+            event_bus,
         }
     }
 
@@ -181,7 +184,11 @@ impl UserAccountModule {
     }
 
     /// 2 つのスナップショットを比較し、変更をログ出力する。変更があれば true を返す。
-    fn detect_changes(old: &AccountSnapshot, new: &AccountSnapshot) -> bool {
+    fn detect_changes(
+        old: &AccountSnapshot,
+        new: &AccountSnapshot,
+        event_bus: &Option<EventBus>,
+    ) -> bool {
         let mut changed = false;
 
         // --- ユーザー変更 ---
@@ -190,6 +197,17 @@ impl UserAccountModule {
             if !old.users.contains_key(username) {
                 changed = true;
                 tracing::warn!(username = %username, uid = entry.uid, "新規ユーザーが追加されました");
+                if let Some(bus) = event_bus {
+                    bus.publish(
+                        SecurityEvent::new(
+                            "user_added",
+                            Severity::Warning,
+                            "user_account",
+                            "新規ユーザーが追加されました",
+                        )
+                        .with_details(username.clone()),
+                    );
+                }
             }
         }
         // 削除されたユーザー
@@ -197,6 +215,17 @@ impl UserAccountModule {
             if !new.users.contains_key(username) {
                 changed = true;
                 tracing::warn!(username = %username, "ユーザーが削除されました");
+                if let Some(bus) = event_bus {
+                    bus.publish(
+                        SecurityEvent::new(
+                            "user_removed",
+                            Severity::Warning,
+                            "user_account",
+                            "ユーザーが削除されました",
+                        )
+                        .with_details(username.clone()),
+                    );
+                }
             }
         }
         // UID 0 チェック（root 以外）
@@ -207,6 +236,17 @@ impl UserAccountModule {
                     username = %username,
                     "CRITICAL: root 以外のユーザーが UID 0 を持っています"
                 );
+                if let Some(bus) = event_bus {
+                    bus.publish(
+                        SecurityEvent::new(
+                            "user_uid_zero",
+                            Severity::Critical,
+                            "user_account",
+                            "CRITICAL: root 以外のユーザーが UID 0 を持っています",
+                        )
+                        .with_details(username.clone()),
+                    );
+                }
             }
         }
         // 既存ユーザーの変更
@@ -220,6 +260,17 @@ impl UserAccountModule {
                         new_shell = %new_entry.shell,
                         "ユーザーのシェルが変更されました"
                     );
+                    if let Some(bus) = event_bus {
+                        bus.publish(
+                            SecurityEvent::new(
+                                "user_shell_changed",
+                                Severity::Warning,
+                                "user_account",
+                                "ユーザーのシェルが変更されました",
+                            )
+                            .with_details(username.clone()),
+                        );
+                    }
                 }
                 if old_entry.uid != new_entry.uid {
                     changed = true;
@@ -229,6 +280,17 @@ impl UserAccountModule {
                         new_uid = new_entry.uid,
                         "ユーザーの UID が変更されました"
                     );
+                    if let Some(bus) = event_bus {
+                        bus.publish(
+                            SecurityEvent::new(
+                                "user_uid_changed",
+                                Severity::Warning,
+                                "user_account",
+                                "ユーザーの UID が変更されました",
+                            )
+                            .with_details(username.clone()),
+                        );
+                    }
                 }
                 if old_entry.gid != new_entry.gid {
                     changed = true;
@@ -238,6 +300,17 @@ impl UserAccountModule {
                         new_gid = new_entry.gid,
                         "ユーザーの GID が変更されました"
                     );
+                    if let Some(bus) = event_bus {
+                        bus.publish(
+                            SecurityEvent::new(
+                                "user_gid_changed",
+                                Severity::Warning,
+                                "user_account",
+                                "ユーザーの GID が変更されました",
+                            )
+                            .with_details(username.clone()),
+                        );
+                    }
                 }
                 if old_entry.home != new_entry.home {
                     changed = true;
@@ -247,6 +320,17 @@ impl UserAccountModule {
                         new_home = %new_entry.home,
                         "ユーザーのホームディレクトリが変更されました"
                     );
+                    if let Some(bus) = event_bus {
+                        bus.publish(
+                            SecurityEvent::new(
+                                "user_home_changed",
+                                Severity::Warning,
+                                "user_account",
+                                "ユーザーのホームディレクトリが変更されました",
+                            )
+                            .with_details(username.clone()),
+                        );
+                    }
                 }
             }
         }
@@ -257,6 +341,17 @@ impl UserAccountModule {
             if !old.groups.contains_key(name) {
                 changed = true;
                 tracing::warn!(group = %name, gid = entry.gid, "新規グループが追加されました");
+                if let Some(bus) = event_bus {
+                    bus.publish(
+                        SecurityEvent::new(
+                            "group_added",
+                            Severity::Warning,
+                            "user_account",
+                            "新規グループが追加されました",
+                        )
+                        .with_details(name.clone()),
+                    );
+                }
             }
         }
         // 削除されたグループ
@@ -264,6 +359,17 @@ impl UserAccountModule {
             if !new.groups.contains_key(name) {
                 changed = true;
                 tracing::warn!(group = %name, "グループが削除されました");
+                if let Some(bus) = event_bus {
+                    bus.publish(
+                        SecurityEvent::new(
+                            "group_removed",
+                            Severity::Warning,
+                            "user_account",
+                            "グループが削除されました",
+                        )
+                        .with_details(name.clone()),
+                    );
+                }
             }
         }
         // 既存グループの変更
@@ -277,6 +383,17 @@ impl UserAccountModule {
                         new_gid = new_entry.gid,
                         "グループの GID が変更されました"
                     );
+                    if let Some(bus) = event_bus {
+                        bus.publish(
+                            SecurityEvent::new(
+                                "group_gid_changed",
+                                Severity::Warning,
+                                "user_account",
+                                "グループの GID が変更されました",
+                            )
+                            .with_details(name.clone()),
+                        );
+                    }
                 }
                 if old_entry.members != new_entry.members {
                     changed = true;
@@ -286,6 +403,17 @@ impl UserAccountModule {
                         new_members = ?new_entry.members,
                         "グループのメンバーが変更されました"
                     );
+                    if let Some(bus) = event_bus {
+                        bus.publish(
+                            SecurityEvent::new(
+                                "group_members_changed",
+                                Severity::Warning,
+                                "user_account",
+                                "グループのメンバーが変更されました",
+                            )
+                            .with_details(name.clone()),
+                        );
+                    }
                 }
             }
         }
@@ -334,6 +462,7 @@ impl Module for UserAccountModule {
         let group_path = self.config.group_path.clone();
         let scan_interval_secs = self.config.scan_interval_secs;
         let cancel_token = self.cancel_token.clone();
+        let event_bus = self.event_bus.clone();
 
         // 初回スナップショット
         let initial_snapshot = Self::take_snapshot(&passwd_path, &group_path).ok_or_else(|| {
@@ -364,7 +493,7 @@ impl Module for UserAccountModule {
                     }
                     _ = interval.tick() => {
                         if let Some(new_snapshot) = UserAccountModule::take_snapshot(&passwd_path, &group_path) {
-                            let changed = UserAccountModule::detect_changes(&snapshot, &new_snapshot);
+                            let changed = UserAccountModule::detect_changes(&snapshot, &new_snapshot, &event_bus);
                             if changed {
                                 snapshot = new_snapshot;
                             } else {
@@ -489,7 +618,7 @@ badgid:x:abc:user1
             users: UserAccountModule::parse_passwd(SAMPLE_PASSWD),
             groups: UserAccountModule::parse_group(SAMPLE_GROUP),
         };
-        assert!(!UserAccountModule::detect_changes(&old, &new));
+        assert!(!UserAccountModule::detect_changes(&old, &new, &None));
     }
 
     #[test]
@@ -506,7 +635,7 @@ newuser:x:1001:1001:New:/home/newuser:/bin/bash
             users: UserAccountModule::parse_passwd(new_passwd),
             groups: HashMap::new(),
         };
-        assert!(UserAccountModule::detect_changes(&old, &new));
+        assert!(UserAccountModule::detect_changes(&old, &new, &None));
     }
 
     #[test]
@@ -523,7 +652,7 @@ olduser:x:1001:1001:Old:/home/olduser:/bin/bash
             users: UserAccountModule::parse_passwd("root:x:0:0:root:/root:/bin/bash\n"),
             groups: HashMap::new(),
         };
-        assert!(UserAccountModule::detect_changes(&old, &new));
+        assert!(UserAccountModule::detect_changes(&old, &new, &None));
     }
 
     #[test]
@@ -540,7 +669,7 @@ evil:x:0:0:evil:/root:/bin/bash
             users: UserAccountModule::parse_passwd(new_passwd),
             groups: HashMap::new(),
         };
-        assert!(UserAccountModule::detect_changes(&old, &new));
+        assert!(UserAccountModule::detect_changes(&old, &new, &None));
     }
 
     #[test]
@@ -555,7 +684,7 @@ evil:x:0:0:evil:/root:/bin/bash
             users: UserAccountModule::parse_passwd(new_passwd),
             groups: HashMap::new(),
         };
-        assert!(UserAccountModule::detect_changes(&old, &new));
+        assert!(UserAccountModule::detect_changes(&old, &new, &None));
     }
 
     #[test]
@@ -570,7 +699,7 @@ evil:x:0:0:evil:/root:/bin/bash
             users: UserAccountModule::parse_passwd(new_passwd),
             groups: HashMap::new(),
         };
-        assert!(UserAccountModule::detect_changes(&old, &new));
+        assert!(UserAccountModule::detect_changes(&old, &new, &None));
     }
 
     #[test]
@@ -585,7 +714,7 @@ evil:x:0:0:evil:/root:/bin/bash
             users: UserAccountModule::parse_passwd(new_passwd),
             groups: HashMap::new(),
         };
-        assert!(UserAccountModule::detect_changes(&old, &new));
+        assert!(UserAccountModule::detect_changes(&old, &new, &None));
     }
 
     #[test]
@@ -600,7 +729,7 @@ evil:x:0:0:evil:/root:/bin/bash
             users: UserAccountModule::parse_passwd(new_passwd),
             groups: HashMap::new(),
         };
-        assert!(UserAccountModule::detect_changes(&old, &new));
+        assert!(UserAccountModule::detect_changes(&old, &new, &None));
     }
 
     #[test]
@@ -617,7 +746,7 @@ newgroup:x:1001:
             users: HashMap::new(),
             groups: UserAccountModule::parse_group(new_group),
         };
-        assert!(UserAccountModule::detect_changes(&old, &new));
+        assert!(UserAccountModule::detect_changes(&old, &new, &None));
     }
 
     #[test]
@@ -634,7 +763,7 @@ oldgroup:x:1001:
             users: HashMap::new(),
             groups: UserAccountModule::parse_group("root:x:0:\n"),
         };
-        assert!(UserAccountModule::detect_changes(&old, &new));
+        assert!(UserAccountModule::detect_changes(&old, &new, &None));
     }
 
     #[test]
@@ -647,7 +776,7 @@ oldgroup:x:1001:
             users: HashMap::new(),
             groups: UserAccountModule::parse_group("sudo:x:27:alice,bob\n"),
         };
-        assert!(UserAccountModule::detect_changes(&old, &new));
+        assert!(UserAccountModule::detect_changes(&old, &new, &None));
     }
 
     #[test]
@@ -660,7 +789,7 @@ oldgroup:x:1001:
             users: HashMap::new(),
             groups: UserAccountModule::parse_group("mygroup:x:200:\n"),
         };
-        assert!(UserAccountModule::detect_changes(&old, &new));
+        assert!(UserAccountModule::detect_changes(&old, &new, &None));
     }
 
     #[test]
@@ -671,7 +800,7 @@ oldgroup:x:1001:
             passwd_path: PathBuf::from("/etc/passwd"),
             group_path: PathBuf::from("/etc/group"),
         };
-        let mut module = UserAccountModule::new(config);
+        let mut module = UserAccountModule::new(config, None);
         let result = module.init();
         assert!(result.is_err());
     }
@@ -684,7 +813,7 @@ oldgroup:x:1001:
             passwd_path: PathBuf::from("/etc/passwd"),
             group_path: PathBuf::from("/etc/group"),
         };
-        let mut module = UserAccountModule::new(config);
+        let mut module = UserAccountModule::new(config, None);
         let result = module.init();
         assert!(result.is_ok());
     }
@@ -697,7 +826,7 @@ oldgroup:x:1001:
             passwd_path: PathBuf::from("/nonexistent-passwd"),
             group_path: PathBuf::from("/nonexistent-group"),
         };
-        let mut module = UserAccountModule::new(config);
+        let mut module = UserAccountModule::new(config, None);
         // init は warn を出すが成功する
         let result = module.init();
         assert!(result.is_ok());
@@ -718,7 +847,7 @@ oldgroup:x:1001:
             passwd_path,
             group_path,
         };
-        let mut module = UserAccountModule::new(config);
+        let mut module = UserAccountModule::new(config, None);
         module.init().unwrap();
 
         let cancel_token = module.cancel_token();
@@ -736,7 +865,7 @@ oldgroup:x:1001:
             passwd_path: PathBuf::from("/nonexistent-passwd-test"),
             group_path: PathBuf::from("/nonexistent-group-test"),
         };
-        let mut module = UserAccountModule::new(config);
+        let mut module = UserAccountModule::new(config, None);
         module.init().unwrap();
 
         let result = module.start().await;
