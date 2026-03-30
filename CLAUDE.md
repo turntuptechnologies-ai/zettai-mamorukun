@@ -85,6 +85,7 @@ src/
     log_tamper.rs      # ログファイル改ざん検知モジュール
     mount_monitor.rs   # マウントポイント監視モジュール
     process_monitor.rs # プロセス異常検知モジュール
+    shell_config_monitor.rs # シェル設定ファイル監視モジュール
     ssh_key_monitor.rs # SSH公開鍵ファイル監視モジュール
     systemd_service.rs # systemd サービス監視モジュール
     user_account.rs    # ユーザーアカウント監視モジュール

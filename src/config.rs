@@ -72,6 +72,10 @@ pub struct ModulesConfig {
     /// マウントポイント監視モジュールの設定
     #[serde(default)]
     pub mount_monitor: MountMonitorConfig,
+
+    /// シェル設定ファイル監視モジュールの設定
+    #[serde(default)]
+    pub shell_config_monitor: ShellConfigMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -497,6 +501,48 @@ impl Default for MountMonitorConfig {
     }
 }
 
+/// シェル設定ファイル監視モジュールの設定
+#[derive(Debug, Deserialize, Clone)]
+pub struct ShellConfigMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "ShellConfigMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象のシェル設定ファイルパスのリスト
+    #[serde(default = "ShellConfigMonitorConfig::default_watch_paths")]
+    pub watch_paths: Vec<PathBuf>,
+}
+
+impl ShellConfigMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        120
+    }
+
+    fn default_watch_paths() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/etc/profile"),
+            PathBuf::from("/etc/bash.bashrc"),
+            PathBuf::from("/etc/environment"),
+            PathBuf::from("/root/.bashrc"),
+            PathBuf::from("/root/.profile"),
+        ]
+    }
+}
+
+impl Default for ShellConfigMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            watch_paths: Self::default_watch_paths(),
+        }
+    }
+}
+
 /// ヘルスチェック設定
 #[derive(Debug, Deserialize)]
 pub struct HealthConfig {
@@ -772,5 +818,27 @@ mounts_path = "/proc/self/mounts"
             config.modules.mount_monitor.mounts_path,
             PathBuf::from("/proc/self/mounts")
         );
+    }
+
+    #[test]
+    fn test_shell_config_monitor_config_defaults() {
+        let config: AppConfig = toml::from_str("").unwrap();
+        assert!(!config.modules.shell_config_monitor.enabled);
+        assert_eq!(config.modules.shell_config_monitor.scan_interval_secs, 120);
+        assert_eq!(config.modules.shell_config_monitor.watch_paths.len(), 5);
+    }
+
+    #[test]
+    fn test_shell_config_monitor_config_custom() {
+        let toml_str = r#"
+[modules.shell_config_monitor]
+enabled = true
+scan_interval_secs = 60
+watch_paths = ["/etc/profile", "/etc/bash.bashrc"]
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.modules.shell_config_monitor.enabled);
+        assert_eq!(config.modules.shell_config_monitor.scan_interval_secs, 60);
+        assert_eq!(config.modules.shell_config_monitor.watch_paths.len(), 2);
     }
 }
