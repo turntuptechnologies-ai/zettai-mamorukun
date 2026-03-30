@@ -80,6 +80,10 @@ pub struct ModulesConfig {
     /// 一時ディレクトリ実行ファイル検知モジュールの設定
     #[serde(default)]
     pub tmp_exec_monitor: TmpExecMonitorConfig,
+
+    /// sudoers ファイル監視モジュールの設定
+    #[serde(default)]
+    pub sudoers_monitor: SudoersMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -587,6 +591,45 @@ impl Default for TmpExecMonitorConfig {
     }
 }
 
+/// sudoers ファイル監視モジュールの設定
+#[derive(Debug, Deserialize, Clone)]
+pub struct SudoersMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "SudoersMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象パスのリスト（ファイルまたはディレクトリ）
+    #[serde(default = "SudoersMonitorConfig::default_watch_paths")]
+    pub watch_paths: Vec<PathBuf>,
+}
+
+impl SudoersMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        120
+    }
+
+    fn default_watch_paths() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/etc/sudoers"),
+            PathBuf::from("/etc/sudoers.d"),
+        ]
+    }
+}
+
+impl Default for SudoersMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            watch_paths: Self::default_watch_paths(),
+        }
+    }
+}
+
 /// ヘルスチェック設定
 #[derive(Debug, Deserialize)]
 pub struct HealthConfig {
@@ -906,5 +949,27 @@ watch_paths = ["/etc/profile", "/etc/bash.bashrc"]
         assert!(config.modules.shell_config_monitor.enabled);
         assert_eq!(config.modules.shell_config_monitor.scan_interval_secs, 60);
         assert_eq!(config.modules.shell_config_monitor.watch_paths.len(), 2);
+    }
+
+    #[test]
+    fn test_sudoers_monitor_config_defaults() {
+        let config: AppConfig = toml::from_str("").unwrap();
+        assert!(!config.modules.sudoers_monitor.enabled);
+        assert_eq!(config.modules.sudoers_monitor.scan_interval_secs, 120);
+        assert_eq!(config.modules.sudoers_monitor.watch_paths.len(), 2);
+    }
+
+    #[test]
+    fn test_sudoers_monitor_config_custom() {
+        let toml_str = r#"
+[modules.sudoers_monitor]
+enabled = true
+scan_interval_secs = 60
+watch_paths = ["/etc/sudoers"]
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.modules.sudoers_monitor.enabled);
+        assert_eq!(config.modules.sudoers_monitor.scan_interval_secs, 60);
+        assert_eq!(config.modules.sudoers_monitor.watch_paths.len(), 1);
     }
 }
