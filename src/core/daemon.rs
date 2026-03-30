@@ -1,4 +1,5 @@
 use crate::config::AppConfig;
+use crate::core::event::{self, EventBus};
 use crate::core::health::HealthChecker;
 use crate::error::AppError;
 use crate::modules::Module;
@@ -43,9 +44,25 @@ impl Daemon {
         // 最初の tick は即座に発火するのでスキップ
         heartbeat.tick().await;
 
+        // イベントバスの初期化
+        let event_bus = if self.config.event_bus.enabled {
+            let bus = EventBus::new(self.config.event_bus.channel_capacity);
+            event::spawn_log_subscriber(&bus);
+            tracing::info!(
+                channel_capacity = self.config.event_bus.channel_capacity,
+                "イベントバスを起動しました"
+            );
+            Some(bus)
+        } else {
+            None
+        };
+
         // ファイル整合性監視モジュールの初期化と起動
         let fim_cancel_token = if self.config.modules.file_integrity.enabled {
-            let mut fim = FileIntegrityModule::new(self.config.modules.file_integrity.clone());
+            let mut fim = FileIntegrityModule::new(
+                self.config.modules.file_integrity.clone(),
+                event_bus.clone(),
+            );
             fim.init()?;
             let cancel_token = fim.cancel_token();
             fim.start().await?;
@@ -57,7 +74,10 @@ impl Daemon {
 
         // プロセス異常検知モジュールの初期化と起動
         let pm_cancel_token = if self.config.modules.process_monitor.enabled {
-            let mut pm = ProcessMonitorModule::new(self.config.modules.process_monitor.clone());
+            let mut pm = ProcessMonitorModule::new(
+                self.config.modules.process_monitor.clone(),
+                event_bus.clone(),
+            );
             pm.init()?;
             let cancel_token = pm.cancel_token();
             pm.start().await?;

@@ -43,4 +43,8 @@ pub enum AppError {
     /// モジュール設定エラー
     #[error("モジュール設定エラー: {message}")]
     ModuleConfig { message: String },
+
+    /// イベントバスエラー
+    #[error("イベントバスエラー: {message}")]
+    EventBus { message: String },
 }
