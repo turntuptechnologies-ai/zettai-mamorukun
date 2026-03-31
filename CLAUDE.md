@@ -87,6 +87,7 @@ src/
     ld_preload_monitor.rs # 環境変数・LD_PRELOAD 監視モジュール
     log_tamper.rs      # ログファイル改ざん検知モジュール
     mount_monitor.rs   # マウントポイント監視モジュール
+    network_monitor.rs # ネットワーク接続監視モジュール
     pkg_repo_monitor.rs # パッケージリポジトリ改ざん検知モジュール
     process_monitor.rs # プロセス異常検知モジュール
     shell_config_monitor.rs # シェル設定ファイル監視モジュール
