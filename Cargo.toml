@@ -1,6 +1,6 @@
 [package]
 name = "zettai-mamorukun"
-version = "0.25.0"
+version = "0.26.0"
 edition = "2024"
 description = "Linux サーバ向けサイバー攻撃防御デーモン"
 license = "MIT"
@@ -17,8 +17,10 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 walkdir = "2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process"] }
 libc = "0.2"
+wiremock = "0.6"
