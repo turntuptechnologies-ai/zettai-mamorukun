@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "ぜったいまもるくん を起動します"
     );
 
-    let daemon = Daemon::new(config);
+    let mut daemon = Daemon::new(config, cli.config.clone());
     daemon.run().await?;
 
     Ok(())

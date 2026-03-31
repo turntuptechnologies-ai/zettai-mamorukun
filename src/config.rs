@@ -3,7 +3,7 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 /// アプリケーション全体の設定
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, PartialEq)]
 pub struct AppConfig {
     /// 一般設定
     #[serde(default)]
@@ -27,7 +27,7 @@ pub struct AppConfig {
 }
 
 /// 一般設定
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 pub struct GeneralConfig {
     /// ログレベル（trace, debug, info, warn, error）
     #[serde(default = "GeneralConfig::default_log_level")]
@@ -35,7 +35,7 @@ pub struct GeneralConfig {
 }
 
 /// モジュール設定
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Clone, PartialEq)]
 pub struct ModulesConfig {
     /// ファイル整合性監視モジュールの設定
     #[serde(default)]
@@ -115,7 +115,7 @@ pub struct ModulesConfig {
 }
 
 /// ファイル整合性監視モジュールの設定
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct FileIntegrityConfig {
     /// モジュールの有効/無効
     #[serde(default)]
@@ -147,7 +147,7 @@ impl Default for FileIntegrityConfig {
 }
 
 /// プロセス異常検知モジュールの設定
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct ProcessMonitorConfig {
     /// モジュールの有効/無効
     #[serde(default)]
@@ -187,7 +187,7 @@ impl Default for ProcessMonitorConfig {
 }
 
 /// カーネルモジュール監視モジュールの設定
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct KernelModuleConfig {
     /// モジュールの有効/無効
     #[serde(default)]
@@ -214,7 +214,7 @@ impl Default for KernelModuleConfig {
 }
 
 /// Cron ジョブ改ざん検知モジュールの設定
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct CronMonitorConfig {
     /// モジュールの有効/無効
     #[serde(default)]
@@ -258,7 +258,7 @@ impl Default for CronMonitorConfig {
 }
 
 /// ユーザーアカウント監視モジュールの設定
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct UserAccountConfig {
     /// モジュールの有効/無効
     #[serde(default)]
@@ -303,7 +303,7 @@ impl Default for UserAccountConfig {
 }
 
 /// ログファイル改ざん検知モジュールの設定
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct LogTamperConfig {
     /// モジュールの有効/無効
     #[serde(default)]
@@ -344,7 +344,7 @@ impl Default for LogTamperConfig {
 }
 
 /// systemd サービス監視モジュールの設定
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct SystemdServiceConfig {
     /// モジュールの有効/無効
     #[serde(default)]
@@ -384,7 +384,7 @@ impl Default for SystemdServiceConfig {
 }
 
 /// DNS設定改ざん検知モジュールの設定
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct DnsMonitorConfig {
     /// モジュールの有効/無効
     #[serde(default)]
@@ -423,7 +423,7 @@ impl Default for DnsMonitorConfig {
 }
 
 /// ファイアウォールルール監視モジュールの設定
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct FirewallMonitorConfig {
     /// モジュールの有効/無効
     #[serde(default)]
@@ -466,7 +466,7 @@ impl Default for FirewallMonitorConfig {
 }
 
 /// SSH公開鍵ファイル監視モジュールの設定
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct SshKeyMonitorConfig {
     /// モジュールの有効/無効
     #[serde(default)]
@@ -502,7 +502,7 @@ impl Default for SshKeyMonitorConfig {
 }
 
 /// マウントポイント監視モジュールの設定
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct MountMonitorConfig {
     /// モジュールの有効/無効
     #[serde(default)]
@@ -538,7 +538,7 @@ impl Default for MountMonitorConfig {
 }
 
 /// シェル設定ファイル監視モジュールの設定
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct ShellConfigMonitorConfig {
     /// モジュールの有効/無効
     #[serde(default)]
@@ -580,7 +580,7 @@ impl Default for ShellConfigMonitorConfig {
 }
 
 /// 一時ディレクトリ実行ファイル検知モジュールの設定
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct TmpExecMonitorConfig {
     /// モジュールの有効/無効
     #[serde(default)]
@@ -620,7 +620,7 @@ impl Default for TmpExecMonitorConfig {
 }
 
 /// sudoers ファイル監視モジュールの設定
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct SudoersMonitorConfig {
     /// モジュールの有効/無効
     #[serde(default)]
@@ -659,7 +659,7 @@ impl Default for SudoersMonitorConfig {
 }
 
 /// SUID/SGID ファイル監視モジュールの設定
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct SuidSgidMonitorConfig {
     /// モジュールの有効/無効
     #[serde(default)]
@@ -700,7 +700,7 @@ impl Default for SuidSgidMonitorConfig {
 }
 
 /// SSH ブルートフォース検知モジュールの設定
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct SshBruteForceConfig {
     /// モジュールの有効/無効
     #[serde(default)]
@@ -754,7 +754,7 @@ impl Default for SshBruteForceConfig {
 }
 
 /// パッケージリポジトリ改ざん検知モジュールの設定
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct PkgRepoMonitorConfig {
     /// モジュールの有効/無効
     #[serde(default)]
@@ -794,7 +794,7 @@ impl Default for PkgRepoMonitorConfig {
 }
 
 /// 環境変数・LD_PRELOAD 監視モジュールの設定
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct LdPreloadMonitorConfig {
     /// モジュールの有効/無効
     #[serde(default)]
@@ -835,7 +835,7 @@ impl Default for LdPreloadMonitorConfig {
 }
 
 /// ネットワーク接続監視モジュールの設定
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct NetworkMonitorConfig {
     /// モジュールの有効/無効
     #[serde(default)]
@@ -880,7 +880,7 @@ impl Default for NetworkMonitorConfig {
 }
 
 /// アクションエンジン設定
-#[derive(Debug, Default, Deserialize, Clone)]
+#[derive(Debug, Default, Deserialize, Clone, PartialEq)]
 pub struct ActionConfig {
     /// アクションエンジンの有効/無効
     #[serde(default)]
@@ -892,7 +892,7 @@ pub struct ActionConfig {
 }
 
 /// アクションルールの設定
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct ActionRuleConfig {
     /// ルール名
     pub name: String,
@@ -916,7 +916,7 @@ impl ActionRuleConfig {
 }
 
 /// ヘルスチェック設定
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 pub struct HealthConfig {
     /// ハートビートを有効にするか
     #[serde(default = "HealthConfig::default_enabled")]
@@ -947,7 +947,7 @@ impl Default for HealthConfig {
 }
 
 /// イベントバス設定
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct EventBusConfig {
     /// イベントバスの有効/無効
     #[serde(default)]
@@ -1397,5 +1397,45 @@ max_connections = 500
             vec![1234, 5678]
         );
         assert_eq!(config.modules.network_monitor.max_connections, 500);
+    }
+
+    #[test]
+    fn test_modules_config_partial_eq_detects_change() {
+        let config1 = ModulesConfig::default();
+        let config2 = ModulesConfig::default();
+        assert_eq!(config1, config2);
+
+        let mut config3 = ModulesConfig::default();
+        config3.dns_monitor.scan_interval_secs = 999;
+        assert_ne!(config1, config3);
+    }
+
+    #[test]
+    fn test_modules_config_partial_eq_enabled_flag() {
+        let config1 = ModulesConfig::default();
+        let mut config2 = ModulesConfig::default();
+        config2.file_integrity.enabled = true;
+        assert_ne!(config1, config2);
+    }
+
+    #[test]
+    fn test_app_config_partial_eq() {
+        let config1 = AppConfig::default();
+        let config2 = AppConfig::default();
+        assert_eq!(config1, config2);
+
+        let mut config3 = AppConfig::default();
+        config3.general.log_level = "debug".to_string();
+        assert_ne!(config1, config3);
+    }
+
+    #[test]
+    fn test_load_invalid_toml_returns_parse_error() {
+        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+        write!(tmpfile, "this is not valid toml {{{{").unwrap();
+        let result = AppConfig::load(tmpfile.path());
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("設定ファイルのパースに失敗"));
     }
 }

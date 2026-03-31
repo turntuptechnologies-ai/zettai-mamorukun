@@ -1,44 +1,30 @@
 use crate::config::AppConfig;
 use crate::core::action::ActionEngine;
-use crate::core::event::{self, EventBus};
+use crate::core::event::{self, EventBus, SecurityEvent, Severity};
 use crate::core::health::HealthChecker;
+use crate::core::module_manager::ModuleManager;
 use crate::error::AppError;
-use crate::modules::Module;
-use crate::modules::cron_monitor::CronMonitorModule;
-use crate::modules::dns_monitor::DnsMonitorModule;
-use crate::modules::file_integrity::FileIntegrityModule;
-use crate::modules::firewall_monitor::FirewallMonitorModule;
-use crate::modules::kernel_module::KernelModuleMonitor;
-use crate::modules::ld_preload_monitor::LdPreloadMonitorModule;
-use crate::modules::log_tamper::LogTamperModule;
-use crate::modules::mount_monitor::MountMonitorModule;
-use crate::modules::network_monitor::NetworkMonitorModule;
-use crate::modules::pkg_repo_monitor::PkgRepoMonitorModule;
-use crate::modules::process_monitor::ProcessMonitorModule;
-use crate::modules::shell_config_monitor::ShellConfigMonitorModule;
-use crate::modules::ssh_brute_force::SshBruteForceModule;
-use crate::modules::ssh_key_monitor::SshKeyMonitorModule;
-use crate::modules::sudoers_monitor::SudoersMonitorModule;
-use crate::modules::suid_sgid_monitor::SuidSgidMonitorModule;
-use crate::modules::systemd_service::SystemdServiceModule;
-use crate::modules::tmp_exec_monitor::TmpExecMonitorModule;
-use crate::modules::user_account::UserAccountModule;
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::signal::unix::{SignalKind, signal};
 
 /// デーモンプロセスを管理する
 pub struct Daemon {
     config: AppConfig,
+    config_path: PathBuf,
 }
 
 impl Daemon {
     /// 新しいデーモンインスタンスを作成する
-    pub fn new(config: AppConfig) -> Self {
-        Self { config }
+    pub fn new(config: AppConfig, config_path: PathBuf) -> Self {
+        Self {
+            config,
+            config_path,
+        }
     }
 
     /// デーモンを起動し、シグナルを受信するまでブロックする
-    pub async fn run(&self) -> Result<(), AppError> {
+    pub async fn run(&mut self) -> Result<(), AppError> {
         let mut sigterm = signal(SignalKind::terminate()).map_err(AppError::SignalHandler)?;
         let mut sighup = signal(SignalKind::hangup()).map_err(AppError::SignalHandler)?;
 
@@ -79,282 +65,9 @@ impl Daemon {
             tracing::warn!("アクションエンジンはイベントバスが無効のため起動できません");
         }
 
-        // ファイル整合性監視モジュールの初期化と起動
-        let fim_cancel_token = if self.config.modules.file_integrity.enabled {
-            let mut fim = FileIntegrityModule::new(
-                self.config.modules.file_integrity.clone(),
-                event_bus.clone(),
-            );
-            fim.init()?;
-            let cancel_token = fim.cancel_token();
-            fim.start().await?;
-            tracing::info!("ファイル整合性監視モジュールを起動しました");
-            Some(cancel_token)
-        } else {
-            None
-        };
-
-        // プロセス異常検知モジュールの初期化と起動
-        let pm_cancel_token = if self.config.modules.process_monitor.enabled {
-            let mut pm = ProcessMonitorModule::new(
-                self.config.modules.process_monitor.clone(),
-                event_bus.clone(),
-            );
-            pm.init()?;
-            let cancel_token = pm.cancel_token();
-            pm.start().await?;
-            tracing::info!("プロセス異常検知モジュールを起動しました");
-            Some(cancel_token)
-        } else {
-            None
-        };
-
-        // カーネルモジュール監視モジュールの初期化と起動
-        let km_cancel_token = if self.config.modules.kernel_module.enabled {
-            let mut km = KernelModuleMonitor::new(
-                self.config.modules.kernel_module.clone(),
-                event_bus.clone(),
-            );
-            km.init()?;
-            let cancel_token = km.cancel_token();
-            km.start().await?;
-            tracing::info!("カーネルモジュール監視モジュールを起動しました");
-            Some(cancel_token)
-        } else {
-            None
-        };
-
-        // Cron ジョブ改ざん検知モジュールの初期化と起動
-        let cm_cancel_token = if self.config.modules.cron_monitor.enabled {
-            let mut cm =
-                CronMonitorModule::new(self.config.modules.cron_monitor.clone(), event_bus.clone());
-            cm.init()?;
-            let cancel_token = cm.cancel_token();
-            cm.start().await?;
-            tracing::info!("Cron ジョブ改ざん検知モジュールを起動しました");
-            Some(cancel_token)
-        } else {
-            None
-        };
-
-        // ログファイル改ざん検知モジュールの初期化と起動
-        let lt_cancel_token = if self.config.modules.log_tamper.enabled {
-            let mut lt =
-                LogTamperModule::new(self.config.modules.log_tamper.clone(), event_bus.clone());
-            lt.init()?;
-            let cancel_token = lt.cancel_token();
-            lt.start().await?;
-            tracing::info!("ログファイル改ざん検知モジュールを起動しました");
-            Some(cancel_token)
-        } else {
-            None
-        };
-
-        // systemd サービス監視モジュールの初期化と起動
-        let ss_cancel_token = if self.config.modules.systemd_service.enabled {
-            let mut ss = SystemdServiceModule::new(
-                self.config.modules.systemd_service.clone(),
-                event_bus.clone(),
-            );
-            ss.init()?;
-            let cancel_token = ss.cancel_token();
-            ss.start().await?;
-            tracing::info!("systemd サービス監視モジュールを起動しました");
-            Some(cancel_token)
-        } else {
-            None
-        };
-
-        // ファイアウォールルール監視モジュールの初期化と起動
-        let fw_cancel_token = if self.config.modules.firewall_monitor.enabled {
-            let mut fw = FirewallMonitorModule::new(
-                self.config.modules.firewall_monitor.clone(),
-                event_bus.clone(),
-            );
-            fw.init()?;
-            let cancel_token = fw.cancel_token();
-            fw.start().await?;
-            tracing::info!("ファイアウォールルール監視モジュールを起動しました");
-            Some(cancel_token)
-        } else {
-            None
-        };
-
-        // DNS設定改ざん検知モジュールの初期化と起動
-        let dns_cancel_token = if self.config.modules.dns_monitor.enabled {
-            let mut dns =
-                DnsMonitorModule::new(self.config.modules.dns_monitor.clone(), event_bus.clone());
-            dns.init()?;
-            let cancel_token = dns.cancel_token();
-            dns.start().await?;
-            tracing::info!("DNS設定改ざん検知モジュールを起動しました");
-            Some(cancel_token)
-        } else {
-            None
-        };
-
-        // SSH公開鍵ファイル監視モジュールの初期化と起動
-        let ssh_cancel_token = if self.config.modules.ssh_key_monitor.enabled {
-            let mut ssh = SshKeyMonitorModule::new(
-                self.config.modules.ssh_key_monitor.clone(),
-                event_bus.clone(),
-            );
-            ssh.init()?;
-            let cancel_token = ssh.cancel_token();
-            ssh.start().await?;
-            tracing::info!("SSH公開鍵ファイル監視モジュールを起動しました");
-            Some(cancel_token)
-        } else {
-            None
-        };
-
-        // シェル設定ファイル監視モジュールの初期化と起動
-        let sc_cancel_token = if self.config.modules.shell_config_monitor.enabled {
-            let mut sc = ShellConfigMonitorModule::new(
-                self.config.modules.shell_config_monitor.clone(),
-                event_bus.clone(),
-            );
-            sc.init()?;
-            let cancel_token = sc.cancel_token();
-            sc.start().await?;
-            tracing::info!("シェル設定ファイル監視モジュールを起動しました");
-            Some(cancel_token)
-        } else {
-            None
-        };
-
-        // 一時ディレクトリ実行ファイル検知モジュールの初期化と起動
-        let te_cancel_token = if self.config.modules.tmp_exec_monitor.enabled {
-            let mut te = TmpExecMonitorModule::new(
-                self.config.modules.tmp_exec_monitor.clone(),
-                event_bus.clone(),
-            );
-            te.init()?;
-            let cancel_token = te.cancel_token();
-            te.start().await?;
-            tracing::info!("一時ディレクトリ実行ファイル検知モジュールを起動しました");
-            Some(cancel_token)
-        } else {
-            None
-        };
-
-        // sudoers ファイル監視モジュールの初期化と起動
-        let sud_cancel_token = if self.config.modules.sudoers_monitor.enabled {
-            let mut sud = SudoersMonitorModule::new(
-                self.config.modules.sudoers_monitor.clone(),
-                event_bus.clone(),
-            );
-            sud.init()?;
-            let cancel_token = sud.cancel_token();
-            sud.start().await?;
-            tracing::info!("sudoers ファイル監視モジュールを起動しました");
-            Some(cancel_token)
-        } else {
-            None
-        };
-
-        // SUID/SGID ファイル監視モジュールの初期化と起動
-        let ssg_cancel_token = if self.config.modules.suid_sgid_monitor.enabled {
-            let mut ssg = SuidSgidMonitorModule::new(
-                self.config.modules.suid_sgid_monitor.clone(),
-                event_bus.clone(),
-            );
-            ssg.init()?;
-            let cancel_token = ssg.cancel_token();
-            ssg.start().await?;
-            tracing::info!("SUID/SGID ファイル監視モジュールを起動しました");
-            Some(cancel_token)
-        } else {
-            None
-        };
-
-        // マウントポイント監視モジュールの初期化と起動
-        let mnt_cancel_token = if self.config.modules.mount_monitor.enabled {
-            let mut mnt = MountMonitorModule::new(
-                self.config.modules.mount_monitor.clone(),
-                event_bus.clone(),
-            );
-            mnt.init()?;
-            let cancel_token = mnt.cancel_token();
-            mnt.start().await?;
-            tracing::info!("マウントポイント監視モジュールを起動しました");
-            Some(cancel_token)
-        } else {
-            None
-        };
-
-        // SSH ブルートフォース検知モジュールの初期化と起動
-        let sbf_cancel_token = if self.config.modules.ssh_brute_force.enabled {
-            let mut sbf = SshBruteForceModule::new(
-                self.config.modules.ssh_brute_force.clone(),
-                event_bus.clone(),
-            );
-            sbf.init()?;
-            let cancel_token = sbf.cancel_token();
-            sbf.start().await?;
-            tracing::info!("SSH ブルートフォース検知モジュールを起動しました");
-            Some(cancel_token)
-        } else {
-            None
-        };
-
-        // パッケージリポジトリ改ざん検知モジュールの初期化と起動
-        let pkg_cancel_token = if self.config.modules.pkg_repo_monitor.enabled {
-            let mut pkg = PkgRepoMonitorModule::new(
-                self.config.modules.pkg_repo_monitor.clone(),
-                event_bus.clone(),
-            );
-            pkg.init()?;
-            let cancel_token = pkg.cancel_token();
-            pkg.start().await?;
-            tracing::info!("パッケージリポジトリ改ざん検知モジュールを起動しました");
-            Some(cancel_token)
-        } else {
-            None
-        };
-
-        // 環境変数・LD_PRELOAD 監視モジュールの初期化と起動
-        let ldp_cancel_token = if self.config.modules.ld_preload_monitor.enabled {
-            let mut ldp = LdPreloadMonitorModule::new(
-                self.config.modules.ld_preload_monitor.clone(),
-                event_bus.clone(),
-            );
-            ldp.init()?;
-            let cancel_token = ldp.cancel_token();
-            ldp.start().await?;
-            tracing::info!("環境変数・LD_PRELOAD 監視モジュールを起動しました");
-            Some(cancel_token)
-        } else {
-            None
-        };
-
-        // ネットワーク接続監視モジュールの初期化と起動
-        let nm_cancel_token = if self.config.modules.network_monitor.enabled {
-            let mut nm = NetworkMonitorModule::new(
-                self.config.modules.network_monitor.clone(),
-                event_bus.clone(),
-            );
-            nm.init()?;
-            let cancel_token = nm.cancel_token();
-            nm.start().await?;
-            tracing::info!("ネットワーク接続監視モジュールを起動しました");
-            Some(cancel_token)
-        } else {
-            None
-        };
-
-        // ユーザーアカウント監視モジュールの初期化と起動
-        let ua_cancel_token = if self.config.modules.user_account.enabled {
-            let mut ua =
-                UserAccountModule::new(self.config.modules.user_account.clone(), event_bus.clone());
-            ua.init()?;
-            let cancel_token = ua.cancel_token();
-            ua.start().await?;
-            tracing::info!("ユーザーアカウント監視モジュールを起動しました");
-            Some(cancel_token)
-        } else {
-            None
-        };
+        // モジュールマネージャーでモジュールを一括起動
+        let mut module_manager =
+            ModuleManager::start_modules(&self.config.modules, &event_bus).await;
 
         tracing::info!("デーモンを起動しました");
 
@@ -376,7 +89,49 @@ impl Daemon {
                     break;
                 }
                 _ = sighup.recv() => {
-                    tracing::info!("SIGHUP を受信しました。ホットリロードは未実装です");
+                    tracing::info!("SIGHUP を受信しました。設定をリロードします...");
+                    match AppConfig::load(&self.config_path) {
+                        Ok(new_config) => {
+                            let result = module_manager.reload(
+                                &self.config.modules,
+                                &new_config.modules,
+                                &event_bus,
+                            ).await;
+
+                            let summary = format!(
+                                "起動: {}, 停止: {}, 再起動: {}, エラー: {}",
+                                result.started.len(),
+                                result.stopped.len(),
+                                result.restarted.len(),
+                                result.errors.len(),
+                            );
+                            tracing::info!(summary = %summary, "設定リロード完了");
+
+                            if let Some(ref bus) = event_bus {
+                                let event = SecurityEvent::new(
+                                    "config_reloaded",
+                                    Severity::Info,
+                                    "daemon",
+                                    format!("設定ファイルをリロードしました ({})", summary),
+                                );
+                                bus.publish(event);
+                            }
+
+                            self.config = new_config;
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "設定ファイルのリロードに失敗しました");
+                            if let Some(ref bus) = event_bus {
+                                let event = SecurityEvent::new(
+                                    "config_reload_failed",
+                                    Severity::Warning,
+                                    "daemon",
+                                    format!("設定ファイルのリロードに失敗: {}", e),
+                                );
+                                bus.publish(event);
+                            }
+                        }
+                    }
                 }
                 _ = heartbeat.tick(), if health_enabled => {
                     let status = health_checker.status();
@@ -400,83 +155,8 @@ impl Daemon {
             }
         }
 
-        // モジュールの停止
-        if let Some(cancel_token) = fim_cancel_token {
-            cancel_token.cancel();
-            tracing::info!("ファイル整合性監視モジュールを停止しました");
-        }
-        if let Some(cancel_token) = pm_cancel_token {
-            cancel_token.cancel();
-            tracing::info!("プロセス異常検知モジュールを停止しました");
-        }
-        if let Some(cancel_token) = km_cancel_token {
-            cancel_token.cancel();
-            tracing::info!("カーネルモジュール監視モジュールを停止しました");
-        }
-        if let Some(cancel_token) = cm_cancel_token {
-            cancel_token.cancel();
-            tracing::info!("Cron ジョブ改ざん検知モジュールを停止しました");
-        }
-        if let Some(cancel_token) = lt_cancel_token {
-            cancel_token.cancel();
-            tracing::info!("ログファイル改ざん検知モジュールを停止しました");
-        }
-        if let Some(cancel_token) = ss_cancel_token {
-            cancel_token.cancel();
-            tracing::info!("systemd サービス監視モジュールを停止しました");
-        }
-        if let Some(cancel_token) = fw_cancel_token {
-            cancel_token.cancel();
-            tracing::info!("ファイアウォールルール監視モジュールを停止しました");
-        }
-        if let Some(cancel_token) = dns_cancel_token {
-            cancel_token.cancel();
-            tracing::info!("DNS設定改ざん検知モジュールを停止しました");
-        }
-        if let Some(cancel_token) = ssh_cancel_token {
-            cancel_token.cancel();
-            tracing::info!("SSH公開鍵ファイル監視モジュールを停止しました");
-        }
-        if let Some(cancel_token) = sc_cancel_token {
-            cancel_token.cancel();
-            tracing::info!("シェル設定ファイル監視モジュールを停止しました");
-        }
-        if let Some(cancel_token) = te_cancel_token {
-            cancel_token.cancel();
-            tracing::info!("一時ディレクトリ実行ファイル検知モジュールを停止しました");
-        }
-        if let Some(cancel_token) = mnt_cancel_token {
-            cancel_token.cancel();
-            tracing::info!("マウントポイント監視モジュールを停止しました");
-        }
-        if let Some(cancel_token) = ua_cancel_token {
-            cancel_token.cancel();
-            tracing::info!("ユーザーアカウント監視モジュールを停止しました");
-        }
-        if let Some(cancel_token) = sud_cancel_token {
-            cancel_token.cancel();
-            tracing::info!("sudoers ファイル監視モジュールを停止しました");
-        }
-        if let Some(cancel_token) = ssg_cancel_token {
-            cancel_token.cancel();
-            tracing::info!("SUID/SGID ファイル監視モジュールを停止しました");
-        }
-        if let Some(cancel_token) = sbf_cancel_token {
-            cancel_token.cancel();
-            tracing::info!("SSH ブルートフォース検知モジュールを停止しました");
-        }
-        if let Some(cancel_token) = pkg_cancel_token {
-            cancel_token.cancel();
-            tracing::info!("パッケージリポジトリ改ざん検知モジュールを停止しました");
-        }
-        if let Some(cancel_token) = ldp_cancel_token {
-            cancel_token.cancel();
-            tracing::info!("環境変数・LD_PRELOAD 監視モジュールを停止しました");
-        }
-        if let Some(cancel_token) = nm_cancel_token {
-            cancel_token.cancel();
-            tracing::info!("ネットワーク接続監視モジュールを停止しました");
-        }
+        // モジュールの一括停止
+        module_manager.stop_all();
 
         tracing::info!("シャットダウン完了");
         Ok(())
