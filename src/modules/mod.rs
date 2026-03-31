@@ -7,6 +7,7 @@ pub mod log_tamper;
 pub mod mount_monitor;
 pub mod process_monitor;
 pub mod shell_config_monitor;
+pub mod ssh_brute_force;
 pub mod ssh_key_monitor;
 pub mod sudoers_monitor;
 pub mod suid_sgid_monitor;

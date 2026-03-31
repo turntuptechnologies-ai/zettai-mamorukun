@@ -96,6 +96,10 @@ pub struct ModulesConfig {
     /// SUID/SGID ファイル監視モジュールの設定
     #[serde(default)]
     pub suid_sgid_monitor: SuidSgidMonitorConfig,
+
+    /// SSH ブルートフォース検知モジュールの設定
+    #[serde(default)]
+    pub ssh_brute_force: SshBruteForceConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -679,6 +683,60 @@ impl Default for SuidSgidMonitorConfig {
             enabled: false,
             scan_interval_secs: Self::default_scan_interval_secs(),
             watch_dirs: Self::default_watch_dirs(),
+        }
+    }
+}
+
+/// SSH ブルートフォース検知モジュールの設定
+#[derive(Debug, Deserialize, Clone)]
+pub struct SshBruteForceConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "SshBruteForceConfig::default_interval_secs")]
+    pub interval_secs: u64,
+
+    /// 認証ログファイルのパス
+    #[serde(default = "SshBruteForceConfig::default_auth_log_path")]
+    pub auth_log_path: PathBuf,
+
+    /// 認証失敗の閾値
+    #[serde(default = "SshBruteForceConfig::default_max_failures")]
+    pub max_failures: u32,
+
+    /// 時間窓（秒）
+    #[serde(default = "SshBruteForceConfig::default_time_window_secs")]
+    pub time_window_secs: u64,
+}
+
+impl SshBruteForceConfig {
+    fn default_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_auth_log_path() -> PathBuf {
+        PathBuf::from("/var/log/auth.log")
+    }
+
+    fn default_max_failures() -> u32 {
+        5
+    }
+
+    fn default_time_window_secs() -> u64 {
+        300
+    }
+}
+
+impl Default for SshBruteForceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: Self::default_interval_secs(),
+            auth_log_path: Self::default_auth_log_path(),
+            max_failures: Self::default_max_failures(),
+            time_window_secs: Self::default_time_window_secs(),
         }
     }
 }

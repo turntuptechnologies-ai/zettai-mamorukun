@@ -125,6 +125,18 @@ passwd_path = "/etc/passwd"
 # group ファイルのパス
 group_path = "/etc/group"
 
+[modules.ssh_brute_force]
+# SSH ブルートフォース検知モジュールの有効/無効
+enabled = false
+# スキャン間隔（秒）
+interval_secs = 30
+# 認証ログファイルのパス
+auth_log_path = "/var/log/auth.log"
+# 認証失敗の閾値（この回数を超えるとアラート）
+max_failures = 5
+# 時間窓（秒）- この期間内の失敗回数をカウント
+time_window_secs = 300
+
 [event_bus]
 # イベントバスの有効/無効
 enabled = false

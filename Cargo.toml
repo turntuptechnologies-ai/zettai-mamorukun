@@ -10,6 +10,7 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 thiserror = "2"
+regex = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "process"] }
 tokio-util = "0.7"
 toml = "0.8"
