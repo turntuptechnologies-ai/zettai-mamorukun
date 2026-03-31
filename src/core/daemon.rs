@@ -12,6 +12,7 @@ use crate::modules::kernel_module::KernelModuleMonitor;
 use crate::modules::ld_preload_monitor::LdPreloadMonitorModule;
 use crate::modules::log_tamper::LogTamperModule;
 use crate::modules::mount_monitor::MountMonitorModule;
+use crate::modules::network_monitor::NetworkMonitorModule;
 use crate::modules::pkg_repo_monitor::PkgRepoMonitorModule;
 use crate::modules::process_monitor::ProcessMonitorModule;
 use crate::modules::shell_config_monitor::ShellConfigMonitorModule;
@@ -327,6 +328,21 @@ impl Daemon {
             None
         };
 
+        // ネットワーク接続監視モジュールの初期化と起動
+        let nm_cancel_token = if self.config.modules.network_monitor.enabled {
+            let mut nm = NetworkMonitorModule::new(
+                self.config.modules.network_monitor.clone(),
+                event_bus.clone(),
+            );
+            nm.init()?;
+            let cancel_token = nm.cancel_token();
+            nm.start().await?;
+            tracing::info!("ネットワーク接続監視モジュールを起動しました");
+            Some(cancel_token)
+        } else {
+            None
+        };
+
         // ユーザーアカウント監視モジュールの初期化と起動
         let ua_cancel_token = if self.config.modules.user_account.enabled {
             let mut ua =
@@ -456,6 +472,10 @@ impl Daemon {
         if let Some(cancel_token) = ldp_cancel_token {
             cancel_token.cancel();
             tracing::info!("環境変数・LD_PRELOAD 監視モジュールを停止しました");
+        }
+        if let Some(cancel_token) = nm_cancel_token {
+            cancel_token.cancel();
+            tracing::info!("ネットワーク接続監視モジュールを停止しました");
         }
 
         tracing::info!("シャットダウン完了");
