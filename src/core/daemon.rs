@@ -13,6 +13,7 @@ use crate::modules::log_tamper::LogTamperModule;
 use crate::modules::mount_monitor::MountMonitorModule;
 use crate::modules::process_monitor::ProcessMonitorModule;
 use crate::modules::shell_config_monitor::ShellConfigMonitorModule;
+use crate::modules::ssh_brute_force::SshBruteForceModule;
 use crate::modules::ssh_key_monitor::SshKeyMonitorModule;
 use crate::modules::sudoers_monitor::SudoersMonitorModule;
 use crate::modules::suid_sgid_monitor::SuidSgidMonitorModule;
@@ -279,6 +280,21 @@ impl Daemon {
             None
         };
 
+        // SSH ブルートフォース検知モジュールの初期化と起動
+        let sbf_cancel_token = if self.config.modules.ssh_brute_force.enabled {
+            let mut sbf = SshBruteForceModule::new(
+                self.config.modules.ssh_brute_force.clone(),
+                event_bus.clone(),
+            );
+            sbf.init()?;
+            let cancel_token = sbf.cancel_token();
+            sbf.start().await?;
+            tracing::info!("SSH ブルートフォース検知モジュールを起動しました");
+            Some(cancel_token)
+        } else {
+            None
+        };
+
         // ユーザーアカウント監視モジュールの初期化と起動
         let ua_cancel_token = if self.config.modules.user_account.enabled {
             let mut ua =
@@ -396,6 +412,10 @@ impl Daemon {
         if let Some(cancel_token) = ssg_cancel_token {
             cancel_token.cancel();
             tracing::info!("SUID/SGID ファイル監視モジュールを停止しました");
+        }
+        if let Some(cancel_token) = sbf_cancel_token {
+            cancel_token.cancel();
+            tracing::info!("SSH ブルートフォース検知モジュールを停止しました");
         }
 
         tracing::info!("シャットダウン完了");

@@ -411,6 +411,46 @@ watch_paths = ["/etc/sudoers"]
 }
 
 #[test]
+fn test_config_ssh_brute_force_disabled_by_default() {
+    let config = AppConfig::load(Path::new("/tmp/nonexistent-zettai-config.toml")).unwrap();
+    assert!(!config.modules.ssh_brute_force.enabled);
+    assert_eq!(config.modules.ssh_brute_force.interval_secs, 30);
+    assert_eq!(
+        config.modules.ssh_brute_force.auth_log_path,
+        std::path::PathBuf::from("/var/log/auth.log")
+    );
+    assert_eq!(config.modules.ssh_brute_force.max_failures, 5);
+    assert_eq!(config.modules.ssh_brute_force.time_window_secs, 300);
+}
+
+#[test]
+fn test_config_with_ssh_brute_force_section() {
+    use std::io::Write;
+    let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+    write!(
+        tmpfile,
+        r#"
+[modules.ssh_brute_force]
+enabled = true
+interval_secs = 15
+auth_log_path = "/var/log/auth.log"
+max_failures = 10
+time_window_secs = 600
+"#
+    )
+    .unwrap();
+    let config = AppConfig::load(tmpfile.path()).unwrap();
+    assert!(config.modules.ssh_brute_force.enabled);
+    assert_eq!(config.modules.ssh_brute_force.interval_secs, 15);
+    assert_eq!(
+        config.modules.ssh_brute_force.auth_log_path,
+        std::path::PathBuf::from("/var/log/auth.log")
+    );
+    assert_eq!(config.modules.ssh_brute_force.max_failures, 10);
+    assert_eq!(config.modules.ssh_brute_force.time_window_secs, 600);
+}
+
+#[test]
 fn test_config_event_bus_defaults() {
     let config = AppConfig::load(Path::new("/tmp/nonexistent-zettai-config.toml")).unwrap();
     assert!(!config.event_bus.enabled);
