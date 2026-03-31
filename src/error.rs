@@ -55,4 +55,8 @@ pub enum AppError {
     /// アクション実行エラー
     #[error("アクション実行エラー: {message}")]
     ActionExecution { message: String },
+
+    /// Webhook 送信エラー
+    #[error("Webhook 送信エラー: {message}")]
+    WebhookSend { message: String },
 }

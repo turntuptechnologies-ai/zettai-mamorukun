@@ -900,13 +900,25 @@ pub struct ActionRuleConfig {
     pub severity: Option<String>,
     /// モジュール名フィルタ
     pub module: Option<String>,
-    /// アクション種別（"log", "command"）
+    /// アクション種別（"log", "command", "webhook"）
     pub action: String,
     /// 実行コマンド
     pub command: Option<String>,
     /// コマンドタイムアウト（秒）
     #[serde(default = "ActionRuleConfig::default_timeout_secs")]
     pub timeout_secs: u64,
+    /// Webhook URL
+    pub url: Option<String>,
+    /// HTTP メソッド（デフォルト: POST）
+    #[serde(default)]
+    pub method: Option<String>,
+    /// HTTP ヘッダー
+    #[serde(default)]
+    pub headers: Option<std::collections::HashMap<String, String>>,
+    /// ボディテンプレート
+    pub body_template: Option<String>,
+    /// リトライ回数（デフォルト: 3）
+    pub max_retries: Option<u32>,
 }
 
 impl ActionRuleConfig {

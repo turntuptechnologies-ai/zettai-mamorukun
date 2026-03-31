@@ -185,6 +185,18 @@ enabled = false
 # severity = "Warning"
 # action = "log"
 
+# [[actions.rules]]
+# name = "webhook_alert"
+# severity = "critical"
+# action = "webhook"
+# url = "https://hooks.slack.com/services/xxx/yyy/zzz"
+# method = "POST"
+# timeout_secs = 10
+# max_retries = 3
+# [actions.rules.headers]
+# Content-Type = "application/json"
+# body_template = '{"text": "[{{severity}}] {{source}}: {{message}}"}'
+
 [health]
 # ハートビート（定期的なヘルスチェックログ出力）の有効/無効
 enabled = true

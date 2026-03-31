@@ -3,6 +3,7 @@
 use crate::config::ActionConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
+use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::broadcast;
 
@@ -13,6 +14,8 @@ pub enum ActionType {
     Log,
     /// 外部コマンド実行
     Command,
+    /// Webhook 送信
+    Webhook,
 }
 
 /// アクションルール
@@ -29,12 +32,36 @@ pub struct ActionRule {
     pub command: Option<String>,
     /// コマンドタイムアウト（秒）
     pub timeout_secs: u64,
+    /// Webhook URL
+    pub url: Option<String>,
+    /// HTTP メソッド（デフォルト: "POST"）
+    pub method: String,
+    /// HTTP ヘッダー
+    pub headers: HashMap<String, String>,
+    /// ボディテンプレート
+    pub body_template: Option<String>,
+    /// リトライ回数
+    pub max_retries: u32,
+}
+
+/// Webhook のデフォルトタイムアウト（秒）
+const WEBHOOK_DEFAULT_TIMEOUT_SECS: u64 = 10;
+
+/// Webhook 送信パラメータ
+struct WebhookParams {
+    url: String,
+    method: String,
+    headers: HashMap<String, String>,
+    body_template: Option<String>,
+    max_retries: u32,
+    timeout_secs: u64,
 }
 
 /// アクションエンジン — イベントに対するアクションを実行する
 pub struct ActionEngine {
     rules: Vec<ActionRule>,
     receiver: broadcast::Receiver<SecurityEvent>,
+    client: reqwest::Client,
 }
 
 impl std::fmt::Debug for ActionEngine {
@@ -76,14 +103,32 @@ impl ActionEngine {
                     }
                     ActionType::Command
                 }
+                "webhook" => {
+                    if rule_config.url.is_none() {
+                        return Err(AppError::ActionConfig {
+                            message: format!(
+                                "ルール '{}' のアクション種別が 'webhook' ですが、url フィールドが設定されていません",
+                                rule_config.name
+                            ),
+                        });
+                    }
+                    ActionType::Webhook
+                }
                 other => {
                     return Err(AppError::ActionConfig {
                         message: format!(
-                            "ルール '{}' のアクション種別 '{}' が不正です（log, command のいずれかを指定してください）",
+                            "ルール '{}' のアクション種別 '{}' が不正です（log, command, webhook のいずれかを指定してください）",
                             rule_config.name, other
                         ),
                     });
                 }
+            };
+
+            // Webhook の場合、デフォルトタイムアウトの 30 秒のままなら 10 秒に上書き
+            let timeout_secs = if action == ActionType::Webhook && rule_config.timeout_secs == 30 {
+                WEBHOOK_DEFAULT_TIMEOUT_SECS
+            } else {
+                rule_config.timeout_secs
             };
 
             rules.push(ActionRule {
@@ -92,28 +137,46 @@ impl ActionEngine {
                 module: rule_config.module.clone(),
                 action,
                 command: rule_config.command.clone(),
-                timeout_secs: rule_config.timeout_secs,
+                timeout_secs,
+                url: rule_config.url.clone(),
+                method: rule_config
+                    .method
+                    .clone()
+                    .unwrap_or_else(|| "POST".to_string()),
+                headers: rule_config.headers.clone().unwrap_or_default(),
+                body_template: rule_config.body_template.clone(),
+                max_retries: rule_config.max_retries.unwrap_or(3),
             });
         }
 
         let receiver = event_bus.subscribe();
-        Ok(Self { rules, receiver })
+        let client = reqwest::Client::new();
+        Ok(Self {
+            rules,
+            receiver,
+            client,
+        })
     }
 
     /// 非同期タスクとしてアクションエンジンを起動する
     pub fn spawn(self) {
+        let client = self.client;
         tokio::spawn(async move {
-            Self::run_loop(self.rules, self.receiver).await;
+            Self::run_loop(self.rules, self.receiver, client).await;
         });
     }
 
-    async fn run_loop(rules: Vec<ActionRule>, mut receiver: broadcast::Receiver<SecurityEvent>) {
+    async fn run_loop(
+        rules: Vec<ActionRule>,
+        mut receiver: broadcast::Receiver<SecurityEvent>,
+        client: reqwest::Client,
+    ) {
         loop {
             match receiver.recv().await {
                 Ok(event) => {
                     for rule in &rules {
                         if Self::matches(rule, &event) {
-                            Self::execute_action(rule, &event).await;
+                            Self::execute_action(rule, &event, &client).await;
                         }
                     }
                 }
@@ -148,7 +211,7 @@ impl ActionEngine {
     }
 
     /// アクションを実行する
-    async fn execute_action(rule: &ActionRule, event: &SecurityEvent) {
+    async fn execute_action(rule: &ActionRule, event: &SecurityEvent, client: &reqwest::Client) {
         match rule.action {
             ActionType::Log => {
                 tracing::info!(
@@ -182,6 +245,39 @@ impl ActionEngine {
                         }
                     }
                 }
+            }
+            ActionType::Webhook => {
+                let client = client.clone();
+                let rule_name = rule.name.clone();
+                let params = WebhookParams {
+                    url: rule.url.clone().unwrap_or_default(),
+                    method: rule.method.clone(),
+                    headers: rule.headers.clone(),
+                    body_template: rule.body_template.clone(),
+                    max_retries: rule.max_retries,
+                    timeout_secs: rule.timeout_secs,
+                };
+                let event = event.clone();
+                tokio::spawn(async move {
+                    let masked = Self::mask_url(&params.url);
+                    match Self::send_webhook(&client, &params, &event).await {
+                        Ok(()) => {
+                            tracing::info!(
+                                rule = %rule_name,
+                                url = %masked,
+                                "Webhook を送信しました"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                rule = %rule_name,
+                                url = %masked,
+                                error = %e,
+                                "Webhook の送信に失敗しました"
+                            );
+                        }
+                    }
+                });
             }
         }
     }
@@ -230,6 +326,99 @@ impl ActionEngine {
             }),
         }
     }
+
+    /// Webhook を送信する（リトライ付き）
+    async fn send_webhook(
+        client: &reqwest::Client,
+        params: &WebhookParams,
+        event: &SecurityEvent,
+    ) -> Result<(), AppError> {
+        let body = match &params.body_template {
+            Some(template) => Self::expand_placeholders(template, event),
+            None => Self::default_webhook_body(event),
+        };
+
+        for attempt in 0..=params.max_retries {
+            if attempt > 0 {
+                let delay = std::cmp::min(1u64 << (attempt - 1), 30);
+                tokio::time::sleep(Duration::from_secs(delay)).await;
+            }
+
+            let mut request = match params.method.to_uppercase().as_str() {
+                "GET" => client.get(&params.url),
+                _ => client.post(&params.url),
+            };
+
+            for (key, value) in &params.headers {
+                request = request.header(key, &*Self::expand_placeholders(value, event));
+            }
+
+            let result = request
+                .body(body.clone())
+                .timeout(Duration::from_secs(params.timeout_secs))
+                .send()
+                .await;
+
+            match result {
+                Ok(response) => {
+                    let status = response.status();
+                    if status.is_success() {
+                        return Ok(());
+                    } else if status.is_client_error() {
+                        return Err(AppError::WebhookSend {
+                            message: format!("HTTP {}", status),
+                        });
+                    }
+                    // 5xx はリトライ
+                }
+                Err(e) if e.is_timeout() || e.is_connect() => {
+                    // ネットワークエラー/タイムアウトはリトライ
+                }
+                Err(e) => {
+                    return Err(AppError::WebhookSend {
+                        message: e.to_string(),
+                    });
+                }
+            }
+        }
+
+        Err(AppError::WebhookSend {
+            message: "最大リトライ回数に達しました".to_string(),
+        })
+    }
+
+    /// デフォルトの Webhook ボディ（JSON）を生成する
+    fn default_webhook_body(event: &SecurityEvent) -> String {
+        fn escape_json(s: &str) -> String {
+            s.replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\t', "\\t")
+        }
+        format!(
+            r#"{{"event_type":"{}","severity":"{}","source_module":"{}","message":"{}","details":"{}"}}"#,
+            escape_json(&event.event_type),
+            escape_json(&event.severity.to_string()),
+            escape_json(&event.source_module),
+            escape_json(&event.message),
+            escape_json(event.details.as_deref().unwrap_or("")),
+        )
+    }
+
+    /// ログ出力用に URL をマスクする
+    fn mask_url(url: &str) -> String {
+        match url.find("://") {
+            Some(pos) => {
+                let after_scheme = &url[pos + 3..];
+                match after_scheme.find('/') {
+                    Some(slash) => format!("{}/*****", &url[..pos + 3 + slash]),
+                    None => url.to_string(),
+                }
+            }
+            None => "***".to_string(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -249,6 +438,27 @@ mod tests {
             action: ActionType::Log,
             command: None,
             timeout_secs: 30,
+            url: None,
+            method: "POST".to_string(),
+            headers: HashMap::new(),
+            body_template: None,
+            max_retries: 3,
+        }
+    }
+
+    fn make_rule_config(name: &str, action: &str, command: Option<&str>) -> ActionRuleConfig {
+        ActionRuleConfig {
+            name: name.to_string(),
+            severity: None,
+            module: None,
+            action: action.to_string(),
+            command: command.map(|s| s.to_string()),
+            timeout_secs: 30,
+            url: None,
+            method: None,
+            headers: None,
+            body_template: None,
+            max_retries: None,
         }
     }
 
@@ -334,21 +544,17 @@ mod tests {
         let config = ActionConfig {
             enabled: true,
             rules: vec![
-                ActionRuleConfig {
-                    name: "log_all".to_string(),
-                    severity: None,
-                    module: None,
-                    action: "log".to_string(),
-                    command: None,
-                    timeout_secs: 30,
+                {
+                    let mut r = make_rule_config("log_all", "log", None);
+                    r
                 },
-                ActionRuleConfig {
-                    name: "critical_command".to_string(),
-                    severity: Some("critical".to_string()),
-                    module: Some("file_integrity".to_string()),
-                    action: "command".to_string(),
-                    command: Some("echo '{{message}}'".to_string()),
-                    timeout_secs: 10,
+                {
+                    let mut r =
+                        make_rule_config("critical_command", "command", Some("echo '{{message}}'"));
+                    r.severity = Some("critical".to_string());
+                    r.module = Some("file_integrity".to_string());
+                    r.timeout_secs = 10;
+                    r
                 },
             ],
         };
@@ -368,14 +574,7 @@ mod tests {
     fn test_action_engine_new_command_without_command_field() {
         let config = ActionConfig {
             enabled: true,
-            rules: vec![ActionRuleConfig {
-                name: "bad_rule".to_string(),
-                severity: None,
-                module: None,
-                action: "command".to_string(),
-                command: None,
-                timeout_secs: 30,
-            }],
+            rules: vec![make_rule_config("bad_rule", "command", None)],
         };
         let bus = EventBus::new(16);
         let result = ActionEngine::new(&config, &bus);
@@ -388,13 +587,10 @@ mod tests {
     fn test_action_engine_new_invalid_severity() {
         let config = ActionConfig {
             enabled: true,
-            rules: vec![ActionRuleConfig {
-                name: "bad_severity".to_string(),
-                severity: Some("invalid".to_string()),
-                module: None,
-                action: "log".to_string(),
-                command: None,
-                timeout_secs: 30,
+            rules: vec![{
+                let mut r = make_rule_config("bad_severity", "log", None);
+                r.severity = Some("invalid".to_string());
+                r
             }],
         };
         let bus = EventBus::new(16);
@@ -416,5 +612,103 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("タイムアウト"));
+    }
+
+    #[test]
+    fn test_webhook_rule_validation() {
+        let config = ActionConfig {
+            enabled: true,
+            rules: vec![{
+                let mut r = make_rule_config("bad_webhook", "webhook", None);
+                r
+            }],
+        };
+        let bus = EventBus::new(16);
+        let result = ActionEngine::new(&config, &bus);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("url フィールドが設定されていません"));
+    }
+
+    #[test]
+    fn test_default_webhook_body() {
+        let event = SecurityEvent::new(
+            "file_modified",
+            Severity::Warning,
+            "file_integrity",
+            "ファイルが変更されました",
+        )
+        .with_details("/etc/passwd");
+
+        let body = ActionEngine::default_webhook_body(&event);
+        assert!(body.contains("\"event_type\":\"file_modified\""));
+        assert!(body.contains("\"severity\":\"WARNING\""));
+        assert!(body.contains("\"source_module\":\"file_integrity\""));
+        assert!(body.contains("\"message\":\"ファイルが変更されました\""));
+        assert!(body.contains("\"details\":\"/etc/passwd\""));
+    }
+
+    #[test]
+    fn test_default_webhook_body_escapes_json() {
+        let event = SecurityEvent::new("test", Severity::Info, "test", "line1\nline2\t\"quoted\"");
+
+        let body = ActionEngine::default_webhook_body(&event);
+        assert!(body.contains("line1\\nline2\\t\\\"quoted\\\""));
+    }
+
+    #[test]
+    fn test_mask_url() {
+        assert_eq!(
+            ActionEngine::mask_url("https://hooks.slack.com/services/xxx/yyy/zzz"),
+            "https://hooks.slack.com/*****"
+        );
+        assert_eq!(
+            ActionEngine::mask_url("https://example.com"),
+            "https://example.com"
+        );
+        assert_eq!(ActionEngine::mask_url("not-a-url"), "***");
+    }
+
+    #[test]
+    fn test_expand_placeholders_in_webhook_headers() {
+        let event = SecurityEvent::new("test_event", Severity::Critical, "test_module", "テスト");
+
+        let template = "Bearer {{severity}}-token";
+        let result = ActionEngine::expand_placeholders(template, &event);
+        assert_eq!(result, "Bearer CRITICAL-token");
+    }
+
+    #[test]
+    fn test_webhook_default_timeout() {
+        let config = ActionConfig {
+            enabled: true,
+            rules: vec![{
+                let mut r = make_rule_config("webhook_rule", "webhook", None);
+                r.url = Some("https://example.com/hook".to_string());
+                // timeout_secs はデフォルトの 30
+                r
+            }],
+        };
+        let bus = EventBus::new(16);
+        let engine = ActionEngine::new(&config, &bus).unwrap();
+        // Webhook のデフォルトタイムアウトは 10 秒に上書きされる
+        assert_eq!(engine.rules[0].timeout_secs, WEBHOOK_DEFAULT_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn test_webhook_custom_timeout() {
+        let config = ActionConfig {
+            enabled: true,
+            rules: vec![{
+                let mut r = make_rule_config("webhook_rule", "webhook", None);
+                r.url = Some("https://example.com/hook".to_string());
+                r.timeout_secs = 15; // カスタム値
+                r
+            }],
+        };
+        let bus = EventBus::new(16);
+        let engine = ActionEngine::new(&config, &bus).unwrap();
+        // カスタム値はそのまま
+        assert_eq!(engine.rules[0].timeout_secs, 15);
     }
 }
