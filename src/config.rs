@@ -112,6 +112,10 @@ pub struct ModulesConfig {
     /// ネットワーク接続監視モジュールの設定
     #[serde(default)]
     pub network_monitor: NetworkMonitorConfig,
+
+    /// PAM 設定監視モジュールの設定
+    #[serde(default)]
+    pub pam_monitor: PamMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -649,6 +653,42 @@ impl SudoersMonitorConfig {
 }
 
 impl Default for SudoersMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            watch_paths: Self::default_watch_paths(),
+        }
+    }
+}
+
+/// PAM 設定監視モジュールの設定
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct PamMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "PamMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象パスのリスト（ファイルまたはディレクトリ）
+    #[serde(default = "PamMonitorConfig::default_watch_paths")]
+    pub watch_paths: Vec<PathBuf>,
+}
+
+impl PamMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        120
+    }
+
+    fn default_watch_paths() -> Vec<PathBuf> {
+        vec![PathBuf::from("/etc/pam.d")]
+    }
+}
+
+impl Default for PamMonitorConfig {
     fn default() -> Self {
         Self {
             enabled: false,
