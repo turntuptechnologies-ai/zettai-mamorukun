@@ -3,6 +3,7 @@ pub mod dns_monitor;
 pub mod file_integrity;
 pub mod firewall_monitor;
 pub mod kernel_module;
+pub mod ld_preload_monitor;
 pub mod log_tamper;
 pub mod mount_monitor;
 pub mod pkg_repo_monitor;

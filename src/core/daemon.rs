@@ -9,6 +9,7 @@ use crate::modules::dns_monitor::DnsMonitorModule;
 use crate::modules::file_integrity::FileIntegrityModule;
 use crate::modules::firewall_monitor::FirewallMonitorModule;
 use crate::modules::kernel_module::KernelModuleMonitor;
+use crate::modules::ld_preload_monitor::LdPreloadMonitorModule;
 use crate::modules::log_tamper::LogTamperModule;
 use crate::modules::mount_monitor::MountMonitorModule;
 use crate::modules::pkg_repo_monitor::PkgRepoMonitorModule;
@@ -311,6 +312,21 @@ impl Daemon {
             None
         };
 
+        // 環境変数・LD_PRELOAD 監視モジュールの初期化と起動
+        let ldp_cancel_token = if self.config.modules.ld_preload_monitor.enabled {
+            let mut ldp = LdPreloadMonitorModule::new(
+                self.config.modules.ld_preload_monitor.clone(),
+                event_bus.clone(),
+            );
+            ldp.init()?;
+            let cancel_token = ldp.cancel_token();
+            ldp.start().await?;
+            tracing::info!("環境変数・LD_PRELOAD 監視モジュールを起動しました");
+            Some(cancel_token)
+        } else {
+            None
+        };
+
         // ユーザーアカウント監視モジュールの初期化と起動
         let ua_cancel_token = if self.config.modules.user_account.enabled {
             let mut ua =
@@ -436,6 +452,10 @@ impl Daemon {
         if let Some(cancel_token) = pkg_cancel_token {
             cancel_token.cancel();
             tracing::info!("パッケージリポジトリ改ざん検知モジュールを停止しました");
+        }
+        if let Some(cancel_token) = ldp_cancel_token {
+            cancel_token.cancel();
+            tracing::info!("環境変数・LD_PRELOAD 監視モジュールを停止しました");
         }
 
         tracing::info!("シャットダウン完了");

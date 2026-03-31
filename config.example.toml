@@ -133,6 +133,14 @@ scan_interval_secs = 120
 # 監視対象パスのリスト（ファイルまたはディレクトリ）
 watch_paths = ["/etc/apt/sources.list", "/etc/apt/sources.list.d", "/etc/yum.repos.d"]
 
+[modules.ld_preload_monitor]
+# 環境変数・LD_PRELOAD 監視モジュールの有効/無効
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 60
+# 監視対象パスのリスト（ファイルまたはディレクトリ）
+watch_paths = ["/etc/ld.so.preload", "/etc/environment", "/etc/ld.so.conf", "/etc/ld.so.conf.d"]
+
 [modules.ssh_brute_force]
 # SSH ブルートフォース検知モジュールの有効/無効
 enabled = false
