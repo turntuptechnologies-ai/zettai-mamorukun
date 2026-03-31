@@ -108,6 +108,10 @@ pub struct ModulesConfig {
     /// 環境変数・LD_PRELOAD 監視モジュールの設定
     #[serde(default)]
     pub ld_preload_monitor: LdPreloadMonitorConfig,
+
+    /// ネットワーク接続監視モジュールの設定
+    #[serde(default)]
+    pub network_monitor: NetworkMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -830,6 +834,51 @@ impl Default for LdPreloadMonitorConfig {
     }
 }
 
+/// ネットワーク接続監視モジュールの設定
+#[derive(Debug, Deserialize, Clone)]
+pub struct NetworkMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// 監視間隔（秒）
+    #[serde(default = "NetworkMonitorConfig::default_interval_secs")]
+    pub interval_secs: u64,
+
+    /// 不審ポートリスト
+    #[serde(default = "NetworkMonitorConfig::default_suspicious_ports")]
+    pub suspicious_ports: Vec<u16>,
+
+    /// 接続数閾値
+    #[serde(default = "NetworkMonitorConfig::default_max_connections")]
+    pub max_connections: u32,
+}
+
+impl NetworkMonitorConfig {
+    fn default_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_suspicious_ports() -> Vec<u16> {
+        vec![4444, 5555, 6666, 8888, 1337]
+    }
+
+    fn default_max_connections() -> u32 {
+        1000
+    }
+}
+
+impl Default for NetworkMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: Self::default_interval_secs(),
+            suspicious_ports: Self::default_suspicious_ports(),
+            max_connections: Self::default_max_connections(),
+        }
+    }
+}
+
 /// アクションエンジン設定
 #[derive(Debug, Default, Deserialize, Clone)]
 pub struct ActionConfig {
@@ -1317,5 +1366,36 @@ channel_capacity = 512
         let config: AppConfig = toml::from_str(toml_str).unwrap();
         assert!(config.event_bus.enabled);
         assert_eq!(config.event_bus.channel_capacity, 512);
+    }
+
+    #[test]
+    fn test_network_monitor_config_defaults() {
+        let config: AppConfig = toml::from_str("").unwrap();
+        assert!(!config.modules.network_monitor.enabled);
+        assert_eq!(config.modules.network_monitor.interval_secs, 30);
+        assert_eq!(
+            config.modules.network_monitor.suspicious_ports,
+            vec![4444, 5555, 6666, 8888, 1337]
+        );
+        assert_eq!(config.modules.network_monitor.max_connections, 1000);
+    }
+
+    #[test]
+    fn test_network_monitor_config_custom() {
+        let toml_str = r#"
+[modules.network_monitor]
+enabled = true
+interval_secs = 60
+suspicious_ports = [1234, 5678]
+max_connections = 500
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.modules.network_monitor.enabled);
+        assert_eq!(config.modules.network_monitor.interval_secs, 60);
+        assert_eq!(
+            config.modules.network_monitor.suspicious_ports,
+            vec![1234, 5678]
+        );
+        assert_eq!(config.modules.network_monitor.max_connections, 500);
     }
 }

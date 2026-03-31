@@ -141,6 +141,16 @@ scan_interval_secs = 60
 # 監視対象パスのリスト（ファイルまたはディレクトリ）
 watch_paths = ["/etc/ld.so.preload", "/etc/environment", "/etc/ld.so.conf", "/etc/ld.so.conf.d"]
 
+[modules.network_monitor]
+# ネットワーク接続監視モジュールの有効/無効
+enabled = false
+# 監視間隔（秒）
+interval_secs = 30
+# 不審ポートリスト
+suspicious_ports = [4444, 5555, 6666, 8888, 1337]
+# 接続数閾値
+max_connections = 1000
+
 [modules.ssh_brute_force]
 # SSH ブルートフォース検知モジュールの有効/無効
 enabled = false
