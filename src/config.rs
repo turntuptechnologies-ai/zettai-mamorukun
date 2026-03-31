@@ -100,6 +100,10 @@ pub struct ModulesConfig {
     /// SSH ブルートフォース検知モジュールの設定
     #[serde(default)]
     pub ssh_brute_force: SshBruteForceConfig,
+
+    /// パッケージリポジトリ改ざん検知モジュールの設定
+    #[serde(default)]
+    pub pkg_repo_monitor: PkgRepoMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -737,6 +741,46 @@ impl Default for SshBruteForceConfig {
             auth_log_path: Self::default_auth_log_path(),
             max_failures: Self::default_max_failures(),
             time_window_secs: Self::default_time_window_secs(),
+        }
+    }
+}
+
+/// パッケージリポジトリ改ざん検知モジュールの設定
+#[derive(Debug, Deserialize, Clone)]
+pub struct PkgRepoMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "PkgRepoMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象パスのリスト（ファイルまたはディレクトリ）
+    #[serde(default = "PkgRepoMonitorConfig::default_watch_paths")]
+    pub watch_paths: Vec<PathBuf>,
+}
+
+impl PkgRepoMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        120
+    }
+
+    fn default_watch_paths() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/etc/apt/sources.list"),
+            PathBuf::from("/etc/apt/sources.list.d"),
+            PathBuf::from("/etc/yum.repos.d"),
+        ]
+    }
+}
+
+impl Default for PkgRepoMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            watch_paths: Self::default_watch_paths(),
         }
     }
 }
