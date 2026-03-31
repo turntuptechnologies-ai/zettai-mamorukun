@@ -190,6 +190,7 @@ enabled = false
 # severity = "critical"
 # action = "webhook"
 # url = "https://hooks.slack.com/services/xxx/yyy/zzz"
+# method = "POST"
 # timeout_secs = 10
 # max_retries = 3
 # [actions.rules.headers]
