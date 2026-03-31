@@ -104,6 +104,10 @@ pub struct ModulesConfig {
     /// パッケージリポジトリ改ざん検知モジュールの設定
     #[serde(default)]
     pub pkg_repo_monitor: PkgRepoMonitorConfig,
+
+    /// 環境変数・LD_PRELOAD 監視モジュールの設定
+    #[serde(default)]
+    pub ld_preload_monitor: LdPreloadMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -776,6 +780,47 @@ impl PkgRepoMonitorConfig {
 }
 
 impl Default for PkgRepoMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            watch_paths: Self::default_watch_paths(),
+        }
+    }
+}
+
+/// 環境変数・LD_PRELOAD 監視モジュールの設定
+#[derive(Debug, Deserialize, Clone)]
+pub struct LdPreloadMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "LdPreloadMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象パスのリスト
+    #[serde(default = "LdPreloadMonitorConfig::default_watch_paths")]
+    pub watch_paths: Vec<PathBuf>,
+}
+
+impl LdPreloadMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        60
+    }
+
+    fn default_watch_paths() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/etc/ld.so.preload"),
+            PathBuf::from("/etc/environment"),
+            PathBuf::from("/etc/ld.so.conf"),
+            PathBuf::from("/etc/ld.so.conf.d"),
+        ]
+    }
+}
+
+impl Default for LdPreloadMonitorConfig {
     fn default() -> Self {
         Self {
             enabled: false,
