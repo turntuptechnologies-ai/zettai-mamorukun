@@ -88,6 +88,7 @@ src/
     mount_monitor.rs   # マウントポイント監視モジュール
     process_monitor.rs # プロセス異常検知モジュール
     shell_config_monitor.rs # シェル設定ファイル監視モジュール
+    ssh_brute_force.rs # SSH ブルートフォース検知モジュール
     ssh_key_monitor.rs # SSH公開鍵ファイル監視モジュール
     sudoers_monitor.rs # sudoers ファイル監視モジュール
     suid_sgid_monitor.rs # SUID/SGID ファイル監視モジュール
