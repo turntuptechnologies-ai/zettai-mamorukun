@@ -11,6 +11,7 @@ use crate::modules::firewall_monitor::FirewallMonitorModule;
 use crate::modules::kernel_module::KernelModuleMonitor;
 use crate::modules::log_tamper::LogTamperModule;
 use crate::modules::mount_monitor::MountMonitorModule;
+use crate::modules::pkg_repo_monitor::PkgRepoMonitorModule;
 use crate::modules::process_monitor::ProcessMonitorModule;
 use crate::modules::shell_config_monitor::ShellConfigMonitorModule;
 use crate::modules::ssh_brute_force::SshBruteForceModule;
@@ -295,6 +296,21 @@ impl Daemon {
             None
         };
 
+        // パッケージリポジトリ改ざん検知モジュールの初期化と起動
+        let pkg_cancel_token = if self.config.modules.pkg_repo_monitor.enabled {
+            let mut pkg = PkgRepoMonitorModule::new(
+                self.config.modules.pkg_repo_monitor.clone(),
+                event_bus.clone(),
+            );
+            pkg.init()?;
+            let cancel_token = pkg.cancel_token();
+            pkg.start().await?;
+            tracing::info!("パッケージリポジトリ改ざん検知モジュールを起動しました");
+            Some(cancel_token)
+        } else {
+            None
+        };
+
         // ユーザーアカウント監視モジュールの初期化と起動
         let ua_cancel_token = if self.config.modules.user_account.enabled {
             let mut ua =
@@ -416,6 +432,10 @@ impl Daemon {
         if let Some(cancel_token) = sbf_cancel_token {
             cancel_token.cancel();
             tracing::info!("SSH ブルートフォース検知モジュールを停止しました");
+        }
+        if let Some(cancel_token) = pkg_cancel_token {
+            cancel_token.cancel();
+            tracing::info!("パッケージリポジトリ改ざん検知モジュールを停止しました");
         }
 
         tracing::info!("シャットダウン完了");
