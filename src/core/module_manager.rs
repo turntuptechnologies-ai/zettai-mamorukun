@@ -12,6 +12,7 @@ use crate::modules::ld_preload_monitor::LdPreloadMonitorModule;
 use crate::modules::log_tamper::LogTamperModule;
 use crate::modules::mount_monitor::MountMonitorModule;
 use crate::modules::network_monitor::NetworkMonitorModule;
+use crate::modules::pam_monitor::PamMonitorModule;
 use crate::modules::pkg_repo_monitor::PkgRepoMonitorModule;
 use crate::modules::process_monitor::ProcessMonitorModule;
 use crate::modules::shell_config_monitor::ShellConfigMonitorModule;
@@ -338,6 +339,14 @@ impl ModuleManager {
             UserAccountModule,
             "ユーザーアカウント監視モジュール"
         );
+        start_module!(
+            modules,
+            config,
+            event_bus,
+            pam_monitor,
+            PamMonitorModule,
+            "PAM 設定監視モジュール"
+        );
 
         Self {
             running_modules: modules,
@@ -582,6 +591,17 @@ impl ModuleManager {
             user_account,
             UserAccountModule,
             "ユーザーアカウント監視モジュール"
+        );
+        reload_module!(
+            result,
+            self.running_modules,
+            new_modules,
+            old_config,
+            new_config,
+            event_bus,
+            pam_monitor,
+            PamMonitorModule,
+            "PAM 設定監視モジュール"
         );
 
         self.running_modules = new_modules;
