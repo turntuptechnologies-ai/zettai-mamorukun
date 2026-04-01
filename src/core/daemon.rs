@@ -2,6 +2,7 @@ use crate::config::AppConfig;
 use crate::core::action::ActionEngine;
 use crate::core::event::{self, EventBus, SecurityEvent, Severity};
 use crate::core::health::HealthChecker;
+use crate::core::metrics::MetricsCollector;
 use crate::core::module_manager::ModuleManager;
 use crate::error::AppError;
 use std::path::PathBuf;
@@ -50,6 +51,16 @@ impl Daemon {
                         tracing::error!(error = %e, "アクションエンジンの初期化に失敗しました");
                     }
                 }
+            }
+
+            // メトリクスコレクターの起動
+            if self.config.metrics.enabled {
+                let collector = MetricsCollector::new(&self.config.metrics, &bus);
+                collector.spawn();
+                tracing::info!(
+                    interval_secs = self.config.metrics.interval_secs,
+                    "メトリクスコレクターを起動しました"
+                );
             }
 
             tracing::info!(
@@ -115,6 +126,15 @@ impl Daemon {
                                     format!("設定ファイルをリロードしました ({})", summary),
                                 );
                                 bus.publish(event);
+                            }
+
+                            // メトリクスのインターバル変更警告
+                            if self.config.metrics.interval_secs != new_config.metrics.interval_secs {
+                                tracing::warn!(
+                                    old = self.config.metrics.interval_secs,
+                                    new = new_config.metrics.interval_secs,
+                                    "メトリクスのインターバル変更はデーモン再起動後に反映されます"
+                                );
                             }
 
                             self.config = new_config;

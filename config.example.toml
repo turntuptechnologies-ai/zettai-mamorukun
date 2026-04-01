@@ -171,6 +171,12 @@ max_failures = 5
 # 時間窓（秒）- この期間内の失敗回数をカウント
 time_window_secs = 300
 
+[metrics]
+# イベント統計・メトリクス収集の有効/無効
+enabled = false
+# サマリーログ出力インターバル（秒）
+interval_secs = 60
+
 [event_bus]
 # イベントバスの有効/無効
 enabled = false
