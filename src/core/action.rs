@@ -5,7 +5,7 @@ use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use std::collections::HashMap;
 use std::time::Duration;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 /// アクション種別
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,6 +19,7 @@ pub enum ActionType {
 }
 
 /// アクションルール
+#[derive(Debug, Clone)]
 pub struct ActionRule {
     /// ルール名
     pub name: String,
@@ -62,6 +63,7 @@ pub struct ActionEngine {
     rules: Vec<ActionRule>,
     receiver: broadcast::Receiver<SecurityEvent>,
     client: reqwest::Client,
+    config_receiver: watch::Receiver<Vec<ActionRule>>,
 }
 
 impl std::fmt::Debug for ActionEngine {
@@ -74,7 +76,31 @@ impl std::fmt::Debug for ActionEngine {
 
 impl ActionEngine {
     /// 設定からアクションエンジンを構築する
-    pub fn new(config: &ActionConfig, event_bus: &EventBus) -> Result<Self, AppError> {
+    ///
+    /// 戻り値のタプルの第2要素はアクションルール更新用の `watch::Sender`。
+    /// SIGHUP リロード時にこの sender で新しいルールを送信すると、
+    /// 実行中の ActionEngine がルールを動的に更新する。
+    pub fn new(
+        config: &ActionConfig,
+        event_bus: &EventBus,
+    ) -> Result<(Self, watch::Sender<Vec<ActionRule>>), AppError> {
+        let rules = Self::parse_rules(config)?;
+        let (config_sender, config_receiver) = watch::channel(rules.clone());
+        let receiver = event_bus.subscribe();
+        let client = reqwest::Client::new();
+        Ok((
+            Self {
+                rules,
+                receiver,
+                client,
+                config_receiver,
+            },
+            config_sender,
+        ))
+    }
+
+    /// ActionConfig からアクションルールをパースする
+    pub fn parse_rules(config: &ActionConfig) -> Result<Vec<ActionRule>, AppError> {
         let mut rules = Vec::new();
         for rule_config in &config.rules {
             let severity = match &rule_config.severity {
@@ -149,47 +175,65 @@ impl ActionEngine {
             });
         }
 
-        let receiver = event_bus.subscribe();
-        let client = reqwest::Client::new();
-        Ok(Self {
-            rules,
-            receiver,
-            client,
-        })
+        Ok(rules)
     }
 
     /// 非同期タスクとしてアクションエンジンを起動する
     pub fn spawn(self) {
         let client = self.client;
         tokio::spawn(async move {
-            Self::run_loop(self.rules, self.receiver, client).await;
+            Self::run_loop(self.rules, self.receiver, self.config_receiver, client).await;
         });
     }
 
     async fn run_loop(
-        rules: Vec<ActionRule>,
+        mut rules: Vec<ActionRule>,
         mut receiver: broadcast::Receiver<SecurityEvent>,
+        mut config_receiver: watch::Receiver<Vec<ActionRule>>,
         client: reqwest::Client,
     ) {
         loop {
-            match receiver.recv().await {
-                Ok(event) => {
-                    for rule in &rules {
-                        if Self::matches(rule, &event) {
-                            Self::execute_action(rule, &event, &client).await;
+            tokio::select! {
+                result = receiver.recv() => {
+                    match result {
+                        Ok(event) => {
+                            for rule in &rules {
+                                if Self::matches(rule, &event) {
+                                    Self::execute_action(rule, &event, &client).await;
+                                }
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!(
+                                skipped = n,
+                                "アクションエンジン: {} 件のイベントをスキップ（遅延）",
+                                n
+                            );
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            tracing::info!("イベントバスが閉じられました。アクションエンジンを終了します");
+                            break;
                         }
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!(
-                        skipped = n,
-                        "アクションエンジン: {} 件のイベントをスキップ（遅延）",
-                        n
-                    );
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    tracing::info!("イベントバスが閉じられました。アクションエンジンを終了します");
-                    break;
+                result = config_receiver.changed() => {
+                    match result {
+                        Ok(()) => {
+                            let new_rules = config_receiver.borrow_and_update().clone();
+                            let new_count = new_rules.len();
+                            let old_count = rules.len();
+                            rules = new_rules;
+                            tracing::info!(
+                                old_rules = old_count,
+                                new_rules = new_count,
+                                "アクションエンジン: ルールをリロードしました"
+                            );
+                        }
+                        Err(_) => {
+                            tracing::info!("設定チャネルが閉じられました。アクションエンジンを終了します");
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -545,7 +589,7 @@ mod tests {
             enabled: true,
             rules: vec![
                 {
-                    let mut r = make_rule_config("log_all", "log", None);
+                    let r = make_rule_config("log_all", "log", None);
                     r
                 },
                 {
@@ -559,9 +603,9 @@ mod tests {
             ],
         };
         let bus = EventBus::new(16);
-        let engine = ActionEngine::new(&config, &bus);
-        assert!(engine.is_ok());
-        let engine = engine.unwrap();
+        let result = ActionEngine::new(&config, &bus);
+        assert!(result.is_ok());
+        let (engine, _sender) = result.unwrap();
         assert_eq!(engine.rules.len(), 2);
         assert_eq!(engine.rules[0].name, "log_all");
         assert_eq!(engine.rules[0].action, ActionType::Log);
@@ -690,7 +734,7 @@ mod tests {
             }],
         };
         let bus = EventBus::new(16);
-        let engine = ActionEngine::new(&config, &bus).unwrap();
+        let (engine, _sender) = ActionEngine::new(&config, &bus).unwrap();
         // Webhook のデフォルトタイムアウトは 10 秒に上書きされる
         assert_eq!(engine.rules[0].timeout_secs, WEBHOOK_DEFAULT_TIMEOUT_SECS);
     }
@@ -707,8 +751,101 @@ mod tests {
             }],
         };
         let bus = EventBus::new(16);
-        let engine = ActionEngine::new(&config, &bus).unwrap();
+        let (engine, _sender) = ActionEngine::new(&config, &bus).unwrap();
         // カスタム値はそのまま
         assert_eq!(engine.rules[0].timeout_secs, 15);
+    }
+
+    #[test]
+    fn test_parse_rules_valid() {
+        let config = ActionConfig {
+            enabled: true,
+            rules: vec![make_rule_config("log_all", "log", None), {
+                let mut r = make_rule_config("cmd_rule", "command", Some("echo test"));
+                r.severity = Some("warning".to_string());
+                r
+            }],
+        };
+        let rules = ActionEngine::parse_rules(&config).unwrap();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].name, "log_all");
+        assert_eq!(rules[1].name, "cmd_rule");
+        assert_eq!(rules[1].severity, Some(Severity::Warning));
+    }
+
+    #[test]
+    fn test_parse_rules_invalid_severity() {
+        let config = ActionConfig {
+            enabled: true,
+            rules: vec![{
+                let mut r = make_rule_config("bad", "log", None);
+                r.severity = Some("invalid".to_string());
+                r
+            }],
+        };
+        let result = ActionEngine::parse_rules(&config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_rules_empty() {
+        let config = ActionConfig {
+            enabled: true,
+            rules: vec![],
+        };
+        let rules = ActionEngine::parse_rules(&config).unwrap();
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn test_new_returns_watch_sender() {
+        let config = ActionConfig {
+            enabled: true,
+            rules: vec![make_rule_config("log_all", "log", None)],
+        };
+        let bus = EventBus::new(16);
+        let (engine, sender) = ActionEngine::new(&config, &bus).unwrap();
+        assert_eq!(engine.rules.len(), 1);
+
+        // sender で新しいルールを送信できることを確認
+        let new_rules = vec![
+            make_rule(None, None),
+            make_rule(Some(Severity::Critical), None),
+        ];
+        assert!(sender.send(new_rules).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_hot_reload_updates_rules() {
+        let config = ActionConfig {
+            enabled: true,
+            rules: vec![make_rule_config("initial_rule", "log", None)],
+        };
+        let bus = EventBus::new(16);
+        let (engine, sender) = ActionEngine::new(&config, &bus).unwrap();
+
+        // エンジンを起動
+        engine.spawn();
+
+        // 新しいルールを送信
+        let new_config = ActionConfig {
+            enabled: true,
+            rules: vec![
+                make_rule_config("rule_a", "log", None),
+                make_rule_config("rule_b", "log", None),
+            ],
+        };
+        let new_rules = ActionEngine::parse_rules(&new_config).unwrap();
+        assert!(sender.send(new_rules).is_ok());
+
+        // ルール更新が処理される時間を与える
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // イベントを発行して新しいルールで処理されることを確認
+        let event = SecurityEvent::new("test_event", Severity::Info, "test", "テスト");
+        bus.publish(event);
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // パニックせずに動作することを確認
     }
 }

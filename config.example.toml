@@ -188,6 +188,7 @@ debounce_secs = 30
 
 [actions]
 # アクションエンジンの有効/無効
+# ※ SIGHUP によるホットリロードに対応（ルール変更はデーモン再起動不要）
 enabled = false
 
 # [[actions.rules]]
