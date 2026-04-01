@@ -84,6 +84,7 @@ src/
     module_manager.rs  # モジュールマネージャー（モジュール一括管理・設定ホットリロード）
   modules/
     mod.rs             # モジュールトレイト・レジストリ
+    container_escape.rs # コンテナエスケープ検知モジュール
     cron_monitor.rs    # Cron ジョブ改ざん検知モジュール
     dns_monitor.rs     # DNS設定改ざん検知モジュール
     file_integrity.rs  # ファイル整合性監視モジュール

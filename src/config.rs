@@ -120,6 +120,10 @@ pub struct ModulesConfig {
     /// PAM 設定監視モジュールの設定
     #[serde(default)]
     pub pam_monitor: PamMonitorConfig,
+
+    /// コンテナエスケープ検知モジュールの設定
+    #[serde(default)]
+    pub container_escape: ContainerEscapeConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -923,6 +927,51 @@ impl Default for NetworkMonitorConfig {
     }
 }
 
+/// コンテナエスケープ検知モジュールの設定
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct ContainerEscapeConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "ContainerEscapeConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// Docker ソケットのパス
+    #[serde(default = "ContainerEscapeConfig::default_docker_socket_path")]
+    pub docker_socket_path: PathBuf,
+
+    /// 名前空間操作コマンドの監視対象
+    #[serde(default = "ContainerEscapeConfig::default_suspicious_commands")]
+    pub suspicious_commands: Vec<String>,
+}
+
+impl ContainerEscapeConfig {
+    fn default_scan_interval_secs() -> u64 {
+        60
+    }
+
+    fn default_docker_socket_path() -> PathBuf {
+        PathBuf::from("/var/run/docker.sock")
+    }
+
+    fn default_suspicious_commands() -> Vec<String> {
+        vec!["nsenter".to_string(), "unshare".to_string()]
+    }
+}
+
+impl Default for ContainerEscapeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            docker_socket_path: Self::default_docker_socket_path(),
+            suspicious_commands: Self::default_suspicious_commands(),
+        }
+    }
+}
+
 /// アクションエンジン設定
 #[derive(Debug, Default, Deserialize, Clone, PartialEq)]
 pub struct ActionConfig {
@@ -1508,6 +1557,37 @@ max_connections = 500
             vec![1234, 5678]
         );
         assert_eq!(config.modules.network_monitor.max_connections, 500);
+    }
+
+    #[test]
+    fn test_container_escape_config_defaults() {
+        let config: AppConfig = toml::from_str("").unwrap();
+        assert!(!config.modules.container_escape.enabled);
+        assert_eq!(config.modules.container_escape.scan_interval_secs, 60);
+        assert_eq!(
+            config.modules.container_escape.docker_socket_path,
+            PathBuf::from("/var/run/docker.sock")
+        );
+        assert_eq!(config.modules.container_escape.suspicious_commands.len(), 2);
+    }
+
+    #[test]
+    fn test_container_escape_config_custom() {
+        let toml_str = r#"
+[modules.container_escape]
+enabled = true
+scan_interval_secs = 30
+docker_socket_path = "/run/docker.sock"
+suspicious_commands = ["nsenter"]
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.modules.container_escape.enabled);
+        assert_eq!(config.modules.container_escape.scan_interval_secs, 30);
+        assert_eq!(
+            config.modules.container_escape.docker_socket_path,
+            PathBuf::from("/run/docker.sock")
+        );
+        assert_eq!(config.modules.container_escape.suspicious_commands.len(), 1);
     }
 
     #[test]

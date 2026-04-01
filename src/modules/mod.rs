@@ -1,3 +1,4 @@
+pub mod container_escape;
 pub mod cron_monitor;
 pub mod dns_monitor;
 pub mod file_integrity;

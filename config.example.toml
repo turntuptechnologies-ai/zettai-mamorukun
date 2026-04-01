@@ -171,6 +171,16 @@ max_failures = 5
 # 時間窓（秒）- この期間内の失敗回数をカウント
 time_window_secs = 300
 
+[modules.container_escape]
+# コンテナエスケープ検知モジュールの有効/無効
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 60
+# Docker ソケットのパス
+docker_socket_path = "/var/run/docker.sock"
+# 名前空間操作コマンドの監視対象
+suspicious_commands = ["nsenter", "unshare"]
+
 [metrics]
 # イベント統計・メトリクス収集の有効/無効
 enabled = false

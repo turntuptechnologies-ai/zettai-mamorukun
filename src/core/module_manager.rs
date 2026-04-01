@@ -3,6 +3,7 @@
 use crate::config::ModulesConfig;
 use crate::core::event::EventBus;
 use crate::modules::Module;
+use crate::modules::container_escape::ContainerEscapeModule;
 use crate::modules::cron_monitor::CronMonitorModule;
 use crate::modules::dns_monitor::DnsMonitorModule;
 use crate::modules::file_integrity::FileIntegrityModule;
@@ -347,6 +348,14 @@ impl ModuleManager {
             PamMonitorModule,
             "PAM 設定監視モジュール"
         );
+        start_module!(
+            modules,
+            config,
+            event_bus,
+            container_escape,
+            ContainerEscapeModule,
+            "コンテナエスケープ検知モジュール"
+        );
 
         Self {
             running_modules: modules,
@@ -602,6 +611,17 @@ impl ModuleManager {
             pam_monitor,
             PamMonitorModule,
             "PAM 設定監視モジュール"
+        );
+        reload_module!(
+            result,
+            self.running_modules,
+            new_modules,
+            old_config,
+            new_config,
+            event_bus,
+            container_escape,
+            ContainerEscapeModule,
+            "コンテナエスケープ検知モジュール"
         );
 
         self.running_modules = new_modules;
