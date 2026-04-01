@@ -619,3 +619,33 @@ channel_capacity = 256
     assert!(config.event_bus.enabled);
     assert_eq!(config.event_bus.channel_capacity, 256);
 }
+
+#[test]
+fn test_config_security_files_monitor_disabled_by_default() {
+    let config = AppConfig::load(Path::new("/tmp/nonexistent-zettai-config.toml")).unwrap();
+    assert!(!config.modules.security_files_monitor.enabled);
+    assert_eq!(
+        config.modules.security_files_monitor.scan_interval_secs,
+        120
+    );
+    assert_eq!(config.modules.security_files_monitor.watch_paths.len(), 9);
+}
+
+#[test]
+fn test_config_with_security_files_monitor_section() {
+    let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+    write!(
+        tmpfile,
+        r#"
+[modules.security_files_monitor]
+enabled = true
+scan_interval_secs = 60
+watch_paths = ["/etc/security/limits.conf", "/etc/security/access.conf"]
+"#
+    )
+    .unwrap();
+    let config = AppConfig::load(tmpfile.path()).unwrap();
+    assert!(config.modules.security_files_monitor.enabled);
+    assert_eq!(config.modules.security_files_monitor.scan_interval_secs, 60);
+    assert_eq!(config.modules.security_files_monitor.watch_paths.len(), 2);
+}

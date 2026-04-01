@@ -123,6 +123,24 @@ scan_interval_secs = 120
 # 監視対象パスのリスト（ファイルまたはディレクトリ）
 watch_paths = ["/etc/pam.d"]
 
+[modules.security_files_monitor]
+# /etc/security/ 監視モジュールの有効/無効
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 120
+# 監視対象パスのリスト（ファイルまたはディレクトリ）
+watch_paths = [
+    "/etc/security/limits.conf",
+    "/etc/security/limits.d",
+    "/etc/security/access.conf",
+    "/etc/security/namespace.conf",
+    "/etc/security/group.conf",
+    "/etc/security/time.conf",
+    "/etc/security/pam_env.conf",
+    "/etc/security/faillock.conf",
+    "/etc/security/pwquality.conf",
+]
+
 [modules.suid_sgid_monitor]
 # SUID/SGID ファイル監視モジュールの有効/無効
 enabled = false

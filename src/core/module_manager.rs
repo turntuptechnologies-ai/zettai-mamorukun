@@ -16,6 +16,7 @@ use crate::modules::network_monitor::NetworkMonitorModule;
 use crate::modules::pam_monitor::PamMonitorModule;
 use crate::modules::pkg_repo_monitor::PkgRepoMonitorModule;
 use crate::modules::process_monitor::ProcessMonitorModule;
+use crate::modules::security_files_monitor::SecurityFilesMonitorModule;
 use crate::modules::shell_config_monitor::ShellConfigMonitorModule;
 use crate::modules::ssh_brute_force::SshBruteForceModule;
 use crate::modules::ssh_key_monitor::SshKeyMonitorModule;
@@ -356,6 +357,14 @@ impl ModuleManager {
             PamMonitorModule,
             "PAM 設定監視モジュール"
         );
+        start_module!(
+            modules,
+            config,
+            event_bus,
+            security_files_monitor,
+            SecurityFilesMonitorModule,
+            "/etc/security/ 監視モジュール"
+        );
 
         Self {
             running_modules: modules,
@@ -622,6 +631,17 @@ impl ModuleManager {
             pam_monitor,
             PamMonitorModule,
             "PAM 設定監視モジュール"
+        );
+        reload_module!(
+            result,
+            self.running_modules,
+            new_modules,
+            old_config,
+            new_config,
+            event_bus,
+            security_files_monitor,
+            SecurityFilesMonitorModule,
+            "/etc/security/ 監視モジュール"
         );
 
         self.running_modules = new_modules;
