@@ -1012,11 +1012,19 @@ pub struct EventBusConfig {
     /// ブロードキャストチャネルの容量
     #[serde(default = "EventBusConfig::default_channel_capacity")]
     pub channel_capacity: usize,
+
+    /// イベントデバウンス間隔（秒）— 0 でデバウンス無効
+    #[serde(default = "EventBusConfig::default_debounce_secs")]
+    pub debounce_secs: u64,
 }
 
 impl EventBusConfig {
     fn default_channel_capacity() -> usize {
         1024
+    }
+
+    fn default_debounce_secs() -> u64 {
+        30
     }
 }
 
@@ -1025,6 +1033,7 @@ impl Default for EventBusConfig {
         Self {
             enabled: false,
             channel_capacity: Self::default_channel_capacity(),
+            debounce_secs: Self::default_debounce_secs(),
         }
     }
 }
