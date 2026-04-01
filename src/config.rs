@@ -53,6 +53,10 @@ pub struct ModulesConfig {
     #[serde(default)]
     pub kernel_module: KernelModuleConfig,
 
+    /// at/batch ジョブ監視モジュールの設定
+    #[serde(default)]
+    pub at_job_monitor: AtJobMonitorConfig,
+
     /// Cron ジョブ改ざん検知モジュールの設定
     #[serde(default)]
     pub cron_monitor: CronMonitorConfig,
@@ -217,6 +221,47 @@ impl Default for KernelModuleConfig {
         Self {
             enabled: false,
             scan_interval_secs: Self::default_scan_interval_secs(),
+        }
+    }
+}
+
+/// at/batch ジョブ監視モジュールの設定
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct AtJobMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "AtJobMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象パスのリスト
+    #[serde(default = "AtJobMonitorConfig::default_watch_paths")]
+    pub watch_paths: Vec<PathBuf>,
+}
+
+impl AtJobMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        120
+    }
+
+    fn default_watch_paths() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/var/spool/at"),
+            PathBuf::from("/var/spool/cron/atjobs"),
+            PathBuf::from("/etc/at.allow"),
+            PathBuf::from("/etc/at.deny"),
+        ]
+    }
+}
+
+impl Default for AtJobMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            watch_paths: Self::default_watch_paths(),
         }
     }
 }

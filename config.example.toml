@@ -27,6 +27,14 @@ enabled = false
 # スキャン間隔（秒）
 scan_interval_secs = 120
 
+[modules.at_job_monitor]
+# at/batch ジョブ監視モジュールの有効/無効
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 120
+# 監視対象パスのリスト
+watch_paths = ["/var/spool/at", "/var/spool/cron/atjobs", "/etc/at.allow", "/etc/at.deny"]
+
 [modules.cron_monitor]
 # Cron ジョブ改ざん検知モジュールの有効/無効
 enabled = false

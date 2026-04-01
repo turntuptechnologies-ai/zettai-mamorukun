@@ -84,6 +84,7 @@ src/
     module_manager.rs  # モジュールマネージャー（モジュール一括管理・設定ホットリロード）
   modules/
     mod.rs             # モジュールトレイト・レジストリ
+    at_job_monitor.rs  # at/batch ジョブ監視モジュール
     cron_monitor.rs    # Cron ジョブ改ざん検知モジュール
     dns_monitor.rs     # DNS設定改ざん検知モジュール
     file_integrity.rs  # ファイル整合性監視モジュール
