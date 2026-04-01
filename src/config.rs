@@ -124,6 +124,10 @@ pub struct ModulesConfig {
     /// PAM 設定監視モジュールの設定
     #[serde(default)]
     pub pam_monitor: PamMonitorConfig,
+
+    /// /etc/security/ 監視モジュールの設定
+    #[serde(default)]
+    pub security_files_monitor: SecurityFilesMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -738,6 +742,52 @@ impl PamMonitorConfig {
 }
 
 impl Default for PamMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            watch_paths: Self::default_watch_paths(),
+        }
+    }
+}
+
+/// /etc/security/ 監視モジュールの設定
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct SecurityFilesMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "SecurityFilesMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象パスのリスト（ファイルまたはディレクトリ）
+    #[serde(default = "SecurityFilesMonitorConfig::default_watch_paths")]
+    pub watch_paths: Vec<PathBuf>,
+}
+
+impl SecurityFilesMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        120
+    }
+
+    fn default_watch_paths() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/etc/security/limits.conf"),
+            PathBuf::from("/etc/security/limits.d"),
+            PathBuf::from("/etc/security/access.conf"),
+            PathBuf::from("/etc/security/namespace.conf"),
+            PathBuf::from("/etc/security/group.conf"),
+            PathBuf::from("/etc/security/time.conf"),
+            PathBuf::from("/etc/security/pam_env.conf"),
+            PathBuf::from("/etc/security/faillock.conf"),
+            PathBuf::from("/etc/security/pwquality.conf"),
+        ]
+    }
+}
+
+impl Default for SecurityFilesMonitorConfig {
     fn default() -> Self {
         Self {
             enabled: false,
