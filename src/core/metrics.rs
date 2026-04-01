@@ -4,31 +4,42 @@ use crate::config::MetricsConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 /// イベント統計・メトリクス収集
 pub struct MetricsCollector {
     receiver: broadcast::Receiver<SecurityEvent>,
     interval: Duration,
+    config_receiver: watch::Receiver<u64>,
 }
 
 impl MetricsCollector {
     /// 設定とイベントバスから MetricsCollector を構築する
-    pub fn new(config: &MetricsConfig, event_bus: &EventBus) -> Self {
-        Self {
-            receiver: event_bus.subscribe(),
-            interval: Duration::from_secs(config.interval_secs),
-        }
+    pub fn new(config: &MetricsConfig, event_bus: &EventBus) -> (Self, watch::Sender<u64>) {
+        let interval_secs = config.interval_secs;
+        let (config_sender, config_receiver) = watch::channel(interval_secs);
+        (
+            Self {
+                receiver: event_bus.subscribe(),
+                interval: Duration::from_secs(interval_secs),
+                config_receiver,
+            },
+            config_sender,
+        )
     }
 
     /// 非同期タスクとしてメトリクスコレクターを起動する
     pub fn spawn(self) {
         tokio::spawn(async move {
-            Self::run_loop(self.receiver, self.interval).await;
+            Self::run_loop(self.receiver, self.interval, self.config_receiver).await;
         });
     }
 
-    async fn run_loop(mut receiver: broadcast::Receiver<SecurityEvent>, interval: Duration) {
+    async fn run_loop(
+        mut receiver: broadcast::Receiver<SecurityEvent>,
+        interval: Duration,
+        mut config_receiver: watch::Receiver<u64>,
+    ) {
         let started_at = Instant::now();
         let mut total_events: u64 = 0;
         let mut info_count: u64 = 0;
@@ -90,6 +101,25 @@ impl MetricsCollector {
                     );
                     interval_events = 0;
                 }
+                result = config_receiver.changed() => {
+                    match result {
+                        Ok(()) => {
+                            let new_interval_secs = *config_receiver.borrow_and_update();
+                            let new_interval = Duration::from_secs(new_interval_secs);
+                            tracing::info!(
+                                old_interval_secs = interval.as_secs(),
+                                new_interval_secs = new_interval_secs,
+                                "メトリクスコレクター: インターバルをリロードしました"
+                            );
+                            ticker = tokio::time::interval(new_interval);
+                            ticker.tick().await;
+                        }
+                        Err(_) => {
+                            tracing::info!("設定チャネルが閉じられました。メトリクスコレクターを終了します");
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
@@ -143,7 +173,7 @@ mod tests {
             interval_secs: 120,
         };
         let bus = EventBus::new(16);
-        let collector = MetricsCollector::new(&config, &bus);
+        let (collector, _sender) = MetricsCollector::new(&config, &bus);
         assert_eq!(collector.interval, Duration::from_secs(120));
     }
 
@@ -172,7 +202,7 @@ mod tests {
             enabled: true,
             interval_secs: 1,
         };
-        let collector = MetricsCollector::new(&config, &bus);
+        let (collector, _sender) = MetricsCollector::new(&config, &bus);
         collector.spawn();
 
         // イベントを発行
@@ -202,5 +232,45 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         // パニックせずに動作することを確認（ログ出力は tracing で検証）
+    }
+
+    #[tokio::test]
+    async fn test_metrics_collector_interval_reload() {
+        let config = MetricsConfig {
+            enabled: true,
+            interval_secs: 60,
+        };
+        let bus = EventBus::new(16);
+        let (collector, sender) = MetricsCollector::new(&config, &bus);
+
+        // 初期値の確認
+        assert_eq!(collector.interval, Duration::from_secs(60));
+
+        collector.spawn();
+
+        // インターバル変更を送信
+        sender.send(30).unwrap();
+
+        // 変更が処理される時間を与える
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // パニックせずに動作することを確認
+    }
+
+    #[tokio::test]
+    async fn test_metrics_collector_config_channel_closed() {
+        let config = MetricsConfig {
+            enabled: true,
+            interval_secs: 60,
+        };
+        let bus = EventBus::new(16);
+        let (collector, sender) = MetricsCollector::new(&config, &bus);
+        collector.spawn();
+
+        // sender をドロップしてチャネルを閉じる
+        drop(sender);
+
+        // メトリクスコレクターが正常に終了することを確認
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }

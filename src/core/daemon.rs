@@ -39,6 +39,7 @@ impl Daemon {
 
         // イベントバスの初期化
         let mut action_config_sender: Option<watch::Sender<Vec<ActionRule>>> = None;
+        let mut metrics_config_sender: Option<watch::Sender<u64>> = None;
         let event_bus = if self.config.event_bus.enabled {
             let bus = EventBus::with_debounce(
                 self.config.event_bus.channel_capacity,
@@ -62,7 +63,8 @@ impl Daemon {
 
             // メトリクスコレクターの起動
             if self.config.metrics.enabled {
-                let collector = MetricsCollector::new(&self.config.metrics, &bus);
+                let (collector, sender) = MetricsCollector::new(&self.config.metrics, &bus);
+                metrics_config_sender = Some(sender);
                 collector.spawn();
                 tracing::info!(
                     interval_secs = self.config.metrics.interval_secs,
@@ -165,13 +167,21 @@ impl Daemon {
                                 }
                             }
 
-                            // メトリクスのインターバル変更警告
-                            if self.config.metrics.interval_secs != new_config.metrics.interval_secs {
-                                tracing::warn!(
-                                    old = self.config.metrics.interval_secs,
-                                    new = new_config.metrics.interval_secs,
-                                    "メトリクスのインターバル変更はデーモン再起動後に反映されます"
-                                );
+                            // メトリクスのインターバルリロード
+                            if self.config.metrics.interval_secs != new_config.metrics.interval_secs
+                                && let Some(ref sender) = metrics_config_sender
+                            {
+                                if sender.send(new_config.metrics.interval_secs).is_ok() {
+                                    tracing::info!(
+                                        old = self.config.metrics.interval_secs,
+                                        new = new_config.metrics.interval_secs,
+                                        "メトリクスのインターバルをリロードしました"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        "メトリクスのインターバルリロードに失敗しました（受信側が閉じています）"
+                                    );
+                                }
                             }
 
                             self.config = new_config;
