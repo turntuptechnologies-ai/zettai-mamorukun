@@ -1,5 +1,5 @@
 use crate::config::AppConfig;
-use crate::core::action::ActionEngine;
+use crate::core::action::{ActionEngine, ActionRule};
 use crate::core::event::{self, EventBus, SecurityEvent, Severity};
 use crate::core::health::HealthChecker;
 use crate::core::metrics::MetricsCollector;
@@ -8,6 +8,7 @@ use crate::error::AppError;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::watch;
 
 /// デーモンプロセスを管理する
 pub struct Daemon {
@@ -37,6 +38,7 @@ impl Daemon {
         heartbeat.tick().await;
 
         // イベントバスの初期化
+        let mut action_config_sender: Option<watch::Sender<Vec<ActionRule>>> = None;
         let event_bus = if self.config.event_bus.enabled {
             let bus = EventBus::with_debounce(
                 self.config.event_bus.channel_capacity,
@@ -47,7 +49,8 @@ impl Daemon {
             // アクションエンジンの起動
             if self.config.actions.enabled {
                 match ActionEngine::new(&self.config.actions, &bus) {
-                    Ok(engine) => {
+                    Ok((engine, sender)) => {
+                        action_config_sender = Some(sender);
                         engine.spawn();
                         tracing::info!("アクションエンジンを起動しました");
                     }
@@ -135,6 +138,31 @@ impl Daemon {
                             // デバウンス間隔の更新
                             if let Some(ref bus) = event_bus {
                                 bus.update_debounce_secs(new_config.event_bus.debounce_secs);
+                            }
+
+                            // アクションエンジンのルールリロード
+                            if let Some(ref sender) = action_config_sender {
+                                match ActionEngine::parse_rules(&new_config.actions) {
+                                    Ok(new_rules) => {
+                                        let rule_count = new_rules.len();
+                                        if sender.send(new_rules).is_ok() {
+                                            tracing::info!(
+                                                rules = rule_count,
+                                                "アクションエンジンのルールをリロードしました"
+                                            );
+                                        } else {
+                                            tracing::warn!(
+                                                "アクションエンジンのルールリロードに失敗しました（受信側が閉じています）"
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            error = %e,
+                                            "アクションルールのパースに失敗しました。既存のルールを維持します"
+                                        );
+                                    }
+                                }
                             }
 
                             // メトリクスのインターバル変更警告
