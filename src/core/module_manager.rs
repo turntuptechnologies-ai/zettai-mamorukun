@@ -3,6 +3,7 @@
 use crate::config::ModulesConfig;
 use crate::core::event::EventBus;
 use crate::modules::Module;
+use crate::modules::at_job_monitor::AtJobMonitorModule;
 use crate::modules::cron_monitor::CronMonitorModule;
 use crate::modules::dns_monitor::DnsMonitorModule;
 use crate::modules::file_integrity::FileIntegrityModule;
@@ -215,6 +216,14 @@ impl ModuleManager {
             modules,
             config,
             event_bus,
+            at_job_monitor,
+            AtJobMonitorModule,
+            "at/batch ジョブ監視モジュール"
+        );
+        start_module!(
+            modules,
+            config,
+            event_bus,
             cron_monitor,
             CronMonitorModule,
             "Cron ジョブ改ざん検知モジュール"
@@ -415,6 +424,17 @@ impl ModuleManager {
             kernel_module,
             KernelModuleMonitor,
             "カーネルモジュール監視モジュール"
+        );
+        reload_module!(
+            result,
+            self.running_modules,
+            new_modules,
+            old_config,
+            new_config,
+            event_bus,
+            at_job_monitor,
+            AtJobMonitorModule,
+            "at/batch ジョブ監視モジュール"
         );
         reload_module!(
             result,
