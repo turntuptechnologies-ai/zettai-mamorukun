@@ -24,6 +24,10 @@ pub struct AppConfig {
     /// アクションエンジン設定
     #[serde(default)]
     pub actions: ActionConfig,
+
+    /// メトリクス収集設定
+    #[serde(default)]
+    pub metrics: MetricsConfig,
 }
 
 /// 一般設定
@@ -1025,6 +1029,33 @@ impl Default for EventBusConfig {
     }
 }
 
+/// メトリクス収集の設定
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct MetricsConfig {
+    /// メトリクス収集の有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// サマリーログ出力インターバル（秒）
+    #[serde(default = "MetricsConfig::default_interval_secs")]
+    pub interval_secs: u64,
+}
+
+impl MetricsConfig {
+    fn default_interval_secs() -> u64 {
+        60
+    }
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: Self::default_interval_secs(),
+        }
+    }
+}
+
 impl GeneralConfig {
     fn default_log_level() -> String {
         "info".to_string()
@@ -1418,6 +1449,25 @@ channel_capacity = 512
         let config: AppConfig = toml::from_str(toml_str).unwrap();
         assert!(config.event_bus.enabled);
         assert_eq!(config.event_bus.channel_capacity, 512);
+    }
+
+    #[test]
+    fn test_metrics_config_defaults() {
+        let config: AppConfig = toml::from_str("").unwrap();
+        assert!(!config.metrics.enabled);
+        assert_eq!(config.metrics.interval_secs, 60);
+    }
+
+    #[test]
+    fn test_metrics_config_custom() {
+        let toml_str = r#"
+[metrics]
+enabled = true
+interval_secs = 300
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.metrics.enabled);
+        assert_eq!(config.metrics.interval_secs, 300);
     }
 
     #[test]
