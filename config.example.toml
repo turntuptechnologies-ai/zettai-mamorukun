@@ -182,6 +182,9 @@ interval_secs = 60
 enabled = false
 # ブロードキャストチャネルの容量
 channel_capacity = 1024
+# イベントデバウンス間隔（秒）— 同一イベントをこの期間内は抑制する
+# 0 でデバウンスを無効化。Critical イベントは常に即時配信
+debounce_secs = 30
 
 [actions]
 # アクションエンジンの有効/無効

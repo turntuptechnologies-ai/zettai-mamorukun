@@ -38,8 +38,12 @@ impl Daemon {
 
         // イベントバスの初期化
         let event_bus = if self.config.event_bus.enabled {
-            let bus = EventBus::new(self.config.event_bus.channel_capacity);
+            let bus = EventBus::with_debounce(
+                self.config.event_bus.channel_capacity,
+                self.config.event_bus.debounce_secs,
+            );
             event::spawn_log_subscriber(&bus);
+            event::spawn_debounce_cleanup(&bus);
             // アクションエンジンの起動
             if self.config.actions.enabled {
                 match ActionEngine::new(&self.config.actions, &bus) {
@@ -126,6 +130,11 @@ impl Daemon {
                                     format!("設定ファイルをリロードしました ({})", summary),
                                 );
                                 bus.publish(event);
+                            }
+
+                            // デバウンス間隔の更新
+                            if let Some(ref bus) = event_bus {
+                                bus.update_debounce_secs(new_config.event_bus.debounce_secs);
                             }
 
                             // メトリクスのインターバル変更警告
