@@ -1,5 +1,6 @@
 use crate::error::AppError;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// アプリケーション全体の設定
@@ -1160,6 +1161,23 @@ impl Default for HealthConfig {
     }
 }
 
+/// イベントフィルタリング設定
+#[derive(Debug, Deserialize, Clone, PartialEq, Default)]
+pub struct EventFilterConfig {
+    /// イベントを抑制する正規表現パターンのリスト
+    #[serde(default)]
+    pub exclude_patterns: Vec<String>,
+
+    /// マッチした場合のみイベントを発行する正規表現パターンのリスト
+    /// 空の場合は全イベントを通過させる
+    #[serde(default)]
+    pub include_patterns: Vec<String>,
+
+    /// 指定した Severity 以上のイベントのみ発行
+    #[serde(default)]
+    pub min_severity: Option<String>,
+}
+
 /// イベントバス設定
 #[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct EventBusConfig {
@@ -1174,6 +1192,10 @@ pub struct EventBusConfig {
     /// イベントデバウンス間隔（秒）— 0 でデバウンス無効
     #[serde(default = "EventBusConfig::default_debounce_secs")]
     pub debounce_secs: u64,
+
+    /// モジュールごとのイベントフィルタリング設定
+    #[serde(default)]
+    pub filters: HashMap<String, EventFilterConfig>,
 }
 
 impl EventBusConfig {
@@ -1192,6 +1214,7 @@ impl Default for EventBusConfig {
             enabled: false,
             channel_capacity: Self::default_channel_capacity(),
             debounce_secs: Self::default_debounce_secs(),
+            filters: HashMap::new(),
         }
     }
 }
