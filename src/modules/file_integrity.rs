@@ -6,7 +6,7 @@
 use crate::config::FileIntegrityConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
-use crate::modules::Module;
+use crate::modules::{InitialScanResult, Module};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -265,6 +265,20 @@ impl Module for FileIntegrityModule {
         });
 
         Ok(())
+    }
+
+    async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {
+        let start = std::time::Instant::now();
+        let files = Self::scan_files(&self.config.watch_paths);
+        let items_scanned = files.len();
+        let duration = start.elapsed();
+
+        Ok(InitialScanResult {
+            items_scanned,
+            issues_found: 0,
+            duration,
+            summary: format!("監視対象ファイル {}件をスキャンしました", items_scanned),
+        })
     }
 
     async fn stop(&mut self) -> Result<(), AppError> {
@@ -562,5 +576,41 @@ mod tests {
         let bus = EventBus::new(16);
         let mut module = FileIntegrityModule::new(config, Some(bus));
         assert!(module.init().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_with_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let file1 = dir.path().join("a.txt");
+        let file2 = dir.path().join("b.txt");
+        std::fs::write(&file1, "content a").unwrap();
+        std::fs::write(&file2, "content b").unwrap();
+
+        let config = FileIntegrityConfig {
+            enabled: true,
+            scan_interval_secs: 300,
+            watch_paths: vec![dir.path().to_path_buf()],
+        };
+        let mut module = FileIntegrityModule::new(config, None);
+        module.init().unwrap();
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 2);
+        assert_eq!(result.issues_found, 0);
+        assert!(!result.summary.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_empty() {
+        let config = FileIntegrityConfig {
+            enabled: true,
+            scan_interval_secs: 300,
+            watch_paths: vec![],
+        };
+        let module = FileIntegrityModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 0);
+        assert_eq!(result.issues_found, 0);
     }
 }

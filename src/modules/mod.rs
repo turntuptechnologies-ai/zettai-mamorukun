@@ -22,6 +22,22 @@ pub mod tmp_exec_monitor;
 pub mod user_account;
 
 use crate::error::AppError;
+use std::time::Duration;
+
+/// 起動時スキャン結果
+///
+/// 各モジュールの `initial_scan()` が返すスキャン結果を表す。
+#[derive(Debug, Default)]
+pub struct InitialScanResult {
+    /// スキャンしたアイテム数
+    pub items_scanned: usize,
+    /// 検知された問題の数
+    pub issues_found: usize,
+    /// スキャンにかかった時間
+    pub duration: Duration,
+    /// サマリーメッセージ
+    pub summary: String,
+}
 
 /// 防御モジュールが実装すべきトレイト
 ///
@@ -38,4 +54,58 @@ pub trait Module: Send + Sync {
 
     /// モジュールを停止する（グレースフルシャットダウン）
     fn stop(&mut self) -> impl std::future::Future<Output = Result<(), AppError>> + Send;
+
+    /// 起動時の初期スキャンを実行する
+    ///
+    /// デフォルト実装は何もしない。各モジュールは必要に応じてオーバーライドし、
+    /// 現在のシステム状態をスキャンしてベースラインとして記録する。
+    fn initial_scan(
+        &self,
+    ) -> impl std::future::Future<Output = Result<InitialScanResult, AppError>> + Send {
+        async { Ok(InitialScanResult::default()) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// デフォルト実装をテストするためのダミーモジュール
+    struct DummyModule;
+
+    impl Module for DummyModule {
+        fn name(&self) -> &str {
+            "dummy"
+        }
+
+        fn init(&mut self) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        async fn start(&mut self) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        async fn stop(&mut self) -> Result<(), AppError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_initial_scan_result_default() {
+        let result = InitialScanResult::default();
+        assert_eq!(result.items_scanned, 0);
+        assert_eq!(result.issues_found, 0);
+        assert_eq!(result.duration, Duration::default());
+        assert!(result.summary.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_module_default_initial_scan() {
+        let module = DummyModule;
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 0);
+        assert_eq!(result.issues_found, 0);
+        assert!(result.summary.is_empty());
+    }
 }
