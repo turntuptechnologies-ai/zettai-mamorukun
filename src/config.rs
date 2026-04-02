@@ -32,6 +32,10 @@ pub struct AppConfig {
     /// メトリクス収集設定
     #[serde(default)]
     pub metrics: MetricsConfig,
+
+    /// ステータスサーバー設定
+    #[serde(default)]
+    pub status: StatusConfig,
 }
 
 /// デーモン動作設定
@@ -1219,6 +1223,37 @@ impl Default for MetricsConfig {
     }
 }
 
+/// ステータスサーバー設定
+#[derive(Debug, Deserialize, PartialEq)]
+pub struct StatusConfig {
+    /// ステータスサーバーの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Unix ソケットのパス
+    #[serde(default = "StatusConfig::default_socket_path")]
+    pub socket_path: String,
+}
+
+impl StatusConfig {
+    fn default_enabled() -> bool {
+        false
+    }
+
+    fn default_socket_path() -> String {
+        "/var/run/zettai-mamorukun/status.sock".to_string()
+    }
+}
+
+impl Default for StatusConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            socket_path: Self::default_socket_path(),
+        }
+    }
+}
+
 impl GeneralConfig {
     fn default_log_level() -> String {
         "info".to_string()
@@ -1438,6 +1473,11 @@ impl AppConfig {
                     prefix
                 ));
             }
+        }
+
+        // status 設定の検証
+        if self.status.enabled && self.status.socket_path.is_empty() {
+            errors.push("status.socket_path: 空文字列は指定できません".to_string());
         }
 
         // rate_limit の検証
@@ -2280,6 +2320,49 @@ max_connections = 500
         config.metrics.enabled = false;
         config.metrics.interval_secs = 0;
         // メトリクスが無効なら interval_secs = 0 は許容
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_status_config_defaults() {
+        let config: AppConfig = toml::from_str("").unwrap();
+        assert!(!config.status.enabled);
+        assert_eq!(
+            config.status.socket_path,
+            "/var/run/zettai-mamorukun/status.sock"
+        );
+    }
+
+    #[test]
+    fn test_status_config_custom() {
+        let toml_str = r#"
+[status]
+enabled = true
+socket_path = "/tmp/custom.sock"
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.status.enabled);
+        assert_eq!(config.status.socket_path, "/tmp/custom.sock");
+    }
+
+    #[test]
+    fn test_validate_status_empty_socket_path() {
+        let mut config = AppConfig::default();
+        config.status.enabled = true;
+        config.status.socket_path = String::new();
+        let result = config.validate();
+        assert!(result.is_err());
+        if let Err(AppError::ConfigValidation { errors, .. }) = result {
+            assert!(errors.iter().any(|e| e.contains("status.socket_path")));
+        }
+    }
+
+    #[test]
+    fn test_validate_status_disabled_empty_socket_path_ok() {
+        let mut config = AppConfig::default();
+        config.status.enabled = false;
+        config.status.socket_path = String::new();
+        // ステータスが無効なら空パスは許容
         assert!(config.validate().is_ok());
     }
 }

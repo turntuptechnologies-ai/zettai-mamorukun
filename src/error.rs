@@ -63,4 +63,8 @@ pub enum AppError {
     /// 設定バリデーションエラー
     #[error("設定バリデーションエラー: {count} 件のエラーが見つかりました")]
     ConfigValidation { count: usize, errors: Vec<String> },
+
+    /// ステータスサーバーエラー
+    #[error("ステータスサーバーエラー: {message}")]
+    StatusServer { message: String },
 }

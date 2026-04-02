@@ -2,36 +2,67 @@
 
 use crate::config::MetricsConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
+use serde::Serialize;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, watch};
+
+/// 外部から参照可能なメトリクスデータ
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SharedMetrics {
+    /// 合計イベント数
+    pub total_events: u64,
+    /// INFO レベルのイベント数
+    pub info_count: u64,
+    /// WARNING レベルのイベント数
+    pub warning_count: u64,
+    /// CRITICAL レベルのイベント数
+    pub critical_count: u64,
+    /// モジュール別イベント数
+    pub module_counts: HashMap<String, u64>,
+}
 
 /// イベント統計・メトリクス収集
 pub struct MetricsCollector {
     receiver: broadcast::Receiver<SecurityEvent>,
     interval: Duration,
     config_receiver: watch::Receiver<u64>,
+    shared_metrics: Arc<StdMutex<SharedMetrics>>,
 }
 
 impl MetricsCollector {
     /// 設定とイベントバスから MetricsCollector を構築する
-    pub fn new(config: &MetricsConfig, event_bus: &EventBus) -> (Self, watch::Sender<u64>) {
+    pub fn new(
+        config: &MetricsConfig,
+        event_bus: &EventBus,
+    ) -> (Self, watch::Sender<u64>, Arc<StdMutex<SharedMetrics>>) {
         let interval_secs = config.interval_secs;
         let (config_sender, config_receiver) = watch::channel(interval_secs);
+        let shared_metrics = Arc::new(StdMutex::new(SharedMetrics::default()));
         (
             Self {
                 receiver: event_bus.subscribe(),
                 interval: Duration::from_secs(interval_secs),
                 config_receiver,
+                shared_metrics: Arc::clone(&shared_metrics),
             },
             config_sender,
+            shared_metrics,
         )
     }
 
     /// 非同期タスクとしてメトリクスコレクターを起動する
     pub fn spawn(self) {
+        let shared_metrics = self.shared_metrics;
         tokio::spawn(async move {
-            Self::run_loop(self.receiver, self.interval, self.config_receiver).await;
+            Self::run_loop(
+                self.receiver,
+                self.interval,
+                self.config_receiver,
+                shared_metrics,
+            )
+            .await;
         });
     }
 
@@ -39,6 +70,7 @@ impl MetricsCollector {
         mut receiver: broadcast::Receiver<SecurityEvent>,
         interval: Duration,
         mut config_receiver: watch::Receiver<u64>,
+        shared_metrics: Arc<StdMutex<SharedMetrics>>,
     ) {
         let started_at = Instant::now();
         let mut total_events: u64 = 0;
@@ -66,6 +98,16 @@ impl MetricsCollector {
                             *module_counts
                                 .entry(event.source_module.clone())
                                 .or_insert(0) += 1;
+
+                            // SharedMetrics を更新
+                            // unwrap safety: Mutex が poisoned になるのはパニック時のみ
+                            if let Ok(mut m) = shared_metrics.lock() {
+                                m.total_events = total_events;
+                                m.info_count = info_count;
+                                m.warning_count = warning_count;
+                                m.critical_count = critical_count;
+                                m.module_counts = module_counts.clone();
+                            }
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
                             tracing::warn!(
@@ -173,7 +215,7 @@ mod tests {
             interval_secs: 120,
         };
         let bus = EventBus::new(16);
-        let (collector, _sender) = MetricsCollector::new(&config, &bus);
+        let (collector, _sender, _shared) = MetricsCollector::new(&config, &bus);
         assert_eq!(collector.interval, Duration::from_secs(120));
     }
 
@@ -202,7 +244,7 @@ mod tests {
             enabled: true,
             interval_secs: 1,
         };
-        let (collector, _sender) = MetricsCollector::new(&config, &bus);
+        let (collector, _sender, _shared) = MetricsCollector::new(&config, &bus);
         collector.spawn();
 
         // イベントを発行
@@ -241,7 +283,7 @@ mod tests {
             interval_secs: 60,
         };
         let bus = EventBus::new(16);
-        let (collector, sender) = MetricsCollector::new(&config, &bus);
+        let (collector, sender, _shared) = MetricsCollector::new(&config, &bus);
 
         // 初期値の確認
         assert_eq!(collector.interval, Duration::from_secs(60));
@@ -264,7 +306,7 @@ mod tests {
             interval_secs: 60,
         };
         let bus = EventBus::new(16);
-        let (collector, sender) = MetricsCollector::new(&config, &bus);
+        let (collector, sender, _shared) = MetricsCollector::new(&config, &bus);
         collector.spawn();
 
         // sender をドロップしてチャネルを閉じる
@@ -272,5 +314,65 @@ mod tests {
 
         // メトリクスコレクターが正常に終了することを確認
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    #[test]
+    fn test_shared_metrics_default() {
+        let metrics = SharedMetrics::default();
+        assert_eq!(metrics.total_events, 0);
+        assert_eq!(metrics.info_count, 0);
+        assert_eq!(metrics.warning_count, 0);
+        assert_eq!(metrics.critical_count, 0);
+        assert!(metrics.module_counts.is_empty());
+    }
+
+    #[test]
+    fn test_shared_metrics_serialize() {
+        let mut metrics = SharedMetrics::default();
+        metrics.total_events = 10;
+        metrics.info_count = 5;
+        metrics.warning_count = 3;
+        metrics.critical_count = 2;
+        metrics.module_counts.insert("test_module".to_string(), 10);
+
+        let json = serde_json::to_string(&metrics).unwrap();
+        assert!(json.contains("\"total_events\":10"));
+        assert!(json.contains("\"test_module\":10"));
+    }
+
+    #[tokio::test]
+    async fn test_shared_metrics_updated_by_collector() {
+        let bus = EventBus::new(16);
+        let config = MetricsConfig {
+            enabled: true,
+            interval_secs: 60,
+        };
+        let (collector, _sender, shared) = MetricsCollector::new(&config, &bus);
+        collector.spawn();
+
+        // イベントを発行
+        bus.publish(SecurityEvent::new(
+            "test_event",
+            Severity::Info,
+            "test_module",
+            "テストイベント",
+        ));
+        bus.publish(SecurityEvent::new(
+            "test_event",
+            Severity::Critical,
+            "another_module",
+            "テストイベント",
+        ));
+
+        // メトリクスコレクターがイベントを処理する時間を与える
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // unwrap safety: テストコード
+        let m = shared.lock().unwrap();
+        assert_eq!(m.total_events, 2);
+        assert_eq!(m.info_count, 1);
+        assert_eq!(m.critical_count, 1);
+        assert_eq!(m.module_counts.get("test_module"), Some(&1));
+        assert_eq!(m.module_counts.get("another_module"), Some(&1));
     }
 }

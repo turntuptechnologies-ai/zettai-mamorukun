@@ -2228,13 +2228,14 @@ dependencies = [
 
 [[package]]
 name = "zettai-mamorukun"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "clap",
  "libc",
  "regex",
  "reqwest",
  "serde",
+ "serde_json",
  "sha2",
  "tempfile",
  "thiserror",

@@ -82,6 +82,7 @@ src/
     health.rs          # ヘルスチェック（ハートビート・メモリ監視）
     metrics.rs         # イベント統計・メトリクス収集
     module_manager.rs  # モジュールマネージャー（モジュール一括管理・設定ホットリロード）
+    status.rs          # ステータスサーバー（Unix ソケット経由の CLI ステータス問い合わせ）
   modules/
     mod.rs             # モジュールトレイト・レジストリ
     at_job_monitor.rs  # at/batch ジョブ監視モジュール
