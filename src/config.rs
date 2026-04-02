@@ -991,6 +991,10 @@ pub struct NetworkMonitorConfig {
     /// 接続数閾値
     #[serde(default = "NetworkMonitorConfig::default_max_connections")]
     pub max_connections: u32,
+
+    /// IPv6 監視の有効/無効
+    #[serde(default = "NetworkMonitorConfig::default_enable_ipv6")]
+    pub enable_ipv6: bool,
 }
 
 impl NetworkMonitorConfig {
@@ -1005,6 +1009,10 @@ impl NetworkMonitorConfig {
     fn default_max_connections() -> u32 {
         1000
     }
+
+    fn default_enable_ipv6() -> bool {
+        true
+    }
 }
 
 impl Default for NetworkMonitorConfig {
@@ -1014,6 +1022,7 @@ impl Default for NetworkMonitorConfig {
             interval_secs: Self::default_interval_secs(),
             suspicious_ports: Self::default_suspicious_ports(),
             max_connections: Self::default_max_connections(),
+            enable_ipv6: Self::default_enable_ipv6(),
         }
     }
 }

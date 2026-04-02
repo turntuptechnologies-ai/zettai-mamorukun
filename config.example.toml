@@ -180,6 +180,8 @@ watch_paths = ["/etc/ld.so.preload", "/etc/environment", "/etc/ld.so.conf", "/et
 enabled = false
 # 監視間隔（秒）
 interval_secs = 30
+# IPv6 監視の有効/無効
+enable_ipv6 = true
 # 不審ポートリスト
 suspicious_ports = [4444, 5555, 6666, 8888, 1337]
 # 接続数閾値
