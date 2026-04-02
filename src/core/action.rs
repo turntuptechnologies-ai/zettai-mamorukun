@@ -4,8 +4,10 @@ use crate::config::{ActionConfig, BucketConfig, RateLimitConfig};
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{Notify, broadcast, watch};
 
 /// アクション種別
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,6 +205,89 @@ struct WebhookParams {
     timeout_secs: u64,
 }
 
+/// 実行中アクションのトラッキング
+#[derive(Debug, Clone)]
+pub struct InFlightTracker {
+    count: Arc<AtomicUsize>,
+    notify: Arc<Notify>,
+    shutting_down: Arc<AtomicBool>,
+}
+
+impl Default for InFlightTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl InFlightTracker {
+    /// 新しいトラッカーを作成する
+    pub fn new() -> Self {
+        Self {
+            count: Arc::new(AtomicUsize::new(0)),
+            notify: Arc::new(Notify::new()),
+            shutting_down: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// シャットダウン開始を通知する
+    pub fn begin_shutdown(&self) {
+        self.shutting_down.store(true, Ordering::Release);
+    }
+
+    /// アクション実行を開始する。シャットダウン中は None を返す
+    pub fn track(&self) -> Option<InFlightGuard> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return None;
+        }
+        self.count.fetch_add(1, Ordering::AcqRel);
+        Some(InFlightGuard {
+            count: Arc::clone(&self.count),
+            notify: Arc::clone(&self.notify),
+        })
+    }
+
+    /// 全アクションの完了を待機する（タイムアウト付き）
+    pub async fn wait_for_completion(&self, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if self.count.load(Ordering::Acquire) == 0 {
+                return true;
+            }
+            tokio::select! {
+                _ = self.notify.notified() => {
+                    // カウントが変わったので再チェック
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    return self.count.load(Ordering::Acquire) == 0;
+                }
+            }
+        }
+    }
+
+    /// 現在の実行中アクション数を取得する
+    pub fn in_flight_count(&self) -> usize {
+        self.count.load(Ordering::Acquire)
+    }
+
+    /// シャットダウン中かどうかを取得する
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::Acquire)
+    }
+}
+
+/// RAII ガード — drop 時にカウンターをデクリメントし notify する
+pub struct InFlightGuard {
+    count: Arc<AtomicUsize>,
+    notify: Arc<Notify>,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.count.fetch_sub(1, Ordering::AcqRel);
+        self.notify.notify_waiters();
+    }
+}
+
 /// アクションエンジン — イベントに対するアクションを実行する
 pub struct ActionEngine {
     rules: Vec<ActionRule>,
@@ -210,6 +295,7 @@ pub struct ActionEngine {
     receiver: broadcast::Receiver<SecurityEvent>,
     client: reqwest::Client,
     config_receiver: watch::Receiver<ActionEngineConfig>,
+    tracker: InFlightTracker,
 }
 
 impl std::fmt::Debug for ActionEngine {
@@ -229,7 +315,7 @@ impl ActionEngine {
     pub fn new(
         config: &ActionConfig,
         event_bus: &EventBus,
-    ) -> Result<(Self, watch::Sender<ActionEngineConfig>), AppError> {
+    ) -> Result<(Self, watch::Sender<ActionEngineConfig>, InFlightTracker), AppError> {
         let rules = Self::parse_rules(config)?;
         let rate_limiter = RateLimiter::new(&config.rate_limit);
         let engine_config = ActionEngineConfig {
@@ -239,6 +325,7 @@ impl ActionEngine {
         let (config_sender, config_receiver) = watch::channel(engine_config);
         let receiver = event_bus.subscribe();
         let client = reqwest::Client::new();
+        let tracker = InFlightTracker::new();
         Ok((
             Self {
                 rules,
@@ -246,8 +333,10 @@ impl ActionEngine {
                 receiver,
                 client,
                 config_receiver,
+                tracker: tracker.clone(),
             },
             config_sender,
+            tracker,
         ))
     }
 
@@ -342,6 +431,7 @@ impl ActionEngine {
     /// 非同期タスクとしてアクションエンジンを起動する
     pub fn spawn(self) {
         let client = self.client;
+        let tracker = self.tracker;
         tokio::spawn(async move {
             Self::run_loop(
                 self.rules,
@@ -349,6 +439,7 @@ impl ActionEngine {
                 self.receiver,
                 self.config_receiver,
                 client,
+                tracker,
             )
             .await;
         });
@@ -360,6 +451,7 @@ impl ActionEngine {
         mut receiver: broadcast::Receiver<SecurityEvent>,
         mut config_receiver: watch::Receiver<ActionEngineConfig>,
         client: reqwest::Client,
+        tracker: InFlightTracker,
     ) {
         loop {
             tokio::select! {
@@ -387,7 +479,7 @@ impl ActionEngine {
                                         continue;
                                     }
 
-                                    Self::execute_action(rule, &event, &client).await;
+                                    Self::execute_action(rule, &event, &client, &tracker).await;
                                 }
                             }
                         }
@@ -444,9 +536,24 @@ impl ActionEngine {
     }
 
     /// アクションを実行する
-    async fn execute_action(rule: &ActionRule, event: &SecurityEvent, client: &reqwest::Client) {
+    async fn execute_action(
+        rule: &ActionRule,
+        event: &SecurityEvent,
+        client: &reqwest::Client,
+        tracker: &InFlightTracker,
+    ) {
         match rule.action {
             ActionType::Log => {
+                let _guard = match tracker.track() {
+                    Some(g) => g,
+                    None => {
+                        tracing::debug!(
+                            rule = %rule.name,
+                            "シャットダウン中のためアクションをスキップします"
+                        );
+                        return;
+                    }
+                };
                 tracing::info!(
                     rule = %rule.name,
                     event_type = %event.event_type,
@@ -457,6 +564,16 @@ impl ActionEngine {
                 );
             }
             ActionType::Command => {
+                let guard = match tracker.track() {
+                    Some(g) => g,
+                    None => {
+                        tracing::debug!(
+                            rule = %rule.name,
+                            "シャットダウン中のためアクションをスキップします"
+                        );
+                        return;
+                    }
+                };
                 if let Some(ref cmd_template) = rule.command {
                     let cmd = Self::expand_placeholders(cmd_template, event);
                     let timeout = Duration::from_secs(rule.timeout_secs);
@@ -478,8 +595,19 @@ impl ActionEngine {
                         }
                     }
                 }
+                drop(guard);
             }
             ActionType::Webhook => {
+                let guard = match tracker.track() {
+                    Some(g) => g,
+                    None => {
+                        tracing::debug!(
+                            rule = %rule.name,
+                            "シャットダウン中のためアクションをスキップします"
+                        );
+                        return;
+                    }
+                };
                 let client = client.clone();
                 let rule_name = rule.name.clone();
                 let params = WebhookParams {
@@ -510,6 +638,7 @@ impl ActionEngine {
                             );
                         }
                     }
+                    drop(guard);
                 });
             }
         }
@@ -795,7 +924,7 @@ mod tests {
         let bus = EventBus::new(16);
         let result = ActionEngine::new(&config, &bus);
         assert!(result.is_ok());
-        let (engine, _sender) = result.unwrap();
+        let (engine, _sender, _tracker) = result.unwrap();
         assert_eq!(engine.rules.len(), 2);
         assert_eq!(engine.rules[0].name, "log_all");
         assert_eq!(engine.rules[0].action, ActionType::Log);
@@ -928,7 +1057,7 @@ mod tests {
             rate_limit: None,
         };
         let bus = EventBus::new(16);
-        let (engine, _sender) = ActionEngine::new(&config, &bus).unwrap();
+        let (engine, _sender, _tracker) = ActionEngine::new(&config, &bus).unwrap();
         // Webhook のデフォルトタイムアウトは 10 秒に上書きされる
         assert_eq!(engine.rules[0].timeout_secs, WEBHOOK_DEFAULT_TIMEOUT_SECS);
     }
@@ -946,7 +1075,7 @@ mod tests {
             rate_limit: None,
         };
         let bus = EventBus::new(16);
-        let (engine, _sender) = ActionEngine::new(&config, &bus).unwrap();
+        let (engine, _sender, _tracker) = ActionEngine::new(&config, &bus).unwrap();
         // カスタム値はそのまま
         assert_eq!(engine.rules[0].timeout_secs, 15);
     }
@@ -1003,7 +1132,7 @@ mod tests {
             rate_limit: None,
         };
         let bus = EventBus::new(16);
-        let (engine, sender) = ActionEngine::new(&config, &bus).unwrap();
+        let (engine, sender, _tracker) = ActionEngine::new(&config, &bus).unwrap();
         assert_eq!(engine.rules.len(), 1);
 
         // sender で新しい設定を送信できることを確認
@@ -1025,7 +1154,7 @@ mod tests {
             rate_limit: None,
         };
         let bus = EventBus::new(16);
-        let (engine, sender) = ActionEngine::new(&config, &bus).unwrap();
+        let (engine, sender, _tracker) = ActionEngine::new(&config, &bus).unwrap();
 
         // エンジンを起動
         engine.spawn();
@@ -1197,5 +1326,93 @@ mod tests {
         assert!(engine_config.rate_limit.is_some());
         assert!(engine_config.rate_limit.as_ref().unwrap().command.is_some());
         assert!(engine_config.rate_limit.as_ref().unwrap().webhook.is_none());
+    }
+
+    // --- InFlightTracker テスト ---
+
+    #[test]
+    fn test_inflight_tracker_basic() {
+        let tracker = InFlightTracker::new();
+        assert_eq!(tracker.in_flight_count(), 0);
+
+        let guard1 = tracker.track().unwrap();
+        assert_eq!(tracker.in_flight_count(), 1);
+
+        let guard2 = tracker.track().unwrap();
+        assert_eq!(tracker.in_flight_count(), 2);
+
+        drop(guard1);
+        assert_eq!(tracker.in_flight_count(), 1);
+
+        drop(guard2);
+        assert_eq!(tracker.in_flight_count(), 0);
+    }
+
+    #[test]
+    fn test_inflight_tracker_shutdown_blocks_new() {
+        let tracker = InFlightTracker::new();
+        assert!(!tracker.is_shutting_down());
+
+        // シャットダウン前は track 可能
+        let guard = tracker.track().unwrap();
+        assert_eq!(tracker.in_flight_count(), 1);
+
+        tracker.begin_shutdown();
+        assert!(tracker.is_shutting_down());
+
+        // シャットダウン後は新しい track が None を返す
+        assert!(tracker.track().is_none());
+
+        // 既存のガードは有効
+        assert_eq!(tracker.in_flight_count(), 1);
+        drop(guard);
+        assert_eq!(tracker.in_flight_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_inflight_tracker_wait_for_completion() {
+        let tracker = InFlightTracker::new();
+        let guard = tracker.track().unwrap();
+
+        let tracker_clone = tracker.clone();
+        let handle = tokio::spawn(async move {
+            tracker_clone
+                .wait_for_completion(Duration::from_secs(5))
+                .await
+        });
+
+        // ガードをドロップして完了を通知
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(guard);
+
+        let result = handle.await.unwrap();
+        assert!(result);
+    }
+
+    #[tokio::test]
+    async fn test_inflight_tracker_wait_timeout() {
+        let tracker = InFlightTracker::new();
+        let _guard = tracker.track().unwrap();
+
+        // ガードをドロップしないのでタイムアウトする
+        let result = tracker
+            .wait_for_completion(Duration::from_millis(100))
+            .await;
+        assert!(!result);
+        assert_eq!(tracker.in_flight_count(), 1);
+    }
+
+    #[test]
+    fn test_inflight_guard_drop_on_panic() {
+        let tracker = InFlightTracker::new();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = tracker.track().unwrap();
+            panic!("テスト用パニック");
+        }));
+
+        assert!(result.is_err());
+        // パニック時もガードが正しく drop されている
+        assert_eq!(tracker.in_flight_count(), 0);
     }
 }

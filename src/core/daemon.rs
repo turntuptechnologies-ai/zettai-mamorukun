@@ -1,5 +1,5 @@
 use crate::config::AppConfig;
-use crate::core::action::{ActionEngine, ActionEngineConfig};
+use crate::core::action::{ActionEngine, ActionEngineConfig, InFlightTracker};
 use crate::core::event::{self, EventBus, SecurityEvent, Severity};
 use crate::core::health::HealthChecker;
 use crate::core::metrics::MetricsCollector;
@@ -39,6 +39,7 @@ impl Daemon {
 
         // イベントバスの初期化
         let mut action_config_sender: Option<watch::Sender<ActionEngineConfig>> = None;
+        let mut inflight_tracker: Option<InFlightTracker> = None;
         let mut metrics_config_sender: Option<watch::Sender<u64>> = None;
         let event_bus = if self.config.event_bus.enabled {
             let bus = EventBus::with_debounce(
@@ -50,8 +51,9 @@ impl Daemon {
             // アクションエンジンの起動
             if self.config.actions.enabled {
                 match ActionEngine::new(&self.config.actions, &bus) {
-                    Ok((engine, sender)) => {
+                    Ok((engine, sender, tracker)) => {
                         action_config_sender = Some(sender);
+                        inflight_tracker = Some(tracker);
                         engine.spawn();
                         tracing::info!("アクションエンジンを起動しました");
                     }
@@ -218,6 +220,28 @@ impl Daemon {
                             );
                         }
                     }
+                }
+            }
+        }
+
+        // インフライトトラッカーのシャットダウン開始
+        if let Some(ref tracker) = inflight_tracker {
+            tracker.begin_shutdown();
+            let in_flight = tracker.in_flight_count();
+            if in_flight > 0 {
+                let timeout = Duration::from_secs(self.config.daemon.shutdown_timeout_secs);
+                tracing::info!(
+                    in_flight = in_flight,
+                    timeout_secs = timeout.as_secs(),
+                    "実行中のアクション完了を待機します..."
+                );
+                if tracker.wait_for_completion(timeout).await {
+                    tracing::info!("全アクションが完了しました");
+                } else {
+                    tracing::warn!(
+                        remaining = tracker.in_flight_count(),
+                        "タイムアウト: 一部のアクションが完了していません"
+                    );
                 }
             }
         }

@@ -9,6 +9,10 @@ pub struct AppConfig {
     #[serde(default)]
     pub general: GeneralConfig,
 
+    /// デーモン動作設定
+    #[serde(default)]
+    pub daemon: DaemonConfig,
+
     /// モジュール設定
     #[serde(default)]
     pub modules: ModulesConfig,
@@ -28,6 +32,28 @@ pub struct AppConfig {
     /// メトリクス収集設定
     #[serde(default)]
     pub metrics: MetricsConfig,
+}
+
+/// デーモン動作設定
+#[derive(Debug, Deserialize, PartialEq)]
+pub struct DaemonConfig {
+    /// シャットダウンタイムアウト（秒）
+    #[serde(default = "DaemonConfig::default_shutdown_timeout_secs")]
+    pub shutdown_timeout_secs: u64,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            shutdown_timeout_secs: Self::default_shutdown_timeout_secs(),
+        }
+    }
+}
+
+impl DaemonConfig {
+    fn default_shutdown_timeout_secs() -> u64 {
+        30
+    }
 }
 
 /// 一般設定

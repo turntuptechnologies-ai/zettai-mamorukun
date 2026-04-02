@@ -5,6 +5,12 @@
 # ログレベル: trace, debug, info, warn, error
 log_level = "info"
 
+[daemon]
+# シャットダウンタイムアウト（秒）
+# SIGTERM/SIGINT 受信後、実行中のアクション（Webhook 送信、コマンド実行等）の
+# 完了をこの時間まで待機する。タイムアウト後は強制終了する
+shutdown_timeout_secs = 30
+
 [modules.file_integrity]
 # ファイル整合性監視モジュールの有効/無効
 enabled = false
