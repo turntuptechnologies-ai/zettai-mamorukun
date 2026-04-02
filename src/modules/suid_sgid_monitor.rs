@@ -12,7 +12,7 @@
 use crate::config::SuidSgidMonitorConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
-use crate::modules::Module;
+use crate::modules::{InitialScanResult, Module};
 use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
@@ -319,6 +319,20 @@ impl Module for SuidSgidMonitorModule {
         Ok(())
     }
 
+    async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {
+        let start = std::time::Instant::now();
+        let snapshot = Self::scan_dirs(&self.config.watch_dirs);
+        let items_scanned = snapshot.files.len();
+        let duration = start.elapsed();
+
+        Ok(InitialScanResult {
+            items_scanned,
+            issues_found: 0,
+            duration,
+            summary: format!("SUID/SGID ファイル {}件を検出しました", items_scanned),
+        })
+    }
+
     async fn stop(&mut self) -> Result<(), AppError> {
         self.cancel_token.cancel();
         Ok(())
@@ -610,5 +624,40 @@ mod tests {
 
         module.stop().await.unwrap();
         assert!(cancel_token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_with_suid_file() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test_suid");
+        fs::write(&file_path, "#!/bin/sh").unwrap();
+        fs::set_permissions(&file_path, fs::Permissions::from_mode(0o4755)).unwrap();
+
+        let config = SuidSgidMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 300,
+            watch_dirs: vec![dir.path().to_path_buf()],
+        };
+        let module = SuidSgidMonitorModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 1);
+        assert_eq!(result.issues_found, 0);
+        assert!(result.summary.contains("1件"));
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_empty_dir() {
+        let dir = TempDir::new().unwrap();
+        let config = SuidSgidMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 300,
+            watch_dirs: vec![dir.path().to_path_buf()],
+        };
+        let module = SuidSgidMonitorModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 0);
+        assert_eq!(result.issues_found, 0);
     }
 }

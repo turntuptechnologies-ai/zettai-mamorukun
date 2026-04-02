@@ -13,7 +13,7 @@
 use crate::config::UserAccountConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
-use crate::modules::Module;
+use crate::modules::{InitialScanResult, Module};
 use std::collections::HashMap;
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
@@ -508,6 +508,45 @@ impl Module for UserAccountModule {
         Ok(())
     }
 
+    async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {
+        let start = std::time::Instant::now();
+        let mut items_scanned = 0;
+        let mut issues_found = 0;
+        let mut user_count = 0;
+        let mut group_count = 0;
+
+        if let Ok(content) = std::fs::read_to_string(&self.config.passwd_path) {
+            let users = Self::parse_passwd(&content);
+            user_count = users.len();
+            items_scanned += user_count;
+
+            // UID 0 のユーザーが root 以外にいないかチェック
+            for (username, entry) in &users {
+                if entry.uid == 0 && username != "root" {
+                    issues_found += 1;
+                }
+            }
+        }
+
+        if let Ok(content) = std::fs::read_to_string(&self.config.group_path) {
+            let groups = Self::parse_group(&content);
+            group_count = groups.len();
+            items_scanned += group_count;
+        }
+
+        let duration = start.elapsed();
+
+        Ok(InitialScanResult {
+            items_scanned,
+            issues_found,
+            duration,
+            summary: format!(
+                "ユーザー {}件, グループ {}件を読み取りました",
+                user_count, group_count
+            ),
+        })
+    }
+
     async fn stop(&mut self) -> Result<(), AppError> {
         self.cancel_token.cancel();
         Ok(())
@@ -870,5 +909,69 @@ oldgroup:x:1001:
 
         let result = module.start().await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_with_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let passwd_path = dir.path().join("passwd");
+        let group_path = dir.path().join("group");
+        std::fs::write(&passwd_path, SAMPLE_PASSWD).unwrap();
+        std::fs::write(&group_path, SAMPLE_GROUP).unwrap();
+
+        let config = UserAccountConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            passwd_path,
+            group_path,
+        };
+        let module = UserAccountModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        // 4 users + 4 groups = 8
+        assert_eq!(result.items_scanned, 8);
+        assert_eq!(result.issues_found, 0);
+        assert!(result.summary.contains("ユーザー 4件"));
+        assert!(result.summary.contains("グループ 4件"));
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_nonexistent_files() {
+        let config = UserAccountConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            passwd_path: PathBuf::from("/nonexistent-passwd-scan-test"),
+            group_path: PathBuf::from("/nonexistent-group-scan-test"),
+        };
+        let module = UserAccountModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 0);
+        assert_eq!(result.issues_found, 0);
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_detects_uid_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let passwd_path = dir.path().join("passwd");
+        let group_path = dir.path().join("group");
+        let passwd_content = "\
+root:x:0:0:root:/root:/bin/bash
+evil:x:0:0:evil:/root:/bin/bash
+normal:x:1000:1000:Normal:/home/normal:/bin/bash
+";
+        std::fs::write(&passwd_path, passwd_content).unwrap();
+        std::fs::write(&group_path, "root:x:0:\n").unwrap();
+
+        let config = UserAccountConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            passwd_path,
+            group_path,
+        };
+        let module = UserAccountModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.issues_found, 1); // evil has UID 0
     }
 }

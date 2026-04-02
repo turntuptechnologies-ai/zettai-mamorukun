@@ -11,6 +11,14 @@ log_level = "info"
 # 完了をこの時間まで待機する。タイムアウト後は強制終了する
 shutdown_timeout_secs = 30
 
+[startup_scan]
+# 起動時セキュリティスキャンの有効/無効
+# 有効にするとデーモン起動時に全有効モジュールの初期スキャンを実行し、
+# 現在のシステム状態をベースラインとして記録する
+enabled = true
+# スキャン全体のタイムアウト（秒）
+timeout_secs = 60
+
 [modules.file_integrity]
 # ファイル整合性監視モジュールの有効/無効
 enabled = false

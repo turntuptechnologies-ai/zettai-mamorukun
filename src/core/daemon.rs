@@ -98,9 +98,48 @@ impl Daemon {
             tracing::warn!("アクションエンジンはイベントバスが無効のため起動できません");
         }
 
-        // モジュールマネージャーでモジュールを一括起動
-        let mut module_manager =
-            ModuleManager::start_modules(&self.config.modules, &event_bus).await;
+        // モジュールマネージャーでモジュールを一括起動（起動時スキャン付き）
+        let (mut module_manager, scan_report) = ModuleManager::start_modules(
+            &self.config.modules,
+            &event_bus,
+            self.config.startup_scan.enabled,
+        )
+        .await;
+
+        // 起動時スキャンのサマリーイベントを発行
+        if self.config.startup_scan.enabled
+            && let Some(ref bus) = event_bus
+        {
+            let total_items: usize = scan_report
+                .results
+                .iter()
+                .map(|(_, r)| r.items_scanned)
+                .sum();
+            let total_issues: usize = scan_report
+                .results
+                .iter()
+                .map(|(_, r)| r.issues_found)
+                .sum();
+            let summary = format!(
+                "起動時スキャン完了: {}モジュール, {}アイテム, {}問題検知, {}エラー, {:.1}秒",
+                scan_report.results.len(),
+                total_items,
+                total_issues,
+                scan_report.errors.len(),
+                scan_report.total_duration.as_secs_f64(),
+            );
+            let severity = if total_issues > 0 || !scan_report.errors.is_empty() {
+                Severity::Warning
+            } else {
+                Severity::Info
+            };
+            bus.publish(SecurityEvent::new(
+                "startup_scan_completed",
+                severity,
+                "daemon",
+                summary,
+            ));
+        }
 
         // モジュール名を共有状態に反映
         {

@@ -37,6 +37,10 @@ pub struct AppConfig {
     /// ステータスサーバー設定
     #[serde(default)]
     pub status: StatusConfig,
+
+    /// 起動時スキャン設定
+    #[serde(default)]
+    pub startup_scan: StartupScanConfig,
 }
 
 /// デーモン動作設定
@@ -58,6 +62,36 @@ impl Default for DaemonConfig {
 impl DaemonConfig {
     fn default_shutdown_timeout_secs() -> u64 {
         30
+    }
+}
+
+/// 起動時セキュリティスキャン設定
+#[derive(Debug, Deserialize, PartialEq)]
+pub struct StartupScanConfig {
+    /// 起動時スキャンの有効/無効（デフォルト: true）
+    #[serde(default = "StartupScanConfig::default_enabled")]
+    pub enabled: bool,
+    /// スキャン全体のタイムアウト（秒、デフォルト: 60）
+    #[serde(default = "StartupScanConfig::default_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl Default for StartupScanConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            timeout_secs: Self::default_timeout_secs(),
+        }
+    }
+}
+
+impl StartupScanConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+
+    fn default_timeout_secs() -> u64 {
+        60
     }
 }
 
