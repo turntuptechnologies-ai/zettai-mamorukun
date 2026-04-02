@@ -163,8 +163,7 @@ impl StatusServer {
         state: &DaemonState,
     ) -> Result<(), std::io::Error> {
         let response = state.to_response();
-        let json = serde_json::to_vec(&response)
-            .map_err(std::io::Error::other)?;
+        let json = serde_json::to_vec(&response).map_err(std::io::Error::other)?;
         stream.write_all(&json).await?;
         stream.shutdown().await?;
         Ok(())

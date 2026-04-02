@@ -50,10 +50,11 @@ impl Daemon {
         let mut inflight_tracker: Option<InFlightTracker> = None;
         let mut metrics_config_sender: Option<watch::Sender<u64>> = None;
         let event_bus = if self.config.event_bus.enabled {
-            let bus = EventBus::with_debounce(
+            let bus = EventBus::with_filters(
                 self.config.event_bus.channel_capacity,
                 self.config.event_bus.debounce_secs,
-            );
+                &self.config.event_bus.filters,
+            )?;
             event::spawn_log_subscriber(&bus);
             event::spawn_debounce_cleanup(&bus);
             // アクションエンジンの起動
@@ -179,6 +180,14 @@ impl Daemon {
                             // デバウンス間隔の更新
                             if let Some(ref bus) = event_bus {
                                 bus.update_debounce_secs(new_config.event_bus.debounce_secs);
+                            }
+
+                            // イベントフィルターの更新
+                            if let Some(ref bus) = event_bus
+                                && let Err(e) =
+                                    bus.update_filters(&new_config.event_bus.filters)
+                            {
+                                tracing::error!(error = %e, "イベントフィルターの更新に失敗しました");
                             }
 
                             // アクションエンジンのルール・レートリミットリロード

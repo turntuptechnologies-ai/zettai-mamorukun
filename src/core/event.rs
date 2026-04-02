@@ -1,5 +1,8 @@
 //! イベントバス — モジュール間イベント伝達
 
+use crate::config::EventFilterConfig;
+use crate::error::AppError;
+use regex::Regex;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -27,6 +30,27 @@ impl Severity {
             "critical" => Some(Severity::Critical),
             _ => None,
         }
+    }
+
+    /// 数値レベルを返す（比較用）
+    fn level(&self) -> u8 {
+        match self {
+            Severity::Info => 0,
+            Severity::Warning => 1,
+            Severity::Critical => 2,
+        }
+    }
+}
+
+impl PartialOrd for Severity {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Severity {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.level().cmp(&other.level())
     }
 }
 
@@ -209,11 +233,94 @@ impl DebounceFilter {
     }
 }
 
+/// コンパイル済みイベントフィルター
+#[derive(Debug, Clone)]
+pub struct EventFilter {
+    exclude_patterns: Vec<Regex>,
+    include_patterns: Vec<Regex>,
+    min_severity: Option<Severity>,
+}
+
+impl EventFilter {
+    /// EventFilterConfig からフィルターを構築する
+    pub fn from_config(config: &EventFilterConfig) -> Result<Self, AppError> {
+        let exclude_patterns = config
+            .exclude_patterns
+            .iter()
+            .map(|p| {
+                Regex::new(p).map_err(|e| AppError::EventBus {
+                    message: format!("exclude_patterns の正規表現が不正です: {}: {}", p, e),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let include_patterns = config
+            .include_patterns
+            .iter()
+            .map(|p| {
+                Regex::new(p).map_err(|e| AppError::EventBus {
+                    message: format!("include_patterns の正規表現が不正です: {}: {}", p, e),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let min_severity = match &config.min_severity {
+            Some(s) => Some(Severity::parse(s).ok_or_else(|| AppError::EventBus {
+                message: format!(
+                    "min_severity の値が不正です: {} (info, warning, critical のいずれかを指定してください)",
+                    s
+                ),
+            })?),
+            None => None,
+        };
+
+        Ok(Self {
+            exclude_patterns,
+            include_patterns,
+            min_severity,
+        })
+    }
+
+    /// イベントがフィルターを通過するか判定する
+    pub fn should_publish(&self, event: &SecurityEvent) -> bool {
+        // 1. min_severity チェック
+        if let Some(ref min) = self.min_severity
+            && event.severity < *min
+        {
+            return false;
+        }
+
+        // マッチ対象テキスト（message + details）
+        let match_text = match &event.details {
+            Some(details) => format!("{} {}", event.message, details),
+            None => event.message.clone(),
+        };
+
+        // 2. exclude チェック（最優先）
+        for pattern in &self.exclude_patterns {
+            if pattern.is_match(&match_text) {
+                return false;
+            }
+        }
+
+        // 3. include チェック（空なら全通過）
+        if !self.include_patterns.is_empty() {
+            return self
+                .include_patterns
+                .iter()
+                .any(|p| p.is_match(&match_text));
+        }
+
+        true
+    }
+}
+
 /// モジュール間イベント伝達バス
 #[derive(Debug, Clone)]
 pub struct EventBus {
     sender: broadcast::Sender<SecurityEvent>,
     debounce: Option<Arc<Mutex<DebounceFilter>>>,
+    filters: Arc<Mutex<HashMap<String, EventFilter>>>,
 }
 
 impl EventBus {
@@ -223,6 +330,7 @@ impl EventBus {
         Self {
             sender,
             debounce: None,
+            filters: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -236,7 +344,37 @@ impl EventBus {
         } else {
             None
         };
-        Self { sender, debounce }
+        Self {
+            sender,
+            debounce,
+            filters: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// デバウンス・フィルター付きでイベントバスを作成する
+    pub fn with_filters(
+        capacity: usize,
+        debounce_secs: u64,
+        filter_configs: &HashMap<String, EventFilterConfig>,
+    ) -> Result<Self, AppError> {
+        let (sender, _) = broadcast::channel(capacity);
+        let debounce = if debounce_secs > 0 {
+            Some(Arc::new(Mutex::new(DebounceFilter::new(debounce_secs))))
+        } else {
+            None
+        };
+
+        let mut filters = HashMap::new();
+        for (module_name, config) in filter_configs {
+            let filter = EventFilter::from_config(config)?;
+            filters.insert(module_name.clone(), filter);
+        }
+
+        Ok(Self {
+            sender,
+            debounce,
+            filters: Arc::new(Mutex::new(filters)),
+        })
     }
 
     /// イベントを発行する
@@ -249,6 +387,22 @@ impl EventBus {
                 "イベント発行: サブスクライバーなし（イベントは破棄）"
             );
             return;
+        }
+
+        // イベントフィルター適用
+        {
+            // unwrap safety: Mutex が poisoned になるのはパニック時のみで、正常動作時は安全
+            let filters = self.filters.lock().unwrap();
+            if let Some(filter) = filters.get(&event.source_module)
+                && !filter.should_publish(&event)
+            {
+                tracing::trace!(
+                    event_type = %event.event_type,
+                    source = %event.source_module,
+                    "イベントフィルター: イベントを抑制"
+                );
+                return;
+            }
         }
 
         // デバウンスフィルター適用
@@ -289,6 +443,23 @@ impl EventBus {
                 "デバウンス間隔を更新しました"
             );
         }
+    }
+
+    /// イベントフィルターを更新する
+    pub fn update_filters(
+        &self,
+        filter_configs: &HashMap<String, EventFilterConfig>,
+    ) -> Result<(), AppError> {
+        let mut new_filters = HashMap::new();
+        for (module_name, config) in filter_configs {
+            let filter = EventFilter::from_config(config)?;
+            new_filters.insert(module_name.clone(), filter);
+        }
+        let count = new_filters.len();
+        // unwrap safety: Mutex が poisoned になるのはパニック時のみで、正常動作時は安全
+        *self.filters.lock().unwrap() = new_filters;
+        tracing::info!(count = count, "イベントフィルターを更新しました");
+        Ok(())
     }
 
     /// イベントを購読するレシーバーを取得する
@@ -683,5 +854,183 @@ mod tests {
     fn test_event_bus_new_no_debounce() {
         let bus = EventBus::new(16);
         assert!(bus.debounce.is_none());
+    }
+
+    #[test]
+    fn test_severity_ordering() {
+        assert!(Severity::Info < Severity::Warning);
+        assert!(Severity::Warning < Severity::Critical);
+        assert!(Severity::Info < Severity::Critical);
+        assert_eq!(Severity::Warning, Severity::Warning);
+    }
+
+    #[test]
+    fn test_event_filter_exclude_pattern() {
+        let config = EventFilterConfig {
+            exclude_patterns: vec![r"\.swp$".to_string()],
+            include_patterns: vec![],
+            min_severity: None,
+        };
+        let filter = EventFilter::from_config(&config).unwrap();
+
+        let event = SecurityEvent::new(
+            "file_modified",
+            Severity::Warning,
+            "file_integrity",
+            "ファイルが変更されました: test.swp",
+        );
+        assert!(!filter.should_publish(&event));
+
+        let event2 = SecurityEvent::new(
+            "file_modified",
+            Severity::Warning,
+            "file_integrity",
+            "ファイルが変更されました: /etc/passwd",
+        );
+        assert!(filter.should_publish(&event2));
+    }
+
+    #[test]
+    fn test_event_filter_include_pattern() {
+        let config = EventFilterConfig {
+            exclude_patterns: vec![],
+            include_patterns: vec![r"/etc/passwd".to_string()],
+            min_severity: None,
+        };
+        let filter = EventFilter::from_config(&config).unwrap();
+
+        let event = SecurityEvent::new(
+            "file_modified",
+            Severity::Warning,
+            "file_integrity",
+            "ファイルが変更されました: /etc/passwd",
+        );
+        assert!(filter.should_publish(&event));
+
+        let event2 = SecurityEvent::new(
+            "file_modified",
+            Severity::Warning,
+            "file_integrity",
+            "ファイルが変更されました: /tmp/test",
+        );
+        assert!(!filter.should_publish(&event2));
+    }
+
+    #[test]
+    fn test_event_filter_min_severity() {
+        let config = EventFilterConfig {
+            exclude_patterns: vec![],
+            include_patterns: vec![],
+            min_severity: Some("warning".to_string()),
+        };
+        let filter = EventFilter::from_config(&config).unwrap();
+
+        let info_event = SecurityEvent::new("test", Severity::Info, "test_module", "情報イベント");
+        assert!(!filter.should_publish(&info_event));
+
+        let warning_event =
+            SecurityEvent::new("test", Severity::Warning, "test_module", "警告イベント");
+        assert!(filter.should_publish(&warning_event));
+
+        let critical_event =
+            SecurityEvent::new("test", Severity::Critical, "test_module", "重大イベント");
+        assert!(filter.should_publish(&critical_event));
+    }
+
+    #[test]
+    fn test_event_filter_exclude_priority() {
+        let config = EventFilterConfig {
+            exclude_patterns: vec![r"secret".to_string()],
+            include_patterns: vec![r"secret".to_string()],
+            min_severity: None,
+        };
+        let filter = EventFilter::from_config(&config).unwrap();
+
+        let event = SecurityEvent::new(
+            "test",
+            Severity::Warning,
+            "test_module",
+            "secret file detected",
+        );
+        // exclude が include より優先される
+        assert!(!filter.should_publish(&event));
+    }
+
+    #[test]
+    fn test_event_filter_empty_passes_all() {
+        let config = EventFilterConfig::default();
+        let filter = EventFilter::from_config(&config).unwrap();
+
+        let event = SecurityEvent::new("test", Severity::Info, "test_module", "任意のイベント");
+        assert!(filter.should_publish(&event));
+    }
+
+    #[test]
+    fn test_event_filter_matches_details() {
+        let config = EventFilterConfig {
+            exclude_patterns: vec![r"/tmp/cache".to_string()],
+            include_patterns: vec![],
+            min_severity: None,
+        };
+        let filter = EventFilter::from_config(&config).unwrap();
+
+        let event = SecurityEvent::new(
+            "file_modified",
+            Severity::Warning,
+            "file_integrity",
+            "ファイルが変更されました",
+        )
+        .with_details("/tmp/cache/data.bin");
+        assert!(!filter.should_publish(&event));
+    }
+
+    #[test]
+    fn test_event_filter_invalid_regex() {
+        let config = EventFilterConfig {
+            exclude_patterns: vec![r"[invalid".to_string()],
+            include_patterns: vec![],
+            min_severity: None,
+        };
+        let result = EventFilter::from_config(&config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_event_filter_invalid_severity() {
+        let config = EventFilterConfig {
+            exclude_patterns: vec![],
+            include_patterns: vec![],
+            min_severity: Some("unknown".to_string()),
+        };
+        let result = EventFilter::from_config(&config);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_event_bus_with_filters() {
+        let mut filter_configs = HashMap::new();
+        filter_configs.insert(
+            "test_module".to_string(),
+            EventFilterConfig {
+                exclude_patterns: vec![r"ignore_me".to_string()],
+                include_patterns: vec![],
+                min_severity: None,
+            },
+        );
+        let bus = EventBus::with_filters(16, 0, &filter_configs).unwrap();
+        let mut receiver = bus.subscribe();
+
+        // フィルターで抑制されるイベント
+        let blocked_event =
+            SecurityEvent::new("test", Severity::Info, "test_module", "please ignore_me");
+        bus.publish(blocked_event);
+
+        // フィルターを通過するイベント
+        let passed_event =
+            SecurityEvent::new("test", Severity::Info, "test_module", "important event");
+        bus.publish(passed_event);
+
+        let received = receiver.recv().await.unwrap();
+        assert_eq!(received.message, "important event");
     }
 }

@@ -220,6 +220,12 @@ channel_capacity = 1024
 # 0 でデバウンスを無効化。Critical イベントは常に即時配信
 debounce_secs = 30
 
+# モジュールごとのイベントフィルタリング設定
+# [event_bus.filters.file_integrity]
+# exclude_patterns = ["\\.swp$", "\\.tmp$", "~$"]
+# include_patterns = []
+# min_severity = "warning"
+
 [actions]
 # アクションエンジンの有効/無効
 # ※ SIGHUP によるホットリロードに対応（ルール変更はデーモン再起動不要）
