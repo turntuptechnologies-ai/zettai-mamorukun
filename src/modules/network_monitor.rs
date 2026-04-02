@@ -1098,4 +1098,125 @@ mod tests {
         let mut module = NetworkMonitorModule::new(config, Some(bus));
         assert!(module.init().is_ok());
     }
+
+    #[test]
+    fn test_detect_suspicious_port_connections_udp_ipv6() {
+        let suspicious_ports: HashSet<u16> = [6666].into_iter().collect();
+
+        let entries = vec![
+            // アクティブな IPv6 UDP 接続 → 検知される
+            ConnectionEntry {
+                protocol: Protocol::Udp,
+                local_addr: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+                local_port: 54321,
+                remote_addr: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2)),
+                remote_port: 6666,
+                state: 0x07,
+            },
+            // remote_addr が :: の UDP は除外
+            ConnectionEntry {
+                protocol: Protocol::Udp,
+                local_addr: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+                local_port: 53,
+                remote_addr: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                remote_port: 6666,
+                state: 0x07,
+            },
+        ];
+
+        let result = detect_suspicious_port_connections(&entries, &suspicious_ports);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].remote_port, 6666);
+        assert_eq!(
+            result[0].remote_addr,
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2))
+        );
+    }
+
+    #[test]
+    fn test_is_non_routable_ipv6_unspecified() {
+        assert!(is_non_routable_ipv6(&Ipv6Addr::UNSPECIFIED));
+    }
+
+    #[test]
+    fn test_detect_connection_count_udp_ipv6() {
+        let entries = vec![
+            // アクティブな IPv6 UDP → カウントされる
+            ConnectionEntry {
+                protocol: Protocol::Udp,
+                local_addr: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+                local_port: 54321,
+                remote_addr: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2)),
+                remote_port: 53,
+                state: 0x07,
+            },
+            // remote_addr が :: の UDP → カウントされない
+            ConnectionEntry {
+                protocol: Protocol::Udp,
+                local_addr: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+                local_port: 53,
+                remote_addr: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                remote_port: 0,
+                state: 0x07,
+            },
+        ];
+
+        // アクティブ接続は 1 つのみ
+        assert_eq!(detect_connection_count_exceeded(&entries, 0), Some(1));
+        assert_eq!(detect_connection_count_exceeded(&entries, 1), None);
+    }
+
+    #[test]
+    fn test_enable_ipv6_default() {
+        let config = NetworkMonitorConfig::default();
+        assert!(config.enable_ipv6);
+    }
+
+    #[test]
+    fn test_parse_addr_port_v6_all_zeros() {
+        // :: (未指定アドレス)
+        let field = "00000000000000000000000000000000:0000";
+        let result = parse_addr_port_v6(field);
+        assert!(result.is_some());
+        let (addr, port) = result.unwrap();
+        assert!(addr.is_unspecified());
+        assert_eq!(port, 0);
+    }
+
+    #[test]
+    fn test_parse_proc_net_tcp6_established() {
+        // 2001:db8::1:443 -> 2001:db8::2:54321 ESTABLISHED
+        let local_hex = format!(
+            "{}{}{}{}",
+            format!("{:08X}", u32::from_ne_bytes([0x20, 0x01, 0x0d, 0xb8])),
+            format!("{:08X}", u32::from_ne_bytes([0, 0, 0, 0])),
+            format!("{:08X}", u32::from_ne_bytes([0, 0, 0, 0])),
+            format!("{:08X}", u32::from_ne_bytes([0, 0, 0, 1])),
+        );
+        let remote_hex = format!(
+            "{}{}{}{}",
+            format!("{:08X}", u32::from_ne_bytes([0x20, 0x01, 0x0d, 0xb8])),
+            format!("{:08X}", u32::from_ne_bytes([0, 0, 0, 0])),
+            format!("{:08X}", u32::from_ne_bytes([0, 0, 0, 0])),
+            format!("{:08X}", u32::from_ne_bytes([0, 0, 0, 2])),
+        );
+        let content = format!(
+            "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: {}:01BB {}:D431 01 00000000:00000000 00:00000000 00000000  1000        0 67890 1 0000000000000000 100 0 0 10 0",
+            local_hex, remote_hex
+        );
+
+        let entries = parse_proc_net(&content, Protocol::Tcp, AddressFamily::V6);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].local_port, 443);
+        assert_eq!(entries[0].remote_port, 0xD431);
+        assert_eq!(entries[0].state, 0x01);
+        assert_eq!(
+            entries[0].local_addr,
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1))
+        );
+        assert_eq!(
+            entries[0].remote_addr,
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 2))
+        );
+    }
 }
