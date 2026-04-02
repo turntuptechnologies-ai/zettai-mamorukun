@@ -10,7 +10,7 @@
 use crate::config::NetworkMonitorConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
-use crate::modules::Module;
+use crate::modules::{InitialScanResult, Module};
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tokio_util::sync::CancellationToken;
@@ -488,6 +488,29 @@ impl Module for NetworkMonitorModule {
     async fn stop(&mut self) -> Result<(), AppError> {
         self.cancel_token.cancel();
         Ok(())
+    }
+
+    async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {
+        let start = std::time::Instant::now();
+
+        let entries = Self::read_connections(self.config.enable_ipv6);
+        let items_scanned = entries.len();
+
+        let suspicious_ports: HashSet<u16> = self.config.suspicious_ports.iter().copied().collect();
+        let suspicious = detect_suspicious_port_connections(&entries, &suspicious_ports);
+        let issues_found = suspicious.len();
+
+        let duration = start.elapsed();
+
+        Ok(InitialScanResult {
+            items_scanned,
+            issues_found,
+            duration,
+            summary: format!(
+                "ネットワーク接続 {}件をスキャンしました（不審な接続: {}件）",
+                items_scanned, issues_found
+            ),
+        })
     }
 }
 
@@ -1218,5 +1241,21 @@ mod tests {
             entries[0].remote_addr,
             IpAddr::V6(Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 2))
         );
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_returns_connections() {
+        let config = NetworkMonitorConfig {
+            enabled: true,
+            interval_secs: 60,
+            suspicious_ports: vec![4444, 5555],
+            max_connections: 1000,
+            enable_ipv6: false,
+        };
+        let module = NetworkMonitorModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert!(result.summary.contains("ネットワーク接続"));
+        assert!(result.summary.contains("不審な接続"));
     }
 }

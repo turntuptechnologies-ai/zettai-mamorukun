@@ -11,7 +11,7 @@
 use crate::config::PamMonitorConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
-use crate::modules::Module;
+use crate::modules::{InitialScanResult, Module};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -522,6 +522,78 @@ impl Module for PamMonitorModule {
         self.cancel_token.cancel();
         Ok(())
     }
+
+    async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {
+        let start = std::time::Instant::now();
+
+        let snapshot = Self::scan_files(&self.config.watch_paths);
+        let items_scanned = snapshot.files.len();
+        let mut issues_found = 0;
+
+        for path in &self.config.watch_paths {
+            let files_to_check = if path.is_file() {
+                vec![path.clone()]
+            } else if path.is_dir() {
+                WalkDir::new(path)
+                    .min_depth(1)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.path().is_file())
+                    .map(|e| e.path().to_path_buf())
+                    .collect()
+            } else {
+                continue;
+            };
+
+            for file_path in &files_to_check {
+                let content = match std::fs::read_to_string(file_path) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() || trimmed.starts_with('#') {
+                        continue;
+                    }
+
+                    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                    if parts.len() < 3 {
+                        continue;
+                    }
+
+                    let module_path = parts[2];
+
+                    if module_path.contains("pam_permit.so") {
+                        issues_found += 1;
+                    }
+                    if module_path.contains("pam_exec.so") {
+                        issues_found += 1;
+                    }
+                    if module_path.contains('/') {
+                        let is_standard = STANDARD_PAM_MODULE_PATHS
+                            .iter()
+                            .any(|std_path| module_path.starts_with(std_path));
+                        if !is_standard {
+                            issues_found += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        let duration = start.elapsed();
+
+        Ok(InitialScanResult {
+            items_scanned,
+            issues_found,
+            duration,
+            summary: format!(
+                "PAM 設定ファイル {}件をスキャンしました（危険パターン: {}件）",
+                items_scanned, issues_found
+            ),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -987,5 +1059,61 @@ mod tests {
             &None,
         );
         assert!(reported.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_no_issues() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let pam_file = tmpdir.path().join("common-auth");
+        std::fs::write(&pam_file, "# PAM config\nauth required pam_unix.so\n").unwrap();
+
+        let config = PamMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            watch_paths: vec![tmpdir.path().to_path_buf()],
+        };
+        let module = PamMonitorModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 1);
+        assert_eq!(result.issues_found, 0);
+        assert!(result.summary.contains("PAM 設定ファイル"));
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_detects_dangerous_patterns() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let pam_file = tmpdir.path().join("backdoor");
+        std::fs::write(
+            &pam_file,
+            "auth sufficient pam_permit.so\nsession required pam_exec.so /tmp/evil.sh\n",
+        )
+        .unwrap();
+
+        let config = PamMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            watch_paths: vec![tmpdir.path().to_path_buf()],
+        };
+        let module = PamMonitorModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 1);
+        assert!(result.issues_found >= 2);
+        assert!(result.summary.contains("危険パターン"));
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_empty_paths() {
+        let config = PamMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            watch_paths: vec![],
+        };
+        let module = PamMonitorModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 0);
+        assert_eq!(result.issues_found, 0);
     }
 }

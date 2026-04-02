@@ -11,7 +11,7 @@
 use crate::config::SecurityFilesMonitorConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
-use crate::modules::Module;
+use crate::modules::{InitialScanResult, Module};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -449,6 +449,72 @@ impl Module for SecurityFilesMonitorModule {
         self.cancel_token.cancel();
         Ok(())
     }
+
+    async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {
+        let start = std::time::Instant::now();
+
+        let snapshot = Self::scan_files(&self.config.watch_paths);
+        let items_scanned = snapshot.files.len();
+        let mut issues_found = 0;
+
+        for path in &self.config.watch_paths {
+            let files_to_check = collect_files_to_check(path);
+
+            for file_path in &files_to_check {
+                let file_name = file_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                let parent_name = file_path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+
+                let is_limits_file = file_name == "limits.conf" || parent_name == "limits.d";
+
+                if !is_limits_file {
+                    continue;
+                }
+
+                let content = match std::fs::read_to_string(file_path) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() || trimmed.starts_with('#') {
+                        continue;
+                    }
+
+                    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                    if parts.len() < 4 {
+                        continue;
+                    }
+
+                    let domain = parts[0];
+                    let value = parts[3];
+
+                    if domain == "*" && value == "unlimited" {
+                        issues_found += 1;
+                    }
+                }
+            }
+        }
+
+        let duration = start.elapsed();
+
+        Ok(InitialScanResult {
+            items_scanned,
+            issues_found,
+            duration,
+            summary: format!(
+                "セキュリティ設定ファイル {}件をスキャンしました（危険パターン: {}件）",
+                items_scanned, issues_found
+            ),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -858,5 +924,61 @@ mod tests {
     fn test_collect_files_to_check_nonexistent() {
         let result = collect_files_to_check(&PathBuf::from("/tmp/nonexistent_zettai_test"));
         assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_no_issues() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let conf_path = tmpdir.path().join("access.conf");
+        std::fs::write(&conf_path, "# access configuration\n+ : root : ALL\n").unwrap();
+
+        let config = SecurityFilesMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            watch_paths: vec![tmpdir.path().to_path_buf()],
+        };
+        let module = SecurityFilesMonitorModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 1);
+        assert_eq!(result.issues_found, 0);
+        assert!(result.summary.contains("セキュリティ設定ファイル"));
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_detects_unlimited() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let limits_path = tmpdir.path().join("limits.conf");
+        std::fs::write(
+            &limits_path,
+            "* soft nofile unlimited\n* hard nproc unlimited\n",
+        )
+        .unwrap();
+
+        let config = SecurityFilesMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            watch_paths: vec![tmpdir.path().to_path_buf()],
+        };
+        let module = SecurityFilesMonitorModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 1);
+        assert_eq!(result.issues_found, 2);
+        assert!(result.summary.contains("危険パターン: 2件"));
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_empty_paths() {
+        let config = SecurityFilesMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            watch_paths: vec![],
+        };
+        let module = SecurityFilesMonitorModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 0);
+        assert_eq!(result.issues_found, 0);
     }
 }

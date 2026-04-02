@@ -10,7 +10,7 @@
 use crate::config::MountMonitorConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
-use crate::modules::Module;
+use crate::modules::{InitialScanResult, Module};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
@@ -279,6 +279,20 @@ impl Module for MountMonitorModule {
         });
 
         Ok(())
+    }
+
+    async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {
+        let start = std::time::Instant::now();
+        let entries = Self::read_mounts(&self.config.mounts_path)?;
+        let items_scanned = entries.len();
+        let duration = start.elapsed();
+
+        Ok(InitialScanResult {
+            items_scanned,
+            issues_found: 0,
+            duration,
+            summary: format!("マウントポイント {}件を検出しました", items_scanned),
+        })
     }
 
     async fn stop(&mut self) -> Result<(), AppError> {
@@ -602,6 +616,46 @@ mod tests {
 
         module.stop().await.unwrap();
         assert!(cancel_token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_with_mounts() {
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmpfile.path(),
+            "sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0\nproc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n",
+        )
+        .unwrap();
+
+        let config = MountMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 30,
+            mounts_path: tmpfile.path().to_path_buf(),
+        };
+        let mut module = MountMonitorModule::new(config, None);
+        module.init().unwrap();
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 2);
+        assert_eq!(result.issues_found, 0);
+        assert!(result.summary.contains("2件"));
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_empty() {
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmpfile.path(), "").unwrap();
+
+        let config = MountMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 30,
+            mounts_path: tmpfile.path().to_path_buf(),
+        };
+        let module = MountMonitorModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 0);
+        assert_eq!(result.issues_found, 0);
     }
 
     #[test]

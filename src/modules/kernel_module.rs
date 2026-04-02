@@ -9,7 +9,7 @@
 use crate::config::KernelModuleConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
-use crate::modules::Module;
+use crate::modules::{InitialScanResult, Module};
 use std::collections::HashSet;
 use tokio_util::sync::CancellationToken;
 
@@ -239,6 +239,21 @@ impl Module for KernelModuleMonitor {
         Ok(())
     }
 
+    async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {
+        let start = std::time::Instant::now();
+        let content = Self::read_proc_modules()?;
+        let entries = Self::parse_proc_modules(&content);
+        let items_scanned = entries.len();
+        let duration = start.elapsed();
+
+        Ok(InitialScanResult {
+            items_scanned,
+            issues_found: 0,
+            duration,
+            summary: format!("カーネルモジュール {}件を検出しました", items_scanned),
+        })
+    }
+
     async fn stop(&mut self) -> Result<(), AppError> {
         self.cancel_token.cancel();
         Ok(())
@@ -440,5 +455,20 @@ ip_tables 32768 0 - Live 0xffffffffc0800000";
         };
         let entry2 = entry1.clone();
         assert_eq!(entry1, entry2);
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_with_modules() {
+        let config = KernelModuleConfig {
+            enabled: true,
+            scan_interval_secs: 120,
+        };
+        let module = KernelModuleMonitor::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        // Linux 環境では必ず何かしらのモジュールがロードされている
+        assert!(result.items_scanned > 0);
+        assert_eq!(result.issues_found, 0);
+        assert!(result.summary.contains("件を検出しました"));
     }
 }

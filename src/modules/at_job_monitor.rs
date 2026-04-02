@@ -11,7 +11,7 @@
 use crate::config::AtJobMonitorConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
-use crate::modules::Module;
+use crate::modules::{InitialScanResult, Module};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -293,6 +293,23 @@ impl Module for AtJobMonitorModule {
         });
 
         Ok(())
+    }
+
+    async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {
+        let start = std::time::Instant::now();
+        let files = Self::scan_files(&self.config.watch_paths);
+        let items_scanned = files.len();
+        let duration = start.elapsed();
+
+        Ok(InitialScanResult {
+            items_scanned,
+            issues_found: 0,
+            duration,
+            summary: format!(
+                "at/batch ジョブファイル {}件をスキャンしました",
+                items_scanned
+            ),
+        })
     }
 
     async fn stop(&mut self) -> Result<(), AppError> {
@@ -683,5 +700,41 @@ mod tests {
         let current = HashMap::new();
         let report = AtJobMonitorModule::detect_changes(&baseline, &current);
         assert!(!report.has_changes());
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_with_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let file1 = dir.path().join("job1");
+        let file2 = dir.path().join("job2");
+        std::fs::write(&file1, "echo hello").unwrap();
+        std::fs::write(&file2, "echo world").unwrap();
+
+        let config = AtJobMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 120,
+            watch_paths: vec![dir.path().to_path_buf()],
+        };
+        let mut module = AtJobMonitorModule::new(config, None);
+        module.init().unwrap();
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 2);
+        assert_eq!(result.issues_found, 0);
+        assert!(result.summary.contains("2件"));
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_empty() {
+        let config = AtJobMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 120,
+            watch_paths: vec![],
+        };
+        let module = AtJobMonitorModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 0);
+        assert_eq!(result.issues_found, 0);
     }
 }

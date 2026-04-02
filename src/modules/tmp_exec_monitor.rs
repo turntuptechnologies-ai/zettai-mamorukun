@@ -11,7 +11,7 @@
 use crate::config::TmpExecMonitorConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
-use crate::modules::Module;
+use crate::modules::{InitialScanResult, Module};
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -282,6 +282,26 @@ impl Module for TmpExecMonitorModule {
         self.cancel_token.cancel();
         Ok(())
     }
+
+    async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {
+        let start = std::time::Instant::now();
+
+        let snapshot = Self::scan_dirs(&self.config.watch_dirs);
+        let items_scanned = snapshot.files.len();
+        let issues_found = items_scanned;
+
+        let duration = start.elapsed();
+
+        Ok(InitialScanResult {
+            items_scanned,
+            issues_found,
+            duration,
+            summary: format!(
+                "一時ディレクトリから実行可能ファイル {}件を検出しました",
+                items_scanned
+            ),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -509,5 +529,58 @@ mod tests {
 
         module.stop().await.unwrap();
         assert!(cancel_token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_with_executables() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test_exec");
+        fs::write(&file_path, "#!/bin/sh\necho hello").unwrap();
+        fs::set_permissions(&file_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let config = TmpExecMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            watch_dirs: vec![dir.path().to_path_buf()],
+        };
+        let module = TmpExecMonitorModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 1);
+        assert_eq!(result.issues_found, 1);
+        assert!(result.summary.contains("実行可能ファイル 1件"));
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_no_executables() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("not_exec");
+        fs::write(&file_path, "data").unwrap();
+        fs::set_permissions(&file_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let config = TmpExecMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            watch_dirs: vec![dir.path().to_path_buf()],
+        };
+        let module = TmpExecMonitorModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 0);
+        assert_eq!(result.issues_found, 0);
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_empty_dirs() {
+        let config = TmpExecMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            watch_dirs: vec![],
+        };
+        let module = TmpExecMonitorModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 0);
+        assert_eq!(result.issues_found, 0);
     }
 }
