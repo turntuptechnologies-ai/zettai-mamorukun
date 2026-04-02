@@ -1,5 +1,5 @@
 use crate::config::AppConfig;
-use crate::core::action::{ActionEngine, ActionRule};
+use crate::core::action::{ActionEngine, ActionEngineConfig};
 use crate::core::event::{self, EventBus, SecurityEvent, Severity};
 use crate::core::health::HealthChecker;
 use crate::core::metrics::MetricsCollector;
@@ -38,7 +38,7 @@ impl Daemon {
         heartbeat.tick().await;
 
         // イベントバスの初期化
-        let mut action_config_sender: Option<watch::Sender<Vec<ActionRule>>> = None;
+        let mut action_config_sender: Option<watch::Sender<ActionEngineConfig>> = None;
         let mut metrics_config_sender: Option<watch::Sender<u64>> = None;
         let event_bus = if self.config.event_bus.enabled {
             let bus = EventBus::with_debounce(
@@ -142,26 +142,26 @@ impl Daemon {
                                 bus.update_debounce_secs(new_config.event_bus.debounce_secs);
                             }
 
-                            // アクションエンジンのルールリロード
+                            // アクションエンジンのルール・レートリミットリロード
                             if let Some(ref sender) = action_config_sender {
-                                match ActionEngine::parse_rules(&new_config.actions) {
-                                    Ok(new_rules) => {
-                                        let rule_count = new_rules.len();
-                                        if sender.send(new_rules).is_ok() {
+                                match ActionEngine::parse_config(&new_config.actions) {
+                                    Ok(engine_config) => {
+                                        let rule_count = engine_config.rules.len();
+                                        if sender.send(engine_config).is_ok() {
                                             tracing::info!(
                                                 rules = rule_count,
-                                                "アクションエンジンのルールをリロードしました"
+                                                "アクションエンジンの設定をリロードしました"
                                             );
                                         } else {
                                             tracing::warn!(
-                                                "アクションエンジンのルールリロードに失敗しました（受信側が閉じています）"
+                                                "アクションエンジンの設定リロードに失敗しました（受信側が閉じています）"
                                             );
                                         }
                                     }
                                     Err(e) => {
                                         tracing::error!(
                                             error = %e,
-                                            "アクションルールのパースに失敗しました。既存のルールを維持します"
+                                            "アクション設定のパースに失敗しました。既存の設定を維持します"
                                         );
                                     }
                                 }

@@ -1037,6 +1037,30 @@ pub struct ActionConfig {
     /// アクションルールのリスト
     #[serde(default)]
     pub rules: Vec<ActionRuleConfig>,
+
+    /// レートリミット設定（未設定時はレートリミットなし）
+    #[serde(default)]
+    pub rate_limit: Option<RateLimitConfig>,
+}
+
+/// レートリミット設定
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct RateLimitConfig {
+    /// コマンド実行のレート制限
+    pub command: Option<BucketConfig>,
+    /// Webhook 送信のレート制限
+    pub webhook: Option<BucketConfig>,
+}
+
+/// トークンバケット設定
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct BucketConfig {
+    /// バケット容量（バースト許容数）
+    pub max_tokens: u64,
+    /// 補充トークン数
+    pub refill_amount: u64,
+    /// 補充間隔（秒）
+    pub refill_interval_secs: u64,
 }
 
 /// アクションルールの設定

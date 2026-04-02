@@ -1,10 +1,10 @@
 //! アクションエンジン — 検知イベントに対する設定ベースのアクション実行
 
-use crate::config::ActionConfig;
+use crate::config::{ActionConfig, BucketConfig, RateLimitConfig};
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, watch};
 
 /// アクション種別
@@ -45,6 +45,151 @@ pub struct ActionRule {
     pub max_retries: u32,
 }
 
+/// レートリミット対象のアクション種別
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ActionKind {
+    Command,
+    Webhook,
+}
+
+impl std::fmt::Display for ActionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ActionKind::Command => write!(f, "command"),
+            ActionKind::Webhook => write!(f, "webhook"),
+        }
+    }
+}
+
+/// トークンバケット — 遅延評価（lazy refill）方式
+struct TokenBucket {
+    max_tokens: u64,
+    available_tokens: f64,
+    refill_rate: f64,
+    last_refill: Instant,
+}
+
+impl TokenBucket {
+    fn new(config: &BucketConfig) -> Self {
+        let refill_rate = if config.refill_interval_secs > 0 {
+            config.refill_amount as f64 / config.refill_interval_secs as f64
+        } else {
+            config.refill_amount as f64
+        };
+        Self {
+            max_tokens: config.max_tokens,
+            available_tokens: config.max_tokens as f64,
+            refill_rate,
+            last_refill: Instant::now(),
+        }
+    }
+
+    fn try_acquire(&mut self) -> bool {
+        self.refill();
+        if self.available_tokens >= 1.0 {
+            self.available_tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn refill(&mut self) {
+        let elapsed = self.last_refill.elapsed().as_secs_f64();
+        if elapsed > 0.0 {
+            let tokens_to_add = elapsed * self.refill_rate;
+            self.available_tokens =
+                (self.available_tokens + tokens_to_add).min(self.max_tokens as f64);
+            self.last_refill = Instant::now();
+        }
+    }
+
+    fn update_config(&mut self, config: &BucketConfig) {
+        let refill_rate = if config.refill_interval_secs > 0 {
+            config.refill_amount as f64 / config.refill_interval_secs as f64
+        } else {
+            config.refill_amount as f64
+        };
+        self.max_tokens = config.max_tokens;
+        self.refill_rate = refill_rate;
+        self.available_tokens = self.available_tokens.min(config.max_tokens as f64);
+    }
+
+    #[cfg(test)]
+    fn with_last_refill(mut self, instant: Instant) -> Self {
+        self.last_refill = instant;
+        self
+    }
+}
+
+/// レートリミッター — アクション種別ごとにトークンバケットを管理する
+struct RateLimiter {
+    buckets: HashMap<ActionKind, TokenBucket>,
+}
+
+impl RateLimiter {
+    fn new(config: &Option<RateLimitConfig>) -> Self {
+        let mut buckets = HashMap::new();
+        if let Some(cfg) = config {
+            if let Some(ref cmd_cfg) = cfg.command {
+                buckets.insert(ActionKind::Command, TokenBucket::new(cmd_cfg));
+            }
+            if let Some(ref webhook_cfg) = cfg.webhook {
+                buckets.insert(ActionKind::Webhook, TokenBucket::new(webhook_cfg));
+            }
+        }
+        Self { buckets }
+    }
+
+    fn try_acquire(&mut self, kind: &ActionKind) -> bool {
+        match self.buckets.get_mut(kind) {
+            Some(bucket) => bucket.try_acquire(),
+            None => true, // バケット未設定の場合はリミットなし
+        }
+    }
+
+    fn update_config(&mut self, config: &Option<RateLimitConfig>) {
+        match config {
+            Some(cfg) => {
+                // command バケットの更新
+                match (&cfg.command, self.buckets.get_mut(&ActionKind::Command)) {
+                    (Some(bucket_cfg), Some(bucket)) => bucket.update_config(bucket_cfg),
+                    (Some(bucket_cfg), None) => {
+                        self.buckets
+                            .insert(ActionKind::Command, TokenBucket::new(bucket_cfg));
+                    }
+                    (None, _) => {
+                        self.buckets.remove(&ActionKind::Command);
+                    }
+                }
+                // webhook バケットの更新
+                match (&cfg.webhook, self.buckets.get_mut(&ActionKind::Webhook)) {
+                    (Some(bucket_cfg), Some(bucket)) => bucket.update_config(bucket_cfg),
+                    (Some(bucket_cfg), None) => {
+                        self.buckets
+                            .insert(ActionKind::Webhook, TokenBucket::new(bucket_cfg));
+                    }
+                    (None, _) => {
+                        self.buckets.remove(&ActionKind::Webhook);
+                    }
+                }
+            }
+            None => {
+                self.buckets.clear();
+            }
+        }
+    }
+}
+
+/// ActionEngine のホットリロード用設定
+#[derive(Debug, Clone)]
+pub struct ActionEngineConfig {
+    /// アクションルール
+    pub rules: Vec<ActionRule>,
+    /// レートリミット設定
+    pub rate_limit: Option<RateLimitConfig>,
+}
+
 /// Webhook のデフォルトタイムアウト（秒）
 const WEBHOOK_DEFAULT_TIMEOUT_SECS: u64 = 10;
 
@@ -61,9 +206,10 @@ struct WebhookParams {
 /// アクションエンジン — イベントに対するアクションを実行する
 pub struct ActionEngine {
     rules: Vec<ActionRule>,
+    rate_limiter: RateLimiter,
     receiver: broadcast::Receiver<SecurityEvent>,
     client: reqwest::Client,
-    config_receiver: watch::Receiver<Vec<ActionRule>>,
+    config_receiver: watch::Receiver<ActionEngineConfig>,
 }
 
 impl std::fmt::Debug for ActionEngine {
@@ -77,20 +223,26 @@ impl std::fmt::Debug for ActionEngine {
 impl ActionEngine {
     /// 設定からアクションエンジンを構築する
     ///
-    /// 戻り値のタプルの第2要素はアクションルール更新用の `watch::Sender`。
-    /// SIGHUP リロード時にこの sender で新しいルールを送信すると、
-    /// 実行中の ActionEngine がルールを動的に更新する。
+    /// 戻り値のタプルの第2要素は設定更新用の `watch::Sender`。
+    /// SIGHUP リロード時にこの sender で新しい設定を送信すると、
+    /// 実行中の ActionEngine がルールとレートリミットを動的に更新する。
     pub fn new(
         config: &ActionConfig,
         event_bus: &EventBus,
-    ) -> Result<(Self, watch::Sender<Vec<ActionRule>>), AppError> {
+    ) -> Result<(Self, watch::Sender<ActionEngineConfig>), AppError> {
         let rules = Self::parse_rules(config)?;
-        let (config_sender, config_receiver) = watch::channel(rules.clone());
+        let rate_limiter = RateLimiter::new(&config.rate_limit);
+        let engine_config = ActionEngineConfig {
+            rules: rules.clone(),
+            rate_limit: config.rate_limit.clone(),
+        };
+        let (config_sender, config_receiver) = watch::channel(engine_config);
         let receiver = event_bus.subscribe();
         let client = reqwest::Client::new();
         Ok((
             Self {
                 rules,
+                rate_limiter,
                 receiver,
                 client,
                 config_receiver,
@@ -178,18 +330,35 @@ impl ActionEngine {
         Ok(rules)
     }
 
+    /// ActionConfig から ActionEngineConfig をパースする
+    pub fn parse_config(config: &ActionConfig) -> Result<ActionEngineConfig, AppError> {
+        let rules = Self::parse_rules(config)?;
+        Ok(ActionEngineConfig {
+            rules,
+            rate_limit: config.rate_limit.clone(),
+        })
+    }
+
     /// 非同期タスクとしてアクションエンジンを起動する
     pub fn spawn(self) {
         let client = self.client;
         tokio::spawn(async move {
-            Self::run_loop(self.rules, self.receiver, self.config_receiver, client).await;
+            Self::run_loop(
+                self.rules,
+                self.rate_limiter,
+                self.receiver,
+                self.config_receiver,
+                client,
+            )
+            .await;
         });
     }
 
     async fn run_loop(
         mut rules: Vec<ActionRule>,
+        mut rate_limiter: RateLimiter,
         mut receiver: broadcast::Receiver<SecurityEvent>,
-        mut config_receiver: watch::Receiver<Vec<ActionRule>>,
+        mut config_receiver: watch::Receiver<ActionEngineConfig>,
         client: reqwest::Client,
     ) {
         loop {
@@ -199,6 +368,25 @@ impl ActionEngine {
                         Ok(event) => {
                             for rule in &rules {
                                 if Self::matches(rule, &event) {
+                                    let action_kind = match rule.action {
+                                        ActionType::Command => Some(ActionKind::Command),
+                                        ActionType::Webhook => Some(ActionKind::Webhook),
+                                        ActionType::Log => None,
+                                    };
+
+                                    if let Some(ref kind) = action_kind
+                                        && !rate_limiter.try_acquire(kind)
+                                    {
+                                        tracing::warn!(
+                                            rule = %rule.name,
+                                            action_type = %kind,
+                                            event_type = %event.event_type,
+                                            source_module = %event.source_module,
+                                            "レートリミットによりアクションをドロップしました"
+                                        );
+                                        continue;
+                                    }
+
                                     Self::execute_action(rule, &event, &client).await;
                                 }
                             }
@@ -219,14 +407,15 @@ impl ActionEngine {
                 result = config_receiver.changed() => {
                     match result {
                         Ok(()) => {
-                            let new_rules = config_receiver.borrow_and_update().clone();
-                            let new_count = new_rules.len();
+                            let new_config = config_receiver.borrow_and_update().clone();
+                            let new_count = new_config.rules.len();
                             let old_count = rules.len();
-                            rules = new_rules;
+                            rules = new_config.rules;
+                            rate_limiter.update_config(&new_config.rate_limit);
                             tracing::info!(
                                 old_rules = old_count,
                                 new_rules = new_count,
-                                "アクションエンジン: ルールをリロードしました"
+                                "アクションエンジン: ルールとレートリミットをリロードしました"
                             );
                         }
                         Err(_) => {
@@ -468,7 +657,7 @@ impl ActionEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ActionConfig, ActionRuleConfig};
+    use crate::config::{ActionConfig, ActionRuleConfig, BucketConfig, RateLimitConfig};
 
     fn make_event(severity: Severity, source_module: &str) -> SecurityEvent {
         SecurityEvent::new("test_event", severity, source_module, "テストメッセージ")
@@ -601,6 +790,7 @@ mod tests {
                     r
                 },
             ],
+            rate_limit: None,
         };
         let bus = EventBus::new(16);
         let result = ActionEngine::new(&config, &bus);
@@ -619,6 +809,7 @@ mod tests {
         let config = ActionConfig {
             enabled: true,
             rules: vec![make_rule_config("bad_rule", "command", None)],
+            rate_limit: None,
         };
         let bus = EventBus::new(16);
         let result = ActionEngine::new(&config, &bus);
@@ -636,6 +827,7 @@ mod tests {
                 r.severity = Some("invalid".to_string());
                 r
             }],
+            rate_limit: None,
         };
         let bus = EventBus::new(16);
         let result = ActionEngine::new(&config, &bus);
@@ -663,9 +855,10 @@ mod tests {
         let config = ActionConfig {
             enabled: true,
             rules: vec![{
-                let mut r = make_rule_config("bad_webhook", "webhook", None);
+                let r = make_rule_config("bad_webhook", "webhook", None);
                 r
             }],
+            rate_limit: None,
         };
         let bus = EventBus::new(16);
         let result = ActionEngine::new(&config, &bus);
@@ -732,6 +925,7 @@ mod tests {
                 // timeout_secs はデフォルトの 30
                 r
             }],
+            rate_limit: None,
         };
         let bus = EventBus::new(16);
         let (engine, _sender) = ActionEngine::new(&config, &bus).unwrap();
@@ -749,6 +943,7 @@ mod tests {
                 r.timeout_secs = 15; // カスタム値
                 r
             }],
+            rate_limit: None,
         };
         let bus = EventBus::new(16);
         let (engine, _sender) = ActionEngine::new(&config, &bus).unwrap();
@@ -765,6 +960,7 @@ mod tests {
                 r.severity = Some("warning".to_string());
                 r
             }],
+            rate_limit: None,
         };
         let rules = ActionEngine::parse_rules(&config).unwrap();
         assert_eq!(rules.len(), 2);
@@ -782,6 +978,7 @@ mod tests {
                 r.severity = Some("invalid".to_string());
                 r
             }],
+            rate_limit: None,
         };
         let result = ActionEngine::parse_rules(&config);
         assert!(result.is_err());
@@ -792,6 +989,7 @@ mod tests {
         let config = ActionConfig {
             enabled: true,
             rules: vec![],
+            rate_limit: None,
         };
         let rules = ActionEngine::parse_rules(&config).unwrap();
         assert!(rules.is_empty());
@@ -802,17 +1000,21 @@ mod tests {
         let config = ActionConfig {
             enabled: true,
             rules: vec![make_rule_config("log_all", "log", None)],
+            rate_limit: None,
         };
         let bus = EventBus::new(16);
         let (engine, sender) = ActionEngine::new(&config, &bus).unwrap();
         assert_eq!(engine.rules.len(), 1);
 
-        // sender で新しいルールを送信できることを確認
-        let new_rules = vec![
-            make_rule(None, None),
-            make_rule(Some(Severity::Critical), None),
-        ];
-        assert!(sender.send(new_rules).is_ok());
+        // sender で新しい設定を送信できることを確認
+        let new_config = ActionEngineConfig {
+            rules: vec![
+                make_rule(None, None),
+                make_rule(Some(Severity::Critical), None),
+            ],
+            rate_limit: None,
+        };
+        assert!(sender.send(new_config).is_ok());
     }
 
     #[tokio::test]
@@ -820,6 +1022,7 @@ mod tests {
         let config = ActionConfig {
             enabled: true,
             rules: vec![make_rule_config("initial_rule", "log", None)],
+            rate_limit: None,
         };
         let bus = EventBus::new(16);
         let (engine, sender) = ActionEngine::new(&config, &bus).unwrap();
@@ -834,9 +1037,10 @@ mod tests {
                 make_rule_config("rule_a", "log", None),
                 make_rule_config("rule_b", "log", None),
             ],
+            rate_limit: None,
         };
-        let new_rules = ActionEngine::parse_rules(&new_config).unwrap();
-        assert!(sender.send(new_rules).is_ok());
+        let engine_config = ActionEngine::parse_config(&new_config).unwrap();
+        assert!(sender.send(engine_config).is_ok());
 
         // ルール更新が処理される時間を与える
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -847,5 +1051,151 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         // パニックせずに動作することを確認
+    }
+
+    // --- レートリミッター テスト ---
+
+    fn make_bucket_config(
+        max_tokens: u64,
+        refill_amount: u64,
+        refill_interval_secs: u64,
+    ) -> BucketConfig {
+        BucketConfig {
+            max_tokens,
+            refill_amount,
+            refill_interval_secs,
+        }
+    }
+
+    #[test]
+    fn test_token_bucket_acquire() {
+        let cfg = make_bucket_config(3, 1, 60);
+        let mut bucket = TokenBucket::new(&cfg);
+        assert!(bucket.try_acquire());
+        assert!(bucket.try_acquire());
+        assert!(bucket.try_acquire());
+        // 3 トークン消費後は取得不可
+        assert!(!bucket.try_acquire());
+    }
+
+    #[test]
+    fn test_token_bucket_refill() {
+        let cfg = make_bucket_config(5, 10, 1); // 1秒あたり10トークン
+        let mut bucket = TokenBucket::new(&cfg);
+        // 全トークン消費
+        for _ in 0..5 {
+            assert!(bucket.try_acquire());
+        }
+        assert!(!bucket.try_acquire());
+
+        // 1秒前に最後のリフィルがあったことにする
+        bucket = bucket.with_last_refill(Instant::now() - Duration::from_secs(1));
+        // リフィルされて取得可能に
+        assert!(bucket.try_acquire());
+    }
+
+    #[test]
+    fn test_token_bucket_max_clamp() {
+        let cfg = make_bucket_config(3, 100, 1); // 1秒あたり100トークン補充
+        let mut bucket = TokenBucket::new(&cfg);
+        // 1トークン消費
+        assert!(bucket.try_acquire());
+        // 10秒前にリフィルしたことに（大量補充）
+        bucket = bucket.with_last_refill(Instant::now() - Duration::from_secs(10));
+        bucket.refill();
+        // max_tokens (3) を超えないことを確認
+        assert!(bucket.available_tokens <= 3.0);
+    }
+
+    #[test]
+    fn test_rate_limiter_no_config() {
+        let mut limiter = RateLimiter::new(&None);
+        // 設定なしなら常に許可
+        assert!(limiter.try_acquire(&ActionKind::Command));
+        assert!(limiter.try_acquire(&ActionKind::Webhook));
+    }
+
+    #[test]
+    fn test_rate_limiter_command_only() {
+        let cfg = Some(RateLimitConfig {
+            command: Some(make_bucket_config(2, 1, 60)),
+            webhook: None,
+        });
+        let mut limiter = RateLimiter::new(&cfg);
+        // command は 2 回まで
+        assert!(limiter.try_acquire(&ActionKind::Command));
+        assert!(limiter.try_acquire(&ActionKind::Command));
+        assert!(!limiter.try_acquire(&ActionKind::Command));
+        // webhook は設定なしなので常に許可
+        assert!(limiter.try_acquire(&ActionKind::Webhook));
+    }
+
+    #[test]
+    fn test_rate_limiter_webhook_only() {
+        let cfg = Some(RateLimitConfig {
+            command: None,
+            webhook: Some(make_bucket_config(1, 1, 60)),
+        });
+        let mut limiter = RateLimiter::new(&cfg);
+        assert!(limiter.try_acquire(&ActionKind::Webhook));
+        assert!(!limiter.try_acquire(&ActionKind::Webhook));
+        // command は設定なしなので常に許可
+        assert!(limiter.try_acquire(&ActionKind::Command));
+    }
+
+    #[test]
+    fn test_rate_limiter_update_config() {
+        let cfg = Some(RateLimitConfig {
+            command: Some(make_bucket_config(1, 1, 60)),
+            webhook: None,
+        });
+        let mut limiter = RateLimiter::new(&cfg);
+        assert!(limiter.try_acquire(&ActionKind::Command));
+        assert!(!limiter.try_acquire(&ActionKind::Command));
+
+        // 設定更新: command のバケット容量を増加
+        let new_cfg = Some(RateLimitConfig {
+            command: Some(make_bucket_config(10, 1, 60)),
+            webhook: Some(make_bucket_config(5, 1, 60)),
+        });
+        limiter.update_config(&new_cfg);
+        // command のトークンは既存値を保持（0 のまま、max が増えただけ）
+        assert!(!limiter.try_acquire(&ActionKind::Command));
+        // webhook は新規追加で 5 トークン
+        assert!(limiter.try_acquire(&ActionKind::Webhook));
+    }
+
+    #[test]
+    fn test_rate_limiter_update_to_none() {
+        let cfg = Some(RateLimitConfig {
+            command: Some(make_bucket_config(1, 1, 60)),
+            webhook: Some(make_bucket_config(1, 1, 60)),
+        });
+        let mut limiter = RateLimiter::new(&cfg);
+        // 消費してリミット到達
+        assert!(limiter.try_acquire(&ActionKind::Command));
+        assert!(!limiter.try_acquire(&ActionKind::Command));
+
+        // 設定を None に更新 → リミットなし
+        limiter.update_config(&None);
+        assert!(limiter.try_acquire(&ActionKind::Command));
+        assert!(limiter.try_acquire(&ActionKind::Webhook));
+    }
+
+    #[test]
+    fn test_parse_config() {
+        let config = ActionConfig {
+            enabled: true,
+            rules: vec![make_rule_config("log_all", "log", None)],
+            rate_limit: Some(RateLimitConfig {
+                command: Some(make_bucket_config(5, 1, 60)),
+                webhook: None,
+            }),
+        };
+        let engine_config = ActionEngine::parse_config(&config).unwrap();
+        assert_eq!(engine_config.rules.len(), 1);
+        assert!(engine_config.rate_limit.is_some());
+        assert!(engine_config.rate_limit.as_ref().unwrap().command.is_some());
+        assert!(engine_config.rate_limit.as_ref().unwrap().webhook.is_none());
     }
 }
