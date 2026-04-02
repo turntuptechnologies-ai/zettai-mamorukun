@@ -1208,6 +1208,291 @@ impl Default for GeneralConfig {
 }
 
 impl AppConfig {
+    /// 設定ファイルの値を検証する。エラーがあればすべて収集して返す。
+    pub fn validate(&self) -> Result<(), AppError> {
+        let mut errors = Vec::new();
+
+        // general.log_level の検証
+        let valid_log_levels = ["trace", "debug", "info", "warn", "error"];
+        if !valid_log_levels.contains(&self.general.log_level.as_str()) {
+            errors.push(format!(
+                "general.log_level: 無効な値 '{}' (有効値: {})",
+                self.general.log_level,
+                valid_log_levels.join(", ")
+            ));
+        }
+
+        // health 設定の検証
+        if self.health.heartbeat_interval_secs == 0 {
+            errors.push(
+                "health.heartbeat_interval_secs: 0 より大きい値を指定してください".to_string(),
+            );
+        }
+
+        // event_bus 設定の検証
+        if self.event_bus.channel_capacity == 0 {
+            errors.push("event_bus.channel_capacity: 0 より大きい値を指定してください".to_string());
+        }
+
+        // metrics 設定の検証
+        if self.metrics.enabled && self.metrics.interval_secs == 0 {
+            errors.push("metrics.interval_secs: 0 より大きい値を指定してください".to_string());
+        }
+
+        // 各モジュールの interval 検証
+        Self::validate_interval(
+            self.modules.file_integrity.scan_interval_secs,
+            "modules.file_integrity.scan_interval_secs",
+            &mut errors,
+        );
+        Self::validate_interval(
+            self.modules.process_monitor.scan_interval_secs,
+            "modules.process_monitor.scan_interval_secs",
+            &mut errors,
+        );
+        Self::validate_interval(
+            self.modules.kernel_module.scan_interval_secs,
+            "modules.kernel_module.scan_interval_secs",
+            &mut errors,
+        );
+        Self::validate_interval(
+            self.modules.at_job_monitor.scan_interval_secs,
+            "modules.at_job_monitor.scan_interval_secs",
+            &mut errors,
+        );
+        Self::validate_interval(
+            self.modules.cron_monitor.scan_interval_secs,
+            "modules.cron_monitor.scan_interval_secs",
+            &mut errors,
+        );
+        Self::validate_interval(
+            self.modules.user_account.scan_interval_secs,
+            "modules.user_account.scan_interval_secs",
+            &mut errors,
+        );
+        Self::validate_interval(
+            self.modules.log_tamper.scan_interval_secs,
+            "modules.log_tamper.scan_interval_secs",
+            &mut errors,
+        );
+        Self::validate_interval(
+            self.modules.systemd_service.scan_interval_secs,
+            "modules.systemd_service.scan_interval_secs",
+            &mut errors,
+        );
+        Self::validate_interval(
+            self.modules.firewall_monitor.scan_interval_secs,
+            "modules.firewall_monitor.scan_interval_secs",
+            &mut errors,
+        );
+        Self::validate_interval(
+            self.modules.dns_monitor.scan_interval_secs,
+            "modules.dns_monitor.scan_interval_secs",
+            &mut errors,
+        );
+        Self::validate_interval(
+            self.modules.ssh_key_monitor.scan_interval_secs,
+            "modules.ssh_key_monitor.scan_interval_secs",
+            &mut errors,
+        );
+        Self::validate_interval(
+            self.modules.mount_monitor.scan_interval_secs,
+            "modules.mount_monitor.scan_interval_secs",
+            &mut errors,
+        );
+        Self::validate_interval(
+            self.modules.shell_config_monitor.scan_interval_secs,
+            "modules.shell_config_monitor.scan_interval_secs",
+            &mut errors,
+        );
+        Self::validate_interval(
+            self.modules.tmp_exec_monitor.scan_interval_secs,
+            "modules.tmp_exec_monitor.scan_interval_secs",
+            &mut errors,
+        );
+        Self::validate_interval(
+            self.modules.sudoers_monitor.scan_interval_secs,
+            "modules.sudoers_monitor.scan_interval_secs",
+            &mut errors,
+        );
+        Self::validate_interval(
+            self.modules.pam_monitor.scan_interval_secs,
+            "modules.pam_monitor.scan_interval_secs",
+            &mut errors,
+        );
+        Self::validate_interval(
+            self.modules.security_files_monitor.scan_interval_secs,
+            "modules.security_files_monitor.scan_interval_secs",
+            &mut errors,
+        );
+        Self::validate_interval(
+            self.modules.suid_sgid_monitor.scan_interval_secs,
+            "modules.suid_sgid_monitor.scan_interval_secs",
+            &mut errors,
+        );
+        Self::validate_interval(
+            self.modules.ssh_brute_force.interval_secs,
+            "modules.ssh_brute_force.interval_secs",
+            &mut errors,
+        );
+        Self::validate_interval(
+            self.modules.network_monitor.interval_secs,
+            "modules.network_monitor.interval_secs",
+            &mut errors,
+        );
+        Self::validate_interval(
+            self.modules.pkg_repo_monitor.scan_interval_secs,
+            "modules.pkg_repo_monitor.scan_interval_secs",
+            &mut errors,
+        );
+        Self::validate_interval(
+            self.modules.ld_preload_monitor.scan_interval_secs,
+            "modules.ld_preload_monitor.scan_interval_secs",
+            &mut errors,
+        );
+
+        // network_monitor 固有の検証
+        if self.modules.network_monitor.max_connections == 0 {
+            errors.push(
+                "modules.network_monitor.max_connections: 0 より大きい値を指定してください"
+                    .to_string(),
+            );
+        }
+
+        // ssh_brute_force 固有の検証
+        if self.modules.ssh_brute_force.max_failures == 0 {
+            errors.push(
+                "modules.ssh_brute_force.max_failures: 0 より大きい値を指定してください"
+                    .to_string(),
+            );
+        }
+        if self.modules.ssh_brute_force.time_window_secs == 0 {
+            errors.push(
+                "modules.ssh_brute_force.time_window_secs: 0 より大きい値を指定してください"
+                    .to_string(),
+            );
+        }
+
+        // actions.rules の検証
+        let valid_actions = ["log", "command", "webhook"];
+        let valid_severities = ["Critical", "High", "Warning", "Info"];
+        for (i, rule) in self.actions.rules.iter().enumerate() {
+            let prefix = format!("actions.rules[{}] ({})", i, rule.name);
+
+            if !valid_actions.contains(&rule.action.as_str()) {
+                errors.push(format!(
+                    "{}: 無効なアクション種別 '{}' (有効値: {})",
+                    prefix,
+                    rule.action,
+                    valid_actions.join(", ")
+                ));
+            }
+
+            if let Some(ref severity) = rule.severity
+                && !valid_severities.contains(&severity.as_str())
+            {
+                errors.push(format!(
+                    "{}: 無効な severity '{}' (有効値: {})",
+                    prefix,
+                    severity,
+                    valid_severities.join(", ")
+                ));
+            }
+
+            if rule.action == "command" && rule.command.is_none() {
+                errors.push(format!(
+                    "{}: action が 'command' の場合、command フィールドは必須です",
+                    prefix
+                ));
+            }
+
+            if rule.action == "webhook" && rule.url.is_none() {
+                errors.push(format!(
+                    "{}: action が 'webhook' の場合、url フィールドは必須です",
+                    prefix
+                ));
+            }
+        }
+
+        // rate_limit の検証
+        if let Some(ref rate_limit) = self.actions.rate_limit {
+            if let Some(ref cmd) = rate_limit.command {
+                Self::validate_bucket_config(cmd, "actions.rate_limit.command", &mut errors);
+            }
+            if let Some(ref wh) = rate_limit.webhook {
+                Self::validate_bucket_config(wh, "actions.rate_limit.webhook", &mut errors);
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            let count = errors.len();
+            Err(AppError::ConfigValidation { count, errors })
+        }
+    }
+
+    /// interval 値が 0 でないことを検証するヘルパー
+    fn validate_interval(value: u64, field_name: &str, errors: &mut Vec<String>) {
+        if value == 0 {
+            errors.push(format!("{}: 0 より大きい値を指定してください", field_name));
+        }
+    }
+
+    /// トークンバケット設定の値を検証するヘルパー
+    fn validate_bucket_config(config: &BucketConfig, prefix: &str, errors: &mut Vec<String>) {
+        if config.max_tokens == 0 {
+            errors.push(format!(
+                "{}.max_tokens: 0 より大きい値を指定してください",
+                prefix
+            ));
+        }
+        if config.refill_amount == 0 {
+            errors.push(format!(
+                "{}.refill_amount: 0 より大きい値を指定してください",
+                prefix
+            ));
+        }
+        if config.refill_interval_secs == 0 {
+            errors.push(format!(
+                "{}.refill_interval_secs: 0 より大きい値を指定してください",
+                prefix
+            ));
+        }
+    }
+
+    /// 有効なモジュール数をカウントする
+    pub fn count_enabled_modules(&self) -> usize {
+        let m = &self.modules;
+        [
+            m.file_integrity.enabled,
+            m.process_monitor.enabled,
+            m.kernel_module.enabled,
+            m.at_job_monitor.enabled,
+            m.cron_monitor.enabled,
+            m.user_account.enabled,
+            m.log_tamper.enabled,
+            m.systemd_service.enabled,
+            m.firewall_monitor.enabled,
+            m.dns_monitor.enabled,
+            m.ssh_key_monitor.enabled,
+            m.mount_monitor.enabled,
+            m.shell_config_monitor.enabled,
+            m.tmp_exec_monitor.enabled,
+            m.sudoers_monitor.enabled,
+            m.pam_monitor.enabled,
+            m.security_files_monitor.enabled,
+            m.suid_sgid_monitor.enabled,
+            m.ssh_brute_force.enabled,
+            m.pkg_repo_monitor.enabled,
+            m.ld_preload_monitor.enabled,
+            m.network_monitor.enabled,
+        ]
+        .iter()
+        .filter(|&&e| e)
+        .count()
+    }
+
     /// 設定ファイルを読み込む。ファイルが存在しない場合はデフォルト設定を返す。
     pub fn load(path: &Path) -> Result<Self, AppError> {
         if !path.exists() {
@@ -1676,5 +1961,299 @@ max_connections = 500
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
         assert!(err_msg.contains("設定ファイルのパースに失敗"));
+    }
+
+    #[test]
+    fn test_validate_default_config_is_valid() {
+        let config = AppConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_invalid_log_level() {
+        let mut config = AppConfig::default();
+        config.general.log_level = "verbose".to_string();
+        let result = config.validate();
+        assert!(result.is_err());
+        if let Err(AppError::ConfigValidation { errors, .. }) = result {
+            assert_eq!(errors.len(), 1);
+            assert!(errors[0].contains("general.log_level"));
+            assert!(errors[0].contains("verbose"));
+        }
+    }
+
+    #[test]
+    fn test_validate_zero_heartbeat_interval() {
+        let mut config = AppConfig::default();
+        config.health.heartbeat_interval_secs = 0;
+        let result = config.validate();
+        assert!(result.is_err());
+        if let Err(AppError::ConfigValidation { errors, .. }) = result {
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains("health.heartbeat_interval_secs"))
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_zero_channel_capacity() {
+        let mut config = AppConfig::default();
+        config.event_bus.channel_capacity = 0;
+        let result = config.validate();
+        assert!(result.is_err());
+        if let Err(AppError::ConfigValidation { errors, .. }) = result {
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains("event_bus.channel_capacity"))
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_zero_module_interval() {
+        let mut config = AppConfig::default();
+        config.modules.file_integrity.scan_interval_secs = 0;
+        let result = config.validate();
+        assert!(result.is_err());
+        if let Err(AppError::ConfigValidation { errors, .. }) = result {
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains("modules.file_integrity.scan_interval_secs"))
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_invalid_action_type() {
+        let mut config = AppConfig::default();
+        config.actions.rules.push(ActionRuleConfig {
+            name: "test_rule".to_string(),
+            severity: None,
+            module: None,
+            action: "invalid".to_string(),
+            command: None,
+            timeout_secs: 30,
+            url: None,
+            method: None,
+            headers: None,
+            body_template: None,
+            max_retries: None,
+        });
+        let result = config.validate();
+        assert!(result.is_err());
+        if let Err(AppError::ConfigValidation { errors, .. }) = result {
+            assert!(errors.iter().any(|e| e.contains("無効なアクション種別")));
+        }
+    }
+
+    #[test]
+    fn test_validate_invalid_severity() {
+        let mut config = AppConfig::default();
+        config.actions.rules.push(ActionRuleConfig {
+            name: "test_rule".to_string(),
+            severity: Some("Unknown".to_string()),
+            module: None,
+            action: "log".to_string(),
+            command: None,
+            timeout_secs: 30,
+            url: None,
+            method: None,
+            headers: None,
+            body_template: None,
+            max_retries: None,
+        });
+        let result = config.validate();
+        assert!(result.is_err());
+        if let Err(AppError::ConfigValidation { errors, .. }) = result {
+            assert!(errors.iter().any(|e| e.contains("無効な severity")));
+        }
+    }
+
+    #[test]
+    fn test_validate_command_action_without_command() {
+        let mut config = AppConfig::default();
+        config.actions.rules.push(ActionRuleConfig {
+            name: "test_rule".to_string(),
+            severity: None,
+            module: None,
+            action: "command".to_string(),
+            command: None,
+            timeout_secs: 30,
+            url: None,
+            method: None,
+            headers: None,
+            body_template: None,
+            max_retries: None,
+        });
+        let result = config.validate();
+        assert!(result.is_err());
+        if let Err(AppError::ConfigValidation { errors, .. }) = result {
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains("command フィールドは必須"))
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_webhook_action_without_url() {
+        let mut config = AppConfig::default();
+        config.actions.rules.push(ActionRuleConfig {
+            name: "test_rule".to_string(),
+            severity: None,
+            module: None,
+            action: "webhook".to_string(),
+            command: None,
+            timeout_secs: 30,
+            url: None,
+            method: None,
+            headers: None,
+            body_template: None,
+            max_retries: None,
+        });
+        let result = config.validate();
+        assert!(result.is_err());
+        if let Err(AppError::ConfigValidation { errors, .. }) = result {
+            assert!(errors.iter().any(|e| e.contains("url フィールドは必須")));
+        }
+    }
+
+    #[test]
+    fn test_validate_valid_action_rules() {
+        let mut config = AppConfig::default();
+        config.actions.rules.push(ActionRuleConfig {
+            name: "log_rule".to_string(),
+            severity: Some("Critical".to_string()),
+            module: None,
+            action: "log".to_string(),
+            command: None,
+            timeout_secs: 30,
+            url: None,
+            method: None,
+            headers: None,
+            body_template: None,
+            max_retries: None,
+        });
+        config.actions.rules.push(ActionRuleConfig {
+            name: "cmd_rule".to_string(),
+            severity: Some("Warning".to_string()),
+            module: None,
+            action: "command".to_string(),
+            command: Some("/bin/echo test".to_string()),
+            timeout_secs: 30,
+            url: None,
+            method: None,
+            headers: None,
+            body_template: None,
+            max_retries: None,
+        });
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_rate_limit_zero_values() {
+        let mut config = AppConfig::default();
+        config.actions.rate_limit = Some(RateLimitConfig {
+            command: Some(BucketConfig {
+                max_tokens: 0,
+                refill_amount: 5,
+                refill_interval_secs: 60,
+            }),
+            webhook: None,
+        });
+        let result = config.validate();
+        assert!(result.is_err());
+        if let Err(AppError::ConfigValidation { errors, .. }) = result {
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains("actions.rate_limit.command.max_tokens"))
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_multiple_errors() {
+        let mut config = AppConfig::default();
+        config.general.log_level = "invalid".to_string();
+        config.health.heartbeat_interval_secs = 0;
+        config.event_bus.channel_capacity = 0;
+        let result = config.validate();
+        assert!(result.is_err());
+        if let Err(AppError::ConfigValidation { count, errors }) = result {
+            assert_eq!(count, 3);
+            assert_eq!(errors.len(), 3);
+        }
+    }
+
+    #[test]
+    fn test_validate_zero_max_connections() {
+        let mut config = AppConfig::default();
+        config.modules.network_monitor.max_connections = 0;
+        let result = config.validate();
+        assert!(result.is_err());
+        if let Err(AppError::ConfigValidation { errors, .. }) = result {
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains("network_monitor.max_connections"))
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_zero_max_failures() {
+        let mut config = AppConfig::default();
+        config.modules.ssh_brute_force.max_failures = 0;
+        let result = config.validate();
+        assert!(result.is_err());
+        if let Err(AppError::ConfigValidation { errors, .. }) = result {
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains("ssh_brute_force.max_failures"))
+            );
+        }
+    }
+
+    #[test]
+    fn test_count_enabled_modules_none() {
+        let config = AppConfig::default();
+        assert_eq!(config.count_enabled_modules(), 0);
+    }
+
+    #[test]
+    fn test_count_enabled_modules_some() {
+        let mut config = AppConfig::default();
+        config.modules.file_integrity.enabled = true;
+        config.modules.dns_monitor.enabled = true;
+        config.modules.network_monitor.enabled = true;
+        assert_eq!(config.count_enabled_modules(), 3);
+    }
+
+    #[test]
+    fn test_validate_metrics_zero_interval_when_enabled() {
+        let mut config = AppConfig::default();
+        config.metrics.enabled = true;
+        config.metrics.interval_secs = 0;
+        let result = config.validate();
+        assert!(result.is_err());
+        if let Err(AppError::ConfigValidation { errors, .. }) = result {
+            assert!(errors.iter().any(|e| e.contains("metrics.interval_secs")));
+        }
+    }
+
+    #[test]
+    fn test_validate_metrics_zero_interval_when_disabled() {
+        let mut config = AppConfig::default();
+        config.metrics.enabled = false;
+        config.metrics.interval_secs = 0;
+        // メトリクスが無効なら interval_secs = 0 は許容
+        assert!(config.validate().is_ok());
     }
 }
