@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use zettai_mamorukun::config::AppConfig;
 use zettai_mamorukun::core::daemon::Daemon;
+use zettai_mamorukun::core::status;
 use zettai_mamorukun::error::AppError;
 
 /// サイバー攻撃防御デーモン
@@ -29,6 +30,12 @@ enum Commands {
         /// チェック対象の設定ファイルパス（省略時は --config の値を使用）
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
+    },
+    /// デーモンの動作状態を表示する
+    Status {
+        /// ステータスソケットのパス
+        #[arg(long, default_value = "/var/run/zettai-mamorukun/status.sock")]
+        socket_path: PathBuf,
     },
 }
 
@@ -114,6 +121,14 @@ fn run_check_config(config_path: &Path) -> Result<(), Box<dyn std::error::Error>
             "無効"
         }
     );
+    eprintln!(
+        "  ステータスサーバー: {}",
+        if config.status.enabled {
+            "有効"
+        } else {
+            "無効"
+        }
+    );
 
     Ok(())
 }
@@ -123,10 +138,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     // サブコマンド処理
-    if let Some(Commands::CheckConfig { path }) = &cli.command {
-        let config_path = path.as_ref().unwrap_or(&cli.config);
-        run_check_config(config_path)?;
-        return Ok(());
+    match &cli.command {
+        Some(Commands::CheckConfig { path }) => {
+            let config_path = path.as_ref().unwrap_or(&cli.config);
+            run_check_config(config_path)?;
+            return Ok(());
+        }
+        Some(Commands::Status { socket_path }) => {
+            match status::query_status(socket_path).await {
+                Ok(response) => {
+                    status::print_status(&response);
+                }
+                Err(e) => {
+                    eprintln!("エラー: {}", e);
+                    process::exit(1);
+                }
+            }
+            return Ok(());
+        }
+        None => {}
     }
 
     // デーモンモード

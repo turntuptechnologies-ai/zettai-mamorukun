@@ -2,13 +2,16 @@ use crate::config::AppConfig;
 use crate::core::action::{ActionEngine, ActionEngineConfig, InFlightTracker};
 use crate::core::event::{self, EventBus, SecurityEvent, Severity};
 use crate::core::health::HealthChecker;
-use crate::core::metrics::MetricsCollector;
+use crate::core::metrics::{MetricsCollector, SharedMetrics};
 use crate::core::module_manager::ModuleManager;
+use crate::core::status::{DaemonState, StatusServer};
 use crate::error::AppError;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 /// デーモンプロセスを管理する
 pub struct Daemon {
@@ -36,6 +39,11 @@ impl Daemon {
         let mut heartbeat = tokio::time::interval(heartbeat_interval);
         // 最初の tick は即座に発火するのでスキップ
         heartbeat.tick().await;
+
+        // ステータスサーバー用の共有状態
+        let shared_module_names: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+        let mut shared_metrics: Option<Arc<StdMutex<SharedMetrics>>> = None;
+        let mut status_cancel_token: Option<CancellationToken> = None;
 
         // イベントバスの初期化
         let mut action_config_sender: Option<watch::Sender<ActionEngineConfig>> = None;
@@ -65,8 +73,10 @@ impl Daemon {
 
             // メトリクスコレクターの起動
             if self.config.metrics.enabled {
-                let (collector, sender) = MetricsCollector::new(&self.config.metrics, &bus);
+                let (collector, sender, metrics) =
+                    MetricsCollector::new(&self.config.metrics, &bus);
                 metrics_config_sender = Some(sender);
+                shared_metrics = Some(metrics);
                 collector.spawn();
                 tracing::info!(
                     interval_secs = self.config.metrics.interval_secs,
@@ -90,6 +100,26 @@ impl Daemon {
         // モジュールマネージャーでモジュールを一括起動
         let mut module_manager =
             ModuleManager::start_modules(&self.config.modules, &event_bus).await;
+
+        // モジュール名を共有状態に反映
+        {
+            // unwrap safety: Mutex が poisoned になるのはパニック時のみ
+            let mut names = shared_module_names.lock().unwrap();
+            *names = module_manager.running_module_names();
+        }
+
+        // ステータスサーバーの起動
+        if self.config.status.enabled {
+            let state = DaemonState::new(Arc::clone(&shared_module_names), shared_metrics.clone());
+            let server = StatusServer::new(&self.config.status.socket_path, state);
+            status_cancel_token = Some(server.cancel_token());
+            match server.spawn() {
+                Ok(()) => {}
+                Err(e) => {
+                    tracing::error!(error = %e, "ステータスサーバーの起動に失敗しました");
+                }
+            }
+        }
 
         tracing::info!("デーモンを起動しました");
 
@@ -137,6 +167,13 @@ impl Daemon {
                                     format!("設定ファイルをリロードしました ({})", summary),
                                 );
                                 bus.publish(event);
+                            }
+
+                            // モジュール名を共有状態に反映
+                            {
+                                // unwrap safety: Mutex が poisoned になるのはパニック時のみ
+                                let mut names = shared_module_names.lock().unwrap();
+                                *names = module_manager.running_module_names();
                             }
 
                             // デバウンス間隔の更新
@@ -222,6 +259,11 @@ impl Daemon {
                     }
                 }
             }
+        }
+
+        // ステータスサーバーの停止
+        if let Some(token) = status_cancel_token {
+            token.cancel();
         }
 
         // インフライトトラッカーのシャットダウン開始

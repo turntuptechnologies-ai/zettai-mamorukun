@@ -261,6 +261,13 @@ enabled = false
 # refill_amount = 10        # 補充トークン数
 # refill_interval_secs = 60 # 補充間隔（秒）
 
+[status]
+# ステータスサーバー（Unix ソケット）の有効/無効
+# 有効にすると `zettai-mamorukun status` コマンドでデーモンの状態を確認できる
+enabled = false
+# Unix ソケットのパス
+socket_path = "/var/run/zettai-mamorukun/status.sock"
+
 [health]
 # ハートビート（定期的なヘルスチェックログ出力）の有効/無効
 enabled = true

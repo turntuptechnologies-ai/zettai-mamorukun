@@ -371,6 +371,14 @@ impl ModuleManager {
         }
     }
 
+    /// 実行中モジュール名のリストを取得する
+    pub fn running_module_names(&self) -> Vec<String> {
+        self.running_modules
+            .iter()
+            .map(|m| m.name.clone())
+            .collect()
+    }
+
     /// 全モジュールを停止する
     pub fn stop_all(&mut self) {
         for module in &self.running_modules {
@@ -667,6 +675,25 @@ impl ModuleManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_running_module_names_empty() {
+        let config = ModulesConfig::default();
+        let event_bus = None;
+        let manager = ModuleManager::start_modules(&config, &event_bus).await;
+        assert!(manager.running_module_names().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_running_module_names_with_enabled() {
+        let mut config = ModulesConfig::default();
+        config.dns_monitor.enabled = true;
+        let event_bus = None;
+        let manager = ModuleManager::start_modules(&config, &event_bus).await;
+        let names = manager.running_module_names();
+        assert_eq!(names.len(), 1);
+        assert!(names.contains(&"DNS設定改ざん検知モジュール".to_string()));
+    }
 
     #[tokio::test]
     async fn test_start_modules_with_all_disabled() {
