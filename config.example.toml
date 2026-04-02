@@ -243,6 +243,18 @@ enabled = false
 # Content-Type = "application/json"
 # body_template = '{"text": "[{{severity}}] {{source}}: {{message}}"}'
 
+# レートリミット設定（トークンバケットアルゴリズム）
+# 未設定の場合はレートリミットなし
+# [actions.rate_limit.command]
+# max_tokens = 10           # バケット容量（バースト許容数）
+# refill_amount = 5         # 補充トークン数
+# refill_interval_secs = 60 # 補充間隔（秒）
+
+# [actions.rate_limit.webhook]
+# max_tokens = 20           # バケット容量（バースト許容数）
+# refill_amount = 10        # 補充トークン数
+# refill_interval_secs = 60 # 補充間隔（秒）
+
 [health]
 # ハートビート（定期的なヘルスチェックログ出力）の有効/無効
 enabled = true
