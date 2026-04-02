@@ -22,7 +22,7 @@
 use crate::config::LogTamperConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
-use crate::modules::Module;
+use crate::modules::{InitialScanResult, Module};
 use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
@@ -348,6 +348,20 @@ impl Module for LogTamperModule {
         Ok(())
     }
 
+    async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {
+        let start = std::time::Instant::now();
+        let files = Self::scan_files(&self.config.watch_paths);
+        let items_scanned = files.len();
+        let duration = start.elapsed();
+
+        Ok(InitialScanResult {
+            items_scanned,
+            issues_found: 0,
+            duration,
+            summary: format!("ログファイル {}件をスキャンしました", items_scanned),
+        })
+    }
+
     async fn stop(&mut self) -> Result<(), AppError> {
         self.cancel_token.cancel();
         Ok(())
@@ -649,5 +663,41 @@ mod tests {
         // Check that permissions include the mode bits we set
         assert_eq!(state.permissions & 0o777, 0o640);
         assert!(state.inode > 0);
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_with_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let file1 = dir.path().join("test1.log");
+        let file2 = dir.path().join("test2.log");
+        std::fs::write(&file1, "log content 1").unwrap();
+        std::fs::write(&file2, "log content 2").unwrap();
+
+        let config = LogTamperConfig {
+            enabled: true,
+            scan_interval_secs: 30,
+            watch_paths: vec![file1, file2],
+        };
+        let mut module = LogTamperModule::new(config, None);
+        module.init().unwrap();
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 2);
+        assert_eq!(result.issues_found, 0);
+        assert!(result.summary.contains("2件"));
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_empty() {
+        let config = LogTamperConfig {
+            enabled: true,
+            scan_interval_secs: 30,
+            watch_paths: vec![],
+        };
+        let module = LogTamperModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 0);
+        assert_eq!(result.issues_found, 0);
     }
 }

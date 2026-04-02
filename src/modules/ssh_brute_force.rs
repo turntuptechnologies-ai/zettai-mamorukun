@@ -7,7 +7,7 @@
 use crate::config::SshBruteForceConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
-use crate::modules::Module;
+use crate::modules::{InitialScanResult, Module};
 use regex::Regex;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -233,6 +233,42 @@ impl Module for SshBruteForceModule {
         self.cancel_token.cancel();
         Ok(())
     }
+
+    async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {
+        let start = std::time::Instant::now();
+        let path = &self.config.auth_log_path;
+
+        let (items_scanned, summary) = if path.is_file() {
+            match std::fs::metadata(path) {
+                Ok(metadata) => (
+                    1,
+                    format!(
+                        "認証ログファイルを確認しました（{}、サイズ: {} bytes）",
+                        path.display(),
+                        metadata.len()
+                    ),
+                ),
+                Err(_) => (
+                    0,
+                    format!("認証ログファイルが存在しません（{}）", path.display()),
+                ),
+            }
+        } else {
+            (
+                0,
+                format!("認証ログファイルが存在しません（{}）", path.display()),
+            )
+        };
+
+        let duration = start.elapsed();
+
+        Ok(InitialScanResult {
+            items_scanned,
+            issues_found: 0,
+            duration,
+            summary,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -377,5 +413,44 @@ mod tests {
     fn test_module_name() {
         let module = SshBruteForceModule::new(test_config(), None);
         assert_eq!(module.name(), "ssh_brute_force");
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_with_existing_file() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let log_path = tmpdir.path().join("auth.log");
+        std::fs::write(&log_path, "Mar 31 10:00:00 server sshd[1234]: log entry\n").unwrap();
+
+        let config = SshBruteForceConfig {
+            enabled: true,
+            interval_secs: 30,
+            auth_log_path: log_path,
+            max_failures: 5,
+            time_window_secs: 300,
+        };
+        let module = SshBruteForceModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 1);
+        assert_eq!(result.issues_found, 0);
+        assert!(result.summary.contains("認証ログファイルを確認しました"));
+        assert!(result.summary.contains("bytes"));
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_nonexistent_file() {
+        let config = SshBruteForceConfig {
+            enabled: true,
+            interval_secs: 30,
+            auth_log_path: PathBuf::from("/nonexistent/auth.log"),
+            max_failures: 5,
+            time_window_secs: 300,
+        };
+        let module = SshBruteForceModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 0);
+        assert_eq!(result.issues_found, 0);
+        assert!(result.summary.contains("認証ログファイルが存在しません"));
     }
 }

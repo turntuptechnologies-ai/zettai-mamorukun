@@ -10,7 +10,7 @@
 use crate::config::ShellConfigMonitorConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
-use crate::modules::Module;
+use crate::modules::{InitialScanResult, Module};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -306,6 +306,20 @@ impl Module for ShellConfigMonitorModule {
         Ok(())
     }
 
+    async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {
+        let start = std::time::Instant::now();
+        let snapshot = Self::scan_files(&self.config.watch_paths);
+        let items_scanned = snapshot.files.len();
+        let duration = start.elapsed();
+
+        Ok(InitialScanResult {
+            items_scanned,
+            issues_found: 0,
+            duration,
+            summary: format!("シェル設定ファイル {}件をスキャンしました", items_scanned),
+        })
+    }
+
     async fn stop(&mut self) -> Result<(), AppError> {
         self.cancel_token.cancel();
         Ok(())
@@ -551,5 +565,40 @@ mod tests {
 
         module.stop().await.unwrap();
         assert!(cancel_token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_with_files() {
+        let mut tmpfile1 = tempfile::NamedTempFile::new().unwrap();
+        let mut tmpfile2 = tempfile::NamedTempFile::new().unwrap();
+        write!(tmpfile1, "export PATH=/usr/local/bin:$PATH\n").unwrap();
+        write!(tmpfile2, "export EDITOR=vim\n").unwrap();
+
+        let config = ShellConfigMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 120,
+            watch_paths: vec![tmpfile1.path().to_path_buf(), tmpfile2.path().to_path_buf()],
+        };
+        let mut module = ShellConfigMonitorModule::new(config, None);
+        module.init().unwrap();
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 2);
+        assert_eq!(result.issues_found, 0);
+        assert!(result.summary.contains("2件"));
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_empty() {
+        let config = ShellConfigMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 120,
+            watch_paths: vec![],
+        };
+        let module = ShellConfigMonitorModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 0);
+        assert_eq!(result.issues_found, 0);
     }
 }

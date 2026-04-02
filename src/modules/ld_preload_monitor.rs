@@ -11,7 +11,7 @@
 use crate::config::LdPreloadMonitorConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
-use crate::modules::Module;
+use crate::modules::{InitialScanResult, Module};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -357,6 +357,59 @@ impl Module for LdPreloadMonitorModule {
         self.cancel_token.cancel();
         Ok(())
     }
+
+    async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {
+        let start = std::time::Instant::now();
+
+        let snapshot = Self::scan_files(&self.config.watch_paths);
+        let items_scanned = snapshot.files.len();
+        let mut issues_found = 0;
+
+        // /etc/ld.so.preload の存在チェック
+        for path in &self.config.watch_paths {
+            if path.ends_with("ld.so.preload") && path.is_file() {
+                issues_found += 1;
+            }
+        }
+
+        // /etc/environment 内の危険な環境変数チェック
+        for path in &self.config.watch_paths {
+            let filename = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if filename != "environment" || !path.is_file() {
+                continue;
+            }
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                for var in DANGEROUS_ENV_VARS {
+                    if trimmed.starts_with(var) && trimmed[var.len()..].starts_with('=') {
+                        issues_found += 1;
+                    }
+                }
+            }
+        }
+
+        let duration = start.elapsed();
+
+        Ok(InitialScanResult {
+            items_scanned,
+            issues_found,
+            duration,
+            summary: format!(
+                "動的リンカ設定ファイル {}件をスキャンしました（問題: {}件）",
+                items_scanned, issues_found
+            ),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -618,5 +671,78 @@ mod tests {
         // LD_PRELOAD_EXTRA は LD_PRELOAD= で始まらないため検知しない
         std::fs::write(&env_path, "LD_PRELOAD_EXTRA=foo\n").unwrap();
         LdPreloadMonitorModule::check_dangerous_env_vars(&[env_path], &None);
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_no_issues() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let conf_path = tmpdir.path().join("ld.so.conf");
+        std::fs::write(&conf_path, "/usr/lib\n").unwrap();
+
+        let config = LdPreloadMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            watch_paths: vec![conf_path],
+        };
+        let module = LdPreloadMonitorModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 1);
+        assert_eq!(result.issues_found, 0);
+        assert!(result.summary.contains("1件"));
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_detects_ld_so_preload() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let preload_path = tmpdir.path().join("ld.so.preload");
+        std::fs::write(&preload_path, "/tmp/evil.so\n").unwrap();
+
+        let config = LdPreloadMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            watch_paths: vec![preload_path],
+        };
+        let module = LdPreloadMonitorModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 1);
+        assert_eq!(result.issues_found, 1);
+        assert!(result.summary.contains("問題: 1件"));
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_detects_dangerous_env() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let env_path = tmpdir.path().join("environment");
+        std::fs::write(
+            &env_path,
+            "PATH=/usr/bin\nLD_PRELOAD=/tmp/evil.so\nLD_LIBRARY_PATH=/tmp\n",
+        )
+        .unwrap();
+
+        let config = LdPreloadMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            watch_paths: vec![env_path],
+        };
+        let module = LdPreloadMonitorModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.issues_found, 2);
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_empty_paths() {
+        let config = LdPreloadMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            watch_paths: vec![],
+        };
+        let module = LdPreloadMonitorModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 0);
+        assert_eq!(result.issues_found, 0);
     }
 }

@@ -10,7 +10,7 @@
 use crate::config::ProcessMonitorConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
-use crate::modules::Module;
+use crate::modules::{InitialScanResult, Module};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
@@ -273,6 +273,28 @@ impl Module for ProcessMonitorModule {
         self.cancel_token.cancel();
         Ok(())
     }
+
+    async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {
+        let start = std::time::Instant::now();
+
+        let processes = Self::scan_processes();
+        let items_scanned = processes.len();
+
+        let anomalies = Self::check_anomalies(&processes, &self.config.suspicious_paths);
+        let issues_found = anomalies.len();
+
+        let duration = start.elapsed();
+
+        Ok(InitialScanResult {
+            items_scanned,
+            issues_found,
+            duration,
+            summary: format!(
+                "プロセス {}件をスキャンしました（不審なプロセス: {}件）",
+                items_scanned, issues_found
+            ),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -484,5 +506,20 @@ mod tests {
         let bus = EventBus::new(16);
         let mut module = ProcessMonitorModule::new(config, Some(bus));
         assert!(module.init().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_returns_processes() {
+        let config = ProcessMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            suspicious_paths: vec![PathBuf::from("/tmp"), PathBuf::from("/dev/shm")],
+        };
+        let module = ProcessMonitorModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert!(result.items_scanned > 0);
+        assert!(result.summary.contains("プロセス"));
+        assert!(result.summary.contains("不審なプロセス"));
     }
 }

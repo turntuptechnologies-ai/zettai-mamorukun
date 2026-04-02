@@ -9,7 +9,7 @@
 use crate::config::SshKeyMonitorConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
-use crate::modules::Module;
+use crate::modules::{InitialScanResult, Module};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -317,6 +317,22 @@ impl Module for SshKeyMonitorModule {
         self.cancel_token.cancel();
         Ok(())
     }
+
+    async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {
+        let start = std::time::Instant::now();
+
+        let snapshot = Self::scan_files(&self.config.watch_paths);
+        let items_scanned = snapshot.files.len();
+
+        let duration = start.elapsed();
+
+        Ok(InitialScanResult {
+            items_scanned,
+            issues_found: 0,
+            duration,
+            summary: format!("SSH 公開鍵ファイル {}件をスキャンしました", items_scanned),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -558,5 +574,56 @@ mod tests {
 
         module.stop().await.unwrap();
         assert!(cancel_token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_with_files() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let key_file = tmpdir.path().join("authorized_keys");
+        std::fs::write(
+            &key_file,
+            "ssh-rsa AAAAB3... user@host\nssh-ed25519 AAAAC3... admin@host\n",
+        )
+        .unwrap();
+
+        let config = SshKeyMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            watch_paths: vec![key_file],
+        };
+        let module = SshKeyMonitorModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 1);
+        assert_eq!(result.issues_found, 0);
+        assert!(result.summary.contains("SSH 公開鍵ファイル 1件"));
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_empty_paths() {
+        let config = SshKeyMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            watch_paths: vec![],
+        };
+        let module = SshKeyMonitorModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 0);
+        assert_eq!(result.issues_found, 0);
+    }
+
+    #[tokio::test]
+    async fn test_initial_scan_nonexistent_file() {
+        let config = SshKeyMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            watch_paths: vec![PathBuf::from("/nonexistent/authorized_keys")],
+        };
+        let module = SshKeyMonitorModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 0);
+        assert_eq!(result.issues_found, 0);
     }
 }
