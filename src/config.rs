@@ -217,6 +217,10 @@ pub struct ModulesConfig {
     /// Linux capabilities 監視モジュールの設定
     #[serde(default)]
     pub capabilities_monitor: CapabilitiesMonitorConfig,
+
+    /// コンテナ・名前空間検知モジュールの設定
+    #[serde(default)]
+    pub container_namespace: ContainerNamespaceConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -1252,6 +1256,59 @@ impl Default for CapabilitiesMonitorConfig {
             scan_interval_secs: Self::default_scan_interval_secs(),
             dangerous_caps: Self::default_dangerous_caps(),
             whitelist_processes: Self::default_whitelist_processes(),
+        }
+    }
+}
+
+/// コンテナ・名前空間検知モジュールの設定
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct ContainerNamespaceConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "ContainerNamespaceConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象の名前空間リスト
+    #[serde(default = "ContainerNamespaceConfig::default_watch_namespaces")]
+    pub watch_namespaces: Vec<String>,
+
+    /// コンテナ環境マーカーのチェックを行うか
+    #[serde(default = "ContainerNamespaceConfig::default_check_container_env")]
+    pub check_container_env: bool,
+}
+
+impl ContainerNamespaceConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_watch_namespaces() -> Vec<String> {
+        vec![
+            "mnt".to_string(),
+            "pid".to_string(),
+            "net".to_string(),
+            "ipc".to_string(),
+            "uts".to_string(),
+            "user".to_string(),
+            "cgroup".to_string(),
+        ]
+    }
+
+    fn default_check_container_env() -> bool {
+        true
+    }
+}
+
+impl Default for ContainerNamespaceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            watch_namespaces: Self::default_watch_namespaces(),
+            check_container_env: Self::default_check_container_env(),
         }
     }
 }

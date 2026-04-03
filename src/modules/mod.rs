@@ -1,5 +1,6 @@
 pub mod at_job_monitor;
 pub mod capabilities_monitor;
+pub mod container_namespace;
 pub mod cron_monitor;
 pub mod dns_monitor;
 pub mod file_integrity;
