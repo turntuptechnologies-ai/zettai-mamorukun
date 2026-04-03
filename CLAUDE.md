@@ -101,6 +101,7 @@ src/
     mount_monitor.rs   # マウントポイント監視モジュール
     network_monitor.rs # ネットワーク接続監視モジュール
     pam_monitor.rs     # PAM 設定監視モジュール
+    proc_net_monitor.rs # /proc/net/ 監視モジュール（ルーティング・ARP）
     pkg_repo_monitor.rs # パッケージリポジトリ改ざん検知モジュール
     security_files_monitor.rs # /etc/security/ 監視モジュール
     process_monitor.rs # プロセス異常検知モジュール
