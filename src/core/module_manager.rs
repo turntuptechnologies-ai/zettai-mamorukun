@@ -3,6 +3,7 @@
 use crate::config::ModulesConfig;
 use crate::core::event::EventBus;
 use crate::modules::at_job_monitor::AtJobMonitorModule;
+use crate::modules::capabilities_monitor::CapabilitiesMonitorModule;
 use crate::modules::cron_monitor::CronMonitorModule;
 use crate::modules::dns_monitor::DnsMonitorModule;
 use crate::modules::file_integrity::FileIntegrityModule;
@@ -468,6 +469,16 @@ impl ModuleManager {
             MacMonitorModule,
             "SELinux / AppArmor 監視モジュール"
         );
+        start_module!(
+            modules,
+            config,
+            event_bus,
+            startup_scan_enabled,
+            scan_report,
+            capabilities_monitor,
+            CapabilitiesMonitorModule,
+            "capabilities 監視モジュール"
+        );
 
         scan_report.total_duration = scan_start.elapsed();
 
@@ -790,6 +801,17 @@ impl ModuleManager {
             mac_monitor,
             MacMonitorModule,
             "SELinux / AppArmor 監視モジュール"
+        );
+        reload_module!(
+            result,
+            self.running_modules,
+            new_modules,
+            old_config,
+            new_config,
+            event_bus,
+            capabilities_monitor,
+            CapabilitiesMonitorModule,
+            "capabilities 監視モジュール"
         );
 
         self.running_modules = new_modules;
