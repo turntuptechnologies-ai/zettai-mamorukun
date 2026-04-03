@@ -703,6 +703,28 @@ mod tests {
         assert_eq!(result.issues_found, 2);
     }
 
+    #[tokio::test]
+    async fn test_initial_scan_detects_expected_value_mismatch() {
+        let dir = TempDir::new().unwrap();
+        create_test_proc_sys(&dir, &[("kernel/core_pattern", "unexpected_value")]);
+
+        let config = KernelParamsConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            proc_sys_path: dir.path().to_str().unwrap().to_string(),
+            watch_params: vec![KernelParamRule {
+                path: "kernel/core_pattern".to_string(),
+                min_value: None,
+                expected_value: Some("core".to_string()),
+            }],
+        };
+        let module = KernelParamsModule::new(config, None);
+
+        let result = module.initial_scan().await.unwrap();
+        assert_eq!(result.items_scanned, 1);
+        assert_eq!(result.issues_found, 1);
+    }
+
     #[test]
     fn test_nonexistent_proc_sys() {
         let rules = vec![KernelParamRule {
