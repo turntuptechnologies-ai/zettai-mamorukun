@@ -222,6 +222,10 @@ pub struct ModulesConfig {
     #[serde(default)]
     pub container_namespace: ContainerNamespaceConfig,
 
+    /// cgroup v2 リソース制限監視モジュールの設定
+    #[serde(default)]
+    pub cgroup_monitor: CgroupMonitorConfig,
+
     /// カーネルパラメータ監視モジュールの設定
     #[serde(default)]
     pub kernel_params: KernelParamsConfig,
@@ -1313,6 +1317,66 @@ impl Default for ContainerNamespaceConfig {
             scan_interval_secs: Self::default_scan_interval_secs(),
             watch_namespaces: Self::default_watch_namespaces(),
             check_container_env: Self::default_check_container_env(),
+        }
+    }
+}
+
+/// cgroup v2 リソース制限監視設定
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct CgroupMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "CgroupMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// cgroup v2 ファイルシステムのベースパス
+    #[serde(default = "CgroupMonitorConfig::default_cgroup_path")]
+    pub cgroup_path: String,
+
+    /// 再帰スキャンの最大深さ
+    #[serde(default = "CgroupMonitorConfig::default_max_depth")]
+    pub max_depth: usize,
+
+    /// 監視対象の cgroup ファイル名リスト
+    #[serde(default = "CgroupMonitorConfig::default_watch_files")]
+    pub watch_files: Vec<String>,
+}
+
+impl CgroupMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_cgroup_path() -> String {
+        "/sys/fs/cgroup".to_string()
+    }
+
+    fn default_max_depth() -> usize {
+        5
+    }
+
+    fn default_watch_files() -> Vec<String> {
+        vec![
+            "memory.max".to_string(),
+            "memory.high".to_string(),
+            "cpu.max".to_string(),
+            "pids.max".to_string(),
+            "io.max".to_string(),
+        ]
+    }
+}
+
+impl Default for CgroupMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            cgroup_path: Self::default_cgroup_path(),
+            max_depth: Self::default_max_depth(),
+            watch_files: Self::default_watch_files(),
         }
     }
 }

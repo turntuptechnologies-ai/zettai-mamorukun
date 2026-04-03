@@ -4,6 +4,7 @@ use crate::config::ModulesConfig;
 use crate::core::event::EventBus;
 use crate::modules::at_job_monitor::AtJobMonitorModule;
 use crate::modules::capabilities_monitor::CapabilitiesMonitorModule;
+use crate::modules::cgroup_monitor::CgroupMonitorModule;
 use crate::modules::container_namespace::ContainerNamespaceModule;
 use crate::modules::cron_monitor::CronMonitorModule;
 use crate::modules::dns_monitor::DnsMonitorModule;
@@ -497,6 +498,16 @@ impl ModuleManager {
             event_bus,
             startup_scan_enabled,
             scan_report,
+            cgroup_monitor,
+            CgroupMonitorModule,
+            "cgroup 監視モジュール"
+        );
+        start_module!(
+            modules,
+            config,
+            event_bus,
+            startup_scan_enabled,
+            scan_report,
             kernel_params,
             KernelParamsModule,
             "カーネルパラメータ監視モジュール"
@@ -845,6 +856,17 @@ impl ModuleManager {
             container_namespace,
             ContainerNamespaceModule,
             "コンテナ・名前空間検知モジュール"
+        );
+        reload_module!(
+            result,
+            self.running_modules,
+            new_modules,
+            old_config,
+            new_config,
+            event_bus,
+            cgroup_monitor,
+            CgroupMonitorModule,
+            "cgroup 監視モジュール"
         );
         reload_module!(
             result,
