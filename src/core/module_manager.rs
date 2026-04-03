@@ -10,6 +10,7 @@ use crate::modules::dns_monitor::DnsMonitorModule;
 use crate::modules::file_integrity::FileIntegrityModule;
 use crate::modules::firewall_monitor::FirewallMonitorModule;
 use crate::modules::kernel_module::KernelModuleMonitor;
+use crate::modules::kernel_params::KernelParamsModule;
 use crate::modules::ld_preload_monitor::LdPreloadMonitorModule;
 use crate::modules::log_tamper::LogTamperModule;
 use crate::modules::mac_monitor::MacMonitorModule;
@@ -490,6 +491,16 @@ impl ModuleManager {
             ContainerNamespaceModule,
             "コンテナ・名前空間検知モジュール"
         );
+        start_module!(
+            modules,
+            config,
+            event_bus,
+            startup_scan_enabled,
+            scan_report,
+            kernel_params,
+            KernelParamsModule,
+            "カーネルパラメータ監視モジュール"
+        );
 
         scan_report.total_duration = scan_start.elapsed();
 
@@ -834,6 +845,17 @@ impl ModuleManager {
             container_namespace,
             ContainerNamespaceModule,
             "コンテナ・名前空間検知モジュール"
+        );
+        reload_module!(
+            result,
+            self.running_modules,
+            new_modules,
+            old_config,
+            new_config,
+            event_bus,
+            kernel_params,
+            KernelParamsModule,
+            "カーネルパラメータ監視モジュール"
         );
 
         self.running_modules = new_modules;

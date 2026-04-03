@@ -93,6 +93,7 @@ src/
     file_integrity.rs  # ファイル整合性監視モジュール
     firewall_monitor.rs # ファイアウォールルール監視モジュール
     kernel_module.rs   # カーネルモジュール監視モジュール
+    kernel_params.rs   # /proc/sys/ カーネルパラメータ監視モジュール
     ld_preload_monitor.rs # 環境変数・LD_PRELOAD 監視モジュール
     log_tamper.rs      # ログファイル改ざん検知モジュール
     mac_monitor.rs     # SELinux/AppArmor 監視モジュール
