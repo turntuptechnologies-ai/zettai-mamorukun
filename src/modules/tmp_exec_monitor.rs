@@ -12,7 +12,7 @@ use crate::config::TmpExecMonitorConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
@@ -289,6 +289,16 @@ impl Module for TmpExecMonitorModule {
         let snapshot = Self::scan_dirs(&self.config.watch_dirs);
         let items_scanned = snapshot.files.len();
         let issues_found = items_scanned;
+        let scan_snapshot: BTreeMap<String, String> = snapshot
+            .files
+            .iter()
+            .map(|(path, info)| {
+                (
+                    path.display().to_string(),
+                    format!("mode={:o},size={}", info.mode, info.size),
+                )
+            })
+            .collect();
 
         let duration = start.elapsed();
 
@@ -300,6 +310,7 @@ impl Module for TmpExecMonitorModule {
                 "一時ディレクトリから実行可能ファイル {}件を検出しました",
                 items_scanned
             ),
+            snapshot: scan_snapshot,
         })
     }
 }

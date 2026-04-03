@@ -13,7 +13,7 @@ use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
@@ -363,6 +363,11 @@ impl Module for LdPreloadMonitorModule {
 
         let snapshot = Self::scan_files(&self.config.watch_paths);
         let items_scanned = snapshot.files.len();
+        let scan_snapshot: BTreeMap<String, String> = snapshot
+            .files
+            .iter()
+            .map(|(path, snap)| (path.display().to_string(), snap.file_hash.clone()))
+            .collect();
         let mut issues_found = 0;
 
         // /etc/ld.so.preload の存在チェック
@@ -408,6 +413,7 @@ impl Module for LdPreloadMonitorModule {
                 "動的リンカ設定ファイル {}件をスキャンしました（問題: {}件）",
                 items_scanned, issues_found
             ),
+            snapshot: scan_snapshot,
         })
     }
 }

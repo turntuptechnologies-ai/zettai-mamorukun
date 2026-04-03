@@ -18,6 +18,11 @@ shutdown_timeout_secs = 30
 enabled = true
 # スキャン全体のタイムアウト（秒）
 timeout_secs = 60
+# スキャン結果の永続化の有効/無効
+# 有効にするとスキャン結果をファイルに保存し、次回起動時に前回との差分を検出する
+persist_state = true
+# スキャン状態ファイルのパス
+state_file = "/var/lib/zettai-mamorukun/scan_state.json"
 
 [modules.file_integrity]
 # ファイル整合性監視モジュールの有効/無効

@@ -12,7 +12,7 @@ use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
@@ -310,6 +310,11 @@ impl Module for ShellConfigMonitorModule {
         let start = std::time::Instant::now();
         let snapshot = Self::scan_files(&self.config.watch_paths);
         let items_scanned = snapshot.files.len();
+        let scan_snapshot: BTreeMap<String, String> = snapshot
+            .files
+            .iter()
+            .map(|(path, snap)| (path.display().to_string(), snap.file_hash.clone()))
+            .collect();
         let duration = start.elapsed();
 
         Ok(InitialScanResult {
@@ -317,6 +322,7 @@ impl Module for ShellConfigMonitorModule {
             issues_found: 0,
             duration,
             summary: format!("シェル設定ファイル {}件をスキャンしました", items_scanned),
+            snapshot: scan_snapshot,
         })
     }
 

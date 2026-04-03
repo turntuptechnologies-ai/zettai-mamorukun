@@ -9,7 +9,7 @@ use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -267,6 +267,7 @@ impl Module for SshBruteForceModule {
             issues_found: 0,
             duration,
             summary,
+            snapshot: BTreeMap::new(),
         })
     }
 }

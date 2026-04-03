@@ -11,7 +11,7 @@ use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
@@ -323,6 +323,11 @@ impl Module for SshKeyMonitorModule {
 
         let snapshot = Self::scan_files(&self.config.watch_paths);
         let items_scanned = snapshot.files.len();
+        let scan_snapshot: BTreeMap<String, String> = snapshot
+            .files
+            .iter()
+            .map(|(path, snap)| (path.display().to_string(), snap.file_hash.clone()))
+            .collect();
 
         let duration = start.elapsed();
 
@@ -331,6 +336,7 @@ impl Module for SshKeyMonitorModule {
             issues_found: 0,
             duration,
             summary: format!("SSH 公開鍵ファイル {}件をスキャンしました", items_scanned),
+            snapshot: scan_snapshot,
         })
     }
 }

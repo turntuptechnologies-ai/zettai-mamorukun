@@ -14,7 +14,7 @@ use crate::config::UserAccountConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
 
@@ -514,6 +514,7 @@ impl Module for UserAccountModule {
         let mut issues_found = 0;
         let mut user_count = 0;
         let mut group_count = 0;
+        let mut snapshot: BTreeMap<String, String> = BTreeMap::new();
 
         if let Ok(content) = std::fs::read_to_string(&self.config.passwd_path) {
             let users = Self::parse_passwd(&content);
@@ -525,6 +526,10 @@ impl Module for UserAccountModule {
                 if entry.uid == 0 && username != "root" {
                     issues_found += 1;
                 }
+                snapshot.insert(
+                    username.clone(),
+                    format!("{}:{}:{}", entry.uid, entry.gid, entry.shell),
+                );
             }
         }
 
@@ -544,6 +549,7 @@ impl Module for UserAccountModule {
                 "ユーザー {}件, グループ {}件を読み取りました",
                 user_count, group_count
             ),
+            snapshot,
         })
     }
 

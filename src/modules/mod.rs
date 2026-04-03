@@ -22,6 +22,7 @@ pub mod tmp_exec_monitor;
 pub mod user_account;
 
 use crate::error::AppError;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// 起動時スキャン結果
@@ -37,6 +38,11 @@ pub struct InitialScanResult {
     pub duration: Duration,
     /// サマリーメッセージ
     pub summary: String,
+    /// スナップショットデータ（アイテム識別子 → ハッシュ/状態文字列）
+    ///
+    /// 永続化して次回起動時の差分検出に使用する。
+    /// BTreeMap を使用してキー順序を安定させる。
+    pub snapshot: BTreeMap<String, String>,
 }
 
 /// 防御モジュールが実装すべきトレイト

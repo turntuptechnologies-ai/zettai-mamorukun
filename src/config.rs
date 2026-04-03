@@ -74,6 +74,12 @@ pub struct StartupScanConfig {
     /// スキャン全体のタイムアウト（秒、デフォルト: 60）
     #[serde(default = "StartupScanConfig::default_timeout_secs")]
     pub timeout_secs: u64,
+    /// スキャン結果の永続化の有効/無効（デフォルト: true）
+    #[serde(default = "StartupScanConfig::default_persist_state")]
+    pub persist_state: bool,
+    /// スキャン状態ファイルのパス
+    #[serde(default = "StartupScanConfig::default_state_file")]
+    pub state_file: String,
 }
 
 impl Default for StartupScanConfig {
@@ -81,6 +87,8 @@ impl Default for StartupScanConfig {
         Self {
             enabled: Self::default_enabled(),
             timeout_secs: Self::default_timeout_secs(),
+            persist_state: Self::default_persist_state(),
+            state_file: Self::default_state_file(),
         }
     }
 }
@@ -92,6 +100,14 @@ impl StartupScanConfig {
 
     fn default_timeout_secs() -> u64 {
         60
+    }
+
+    fn default_persist_state() -> bool {
+        true
+    }
+
+    fn default_state_file() -> String {
+        "/var/lib/zettai-mamorukun/scan_state.json".to_string()
     }
 }
 
