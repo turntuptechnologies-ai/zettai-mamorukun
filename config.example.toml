@@ -176,6 +176,31 @@ apparmor_config_paths = ["/etc/apparmor", "/etc/apparmor.d"]
 # AppArmor profiles ファイルのパス
 apparmor_profiles_path = "/sys/kernel/security/apparmor/profiles"
 
+[modules.capabilities_monitor]
+# Linux capabilities 監視モジュールの有効/無効
+# /proc/*/status の CapEff/CapPrm を定期スキャンし、
+# 危険な capabilities を持つプロセスを検知する
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 60
+# 危険と見なす capabilities のビット番号リスト
+# デフォルト: DAC_OVERRIDE(1), SETGID(6), SETUID(7), NET_ADMIN(12),
+#             NET_RAW(13), SYS_MODULE(16), SYS_PTRACE(19), SYS_ADMIN(21)
+dangerous_caps = [1, 6, 7, 12, 13, 16, 19, 21]
+# ホワイトリスト（除外するプロセス名）
+whitelist_processes = [
+  "systemd",
+  "systemd-journal",
+  "systemd-udevd",
+  "systemd-logind",
+  "systemd-resolve",
+  "systemd-timesyn",
+  "systemd-network",
+  "networkd-dispat",
+  "dbus-daemon",
+  "polkitd",
+]
+
 [modules.suid_sgid_monitor]
 # SUID/SGID ファイル監視モジュールの有効/無効
 enabled = false

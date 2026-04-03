@@ -213,6 +213,10 @@ pub struct ModulesConfig {
     /// SELinux / AppArmor 監視モジュールの設定
     #[serde(default)]
     pub mac_monitor: MacMonitorConfig,
+
+    /// Linux capabilities 監視モジュールの設定
+    #[serde(default)]
+    pub capabilities_monitor: CapabilitiesMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -1183,6 +1187,71 @@ impl Default for MacMonitorConfig {
             selinux_enforce_path: Self::default_selinux_enforce_path(),
             apparmor_config_paths: Self::default_apparmor_config_paths(),
             apparmor_profiles_path: Self::default_apparmor_profiles_path(),
+        }
+    }
+}
+
+/// Linux capabilities 監視モジュールの設定
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct CapabilitiesMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "CapabilitiesMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 危険と見なす capabilities のビット番号リスト
+    #[serde(default = "CapabilitiesMonitorConfig::default_dangerous_caps")]
+    pub dangerous_caps: Vec<u8>,
+
+    /// ホワイトリスト（除外するプロセス名）
+    #[serde(default = "CapabilitiesMonitorConfig::default_whitelist_processes")]
+    pub whitelist_processes: Vec<String>,
+}
+
+impl CapabilitiesMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        60
+    }
+
+    fn default_dangerous_caps() -> Vec<u8> {
+        vec![
+            1,  // CAP_DAC_OVERRIDE
+            6,  // CAP_SETGID
+            7,  // CAP_SETUID
+            12, // CAP_NET_ADMIN
+            13, // CAP_NET_RAW
+            16, // CAP_SYS_MODULE
+            19, // CAP_SYS_PTRACE
+            21, // CAP_SYS_ADMIN
+        ]
+    }
+
+    fn default_whitelist_processes() -> Vec<String> {
+        vec![
+            "systemd".to_string(),
+            "systemd-journal".to_string(),
+            "systemd-udevd".to_string(),
+            "systemd-logind".to_string(),
+            "systemd-resolve".to_string(),
+            "systemd-timesyn".to_string(),
+            "systemd-network".to_string(),
+            "networkd-dispat".to_string(),
+            "dbus-daemon".to_string(),
+            "polkitd".to_string(),
+        ]
+    }
+}
+
+impl Default for CapabilitiesMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            dangerous_caps: Self::default_dangerous_caps(),
+            whitelist_processes: Self::default_whitelist_processes(),
         }
     }
 }
