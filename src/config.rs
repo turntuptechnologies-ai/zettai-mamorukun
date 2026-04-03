@@ -209,6 +209,10 @@ pub struct ModulesConfig {
     /// /etc/security/ 監視モジュールの設定
     #[serde(default)]
     pub security_files_monitor: SecurityFilesMonitorConfig,
+
+    /// SELinux / AppArmor 監視モジュールの設定
+    #[serde(default)]
+    pub mac_monitor: MacMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -1104,6 +1108,81 @@ impl Default for NetworkMonitorConfig {
             suspicious_ports: Self::default_suspicious_ports(),
             max_connections: Self::default_max_connections(),
             enable_ipv6: Self::default_enable_ipv6(),
+        }
+    }
+}
+
+/// SELinux / AppArmor 監視モジュールの設定
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct MacMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "MacMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// SELinux 設定ファイルのパスリスト
+    #[serde(default = "MacMonitorConfig::default_selinux_config_paths")]
+    pub selinux_config_paths: Vec<PathBuf>,
+
+    /// SELinux ポリシーディレクトリのリスト
+    #[serde(default = "MacMonitorConfig::default_selinux_policy_dirs")]
+    pub selinux_policy_dirs: Vec<PathBuf>,
+
+    /// SELinux enforce ファイルのパス
+    #[serde(default = "MacMonitorConfig::default_selinux_enforce_path")]
+    pub selinux_enforce_path: PathBuf,
+
+    /// AppArmor 設定パスのリスト
+    #[serde(default = "MacMonitorConfig::default_apparmor_config_paths")]
+    pub apparmor_config_paths: Vec<PathBuf>,
+
+    /// AppArmor profiles ファイルのパス
+    #[serde(default = "MacMonitorConfig::default_apparmor_profiles_path")]
+    pub apparmor_profiles_path: PathBuf,
+}
+
+impl MacMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_selinux_config_paths() -> Vec<PathBuf> {
+        vec![PathBuf::from("/etc/selinux/config")]
+    }
+
+    fn default_selinux_policy_dirs() -> Vec<PathBuf> {
+        vec![PathBuf::from("/etc/selinux")]
+    }
+
+    fn default_selinux_enforce_path() -> PathBuf {
+        PathBuf::from("/sys/fs/selinux/enforce")
+    }
+
+    fn default_apparmor_config_paths() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/etc/apparmor"),
+            PathBuf::from("/etc/apparmor.d"),
+        ]
+    }
+
+    fn default_apparmor_profiles_path() -> PathBuf {
+        PathBuf::from("/sys/kernel/security/apparmor/profiles")
+    }
+}
+
+impl Default for MacMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            selinux_config_paths: Self::default_selinux_config_paths(),
+            selinux_policy_dirs: Self::default_selinux_policy_dirs(),
+            selinux_enforce_path: Self::default_selinux_enforce_path(),
+            apparmor_config_paths: Self::default_apparmor_config_paths(),
+            apparmor_profiles_path: Self::default_apparmor_profiles_path(),
         }
     }
 }

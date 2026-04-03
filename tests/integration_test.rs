@@ -621,6 +621,48 @@ channel_capacity = 256
 }
 
 #[test]
+fn test_config_mac_monitor_disabled_by_default() {
+    let config = AppConfig::load(Path::new("/tmp/nonexistent-zettai-config.toml")).unwrap();
+    assert!(!config.modules.mac_monitor.enabled);
+    assert_eq!(config.modules.mac_monitor.scan_interval_secs, 30);
+    assert_eq!(config.modules.mac_monitor.selinux_config_paths.len(), 1);
+    assert_eq!(config.modules.mac_monitor.selinux_policy_dirs.len(), 1);
+    assert_eq!(
+        config.modules.mac_monitor.selinux_enforce_path,
+        std::path::PathBuf::from("/sys/fs/selinux/enforce")
+    );
+    assert_eq!(config.modules.mac_monitor.apparmor_config_paths.len(), 2);
+    assert_eq!(
+        config.modules.mac_monitor.apparmor_profiles_path,
+        std::path::PathBuf::from("/sys/kernel/security/apparmor/profiles")
+    );
+}
+
+#[test]
+fn test_config_with_mac_monitor_section() {
+    let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+    write!(
+        tmpfile,
+        r#"
+[modules.mac_monitor]
+enabled = true
+scan_interval_secs = 60
+selinux_config_paths = ["/etc/selinux/config"]
+selinux_policy_dirs = ["/etc/selinux"]
+selinux_enforce_path = "/sys/fs/selinux/enforce"
+apparmor_config_paths = ["/etc/apparmor"]
+apparmor_profiles_path = "/sys/kernel/security/apparmor/profiles"
+"#
+    )
+    .unwrap();
+    let config = AppConfig::load(tmpfile.path()).unwrap();
+    assert!(config.modules.mac_monitor.enabled);
+    assert_eq!(config.modules.mac_monitor.scan_interval_secs, 60);
+    assert_eq!(config.modules.mac_monitor.selinux_config_paths.len(), 1);
+    assert_eq!(config.modules.mac_monitor.apparmor_config_paths.len(), 1);
+}
+
+#[test]
 fn test_config_security_files_monitor_disabled_by_default() {
     let config = AppConfig::load(Path::new("/tmp/nonexistent-zettai-config.toml")).unwrap();
     assert!(!config.modules.security_files_monitor.enabled);
