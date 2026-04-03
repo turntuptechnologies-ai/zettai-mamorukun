@@ -19,6 +19,7 @@ use crate::modules::mount_monitor::MountMonitorModule;
 use crate::modules::network_monitor::NetworkMonitorModule;
 use crate::modules::pam_monitor::PamMonitorModule;
 use crate::modules::pkg_repo_monitor::PkgRepoMonitorModule;
+use crate::modules::proc_net_monitor::ProcNetMonitorModule;
 use crate::modules::process_monitor::ProcessMonitorModule;
 use crate::modules::security_files_monitor::SecurityFilesMonitorModule;
 use crate::modules::shell_config_monitor::ShellConfigMonitorModule;
@@ -512,6 +513,16 @@ impl ModuleManager {
             KernelParamsModule,
             "カーネルパラメータ監視モジュール"
         );
+        start_module!(
+            modules,
+            config,
+            event_bus,
+            startup_scan_enabled,
+            scan_report,
+            proc_net_monitor,
+            ProcNetMonitorModule,
+            "/proc/net/ 監視モジュール"
+        );
 
         scan_report.total_duration = scan_start.elapsed();
 
@@ -878,6 +889,17 @@ impl ModuleManager {
             kernel_params,
             KernelParamsModule,
             "カーネルパラメータ監視モジュール"
+        );
+        reload_module!(
+            result,
+            self.running_modules,
+            new_modules,
+            old_config,
+            new_config,
+            event_bus,
+            proc_net_monitor,
+            ProcNetMonitorModule,
+            "/proc/net/ 監視モジュール"
         );
 
         self.running_modules = new_modules;

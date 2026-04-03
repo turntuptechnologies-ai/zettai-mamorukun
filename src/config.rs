@@ -229,6 +229,10 @@ pub struct ModulesConfig {
     /// カーネルパラメータ監視モジュールの設定
     #[serde(default)]
     pub kernel_params: KernelParamsConfig,
+
+    /// /proc/net/ 監視モジュールの設定
+    #[serde(default)]
+    pub proc_net_monitor: ProcNetMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -1478,6 +1482,51 @@ impl Default for KernelParamsConfig {
             scan_interval_secs: Self::default_scan_interval_secs(),
             proc_sys_path: Self::default_proc_sys_path(),
             watch_params: Self::default_watch_params(),
+        }
+    }
+}
+
+/// /proc/net/ 監視モジュールの設定
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct ProcNetMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "ProcNetMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// /proc/net/route のパス
+    #[serde(default = "ProcNetMonitorConfig::default_route_path")]
+    pub route_path: String,
+
+    /// /proc/net/arp のパス
+    #[serde(default = "ProcNetMonitorConfig::default_arp_path")]
+    pub arp_path: String,
+}
+
+impl ProcNetMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_route_path() -> String {
+        "/proc/net/route".to_string()
+    }
+
+    fn default_arp_path() -> String {
+        "/proc/net/arp".to_string()
+    }
+}
+
+impl Default for ProcNetMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            route_path: Self::default_route_path(),
+            arp_path: Self::default_arp_path(),
         }
     }
 }
