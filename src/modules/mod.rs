@@ -17,6 +17,7 @@ pub mod pam_monitor;
 pub mod pkg_repo_monitor;
 pub mod proc_net_monitor;
 pub mod process_monitor;
+pub mod seccomp_monitor;
 pub mod security_files_monitor;
 pub mod shell_config_monitor;
 pub mod ssh_brute_force;

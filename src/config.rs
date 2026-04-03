@@ -233,6 +233,10 @@ pub struct ModulesConfig {
     /// /proc/net/ 監視モジュールの設定
     #[serde(default)]
     pub proc_net_monitor: ProcNetMonitorConfig,
+
+    /// seccomp プロファイル監視モジュールの設定
+    #[serde(default)]
+    pub seccomp_monitor: SeccompMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -1527,6 +1531,53 @@ impl Default for ProcNetMonitorConfig {
             scan_interval_secs: Self::default_scan_interval_secs(),
             route_path: Self::default_route_path(),
             arp_path: Self::default_arp_path(),
+        }
+    }
+}
+
+/// seccomp プロファイル監視モジュールの設定
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct SeccompMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "SeccompMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象プロセス名のリスト
+    #[serde(default = "SeccompMonitorConfig::default_watched_processes")]
+    pub watched_processes: Vec<String>,
+}
+
+impl SeccompMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_watched_processes() -> Vec<String> {
+        vec![
+            "sshd".to_string(),
+            "nginx".to_string(),
+            "apache2".to_string(),
+            "postgres".to_string(),
+            "mysqld".to_string(),
+            "dockerd".to_string(),
+            "containerd".to_string(),
+            "named".to_string(),
+            "unbound".to_string(),
+            "haproxy".to_string(),
+        ]
+    }
+}
+
+impl Default for SeccompMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            watched_processes: Self::default_watched_processes(),
         }
     }
 }
