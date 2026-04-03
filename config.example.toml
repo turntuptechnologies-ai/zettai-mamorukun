@@ -160,6 +160,22 @@ watch_paths = [
     "/etc/security/pwquality.conf",
 ]
 
+[modules.mac_monitor]
+# SELinux / AppArmor 監視モジュールの有効/無効
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 30
+# SELinux 設定ファイルのパスリスト
+selinux_config_paths = ["/etc/selinux/config"]
+# SELinux ポリシーディレクトリのリスト
+selinux_policy_dirs = ["/etc/selinux"]
+# SELinux enforce ファイルのパス
+selinux_enforce_path = "/sys/fs/selinux/enforce"
+# AppArmor 設定パスのリスト
+apparmor_config_paths = ["/etc/apparmor", "/etc/apparmor.d"]
+# AppArmor profiles ファイルのパス
+apparmor_profiles_path = "/sys/kernel/security/apparmor/profiles"
+
 [modules.suid_sgid_monitor]
 # SUID/SGID ファイル監視モジュールの有効/無効
 enabled = false
