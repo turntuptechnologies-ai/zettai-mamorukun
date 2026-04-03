@@ -275,6 +275,27 @@ route_path = "/proc/net/route"
 # /proc/net/arp のパス
 arp_path = "/proc/net/arp"
 
+[modules.seccomp_monitor]
+# seccomp プロファイル監視モジュールの有効/無効
+# /proc/*/status の Seccomp フィールドを定期スキャンし、
+# 監視対象プロセスの seccomp フィルタが無効化されていないかを検知する
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 30
+# 監視対象プロセス名のリスト
+watched_processes = [
+  "sshd",
+  "nginx",
+  "apache2",
+  "postgres",
+  "mysqld",
+  "dockerd",
+  "containerd",
+  "named",
+  "unbound",
+  "haproxy",
+]
+
 [modules.suid_sgid_monitor]
 # SUID/SGID ファイル監視モジュールの有効/無効
 enabled = false
