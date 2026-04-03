@@ -213,6 +213,20 @@ watch_namespaces = ["mnt", "pid", "net", "ipc", "uts", "user", "cgroup"]
 # コンテナ環境マーカー（/.dockerenv, /run/.containerenv）のチェック
 check_container_env = true
 
+[modules.cgroup_monitor]
+# cgroup v2 リソース制限監視モジュールの有効/無効
+# /sys/fs/cgroup/ 配下を定期スキャンし、
+# リソース制限の不正な変更を検知する
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 30
+# cgroup v2 ファイルシステムのベースパス
+cgroup_path = "/sys/fs/cgroup"
+# 再帰スキャンの最大深さ
+max_depth = 5
+# 監視対象の cgroup ファイル名リスト
+watch_files = ["memory.max", "memory.high", "cpu.max", "pids.max", "io.max"]
+
 [modules.kernel_params]
 # /proc/sys/ カーネルパラメータ監視モジュールの有効/無効
 # セキュリティ関連カーネルパラメータを定期スキャンし、

@@ -87,6 +87,7 @@ src/
     mod.rs             # モジュールトレイト・レジストリ
     at_job_monitor.rs  # at/batch ジョブ監視モジュール
     capabilities_monitor.rs # Linux capabilities 監視モジュール
+    cgroup_monitor.rs  # cgroup v2 リソース制限監視モジュール
     container_namespace.rs # コンテナ・名前空間検知モジュール
     cron_monitor.rs    # Cron ジョブ改ざん検知モジュール
     dns_monitor.rs     # DNS設定改ざん検知モジュール
