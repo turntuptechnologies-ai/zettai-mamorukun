@@ -4,6 +4,7 @@ use crate::config::ModulesConfig;
 use crate::core::event::EventBus;
 use crate::modules::at_job_monitor::AtJobMonitorModule;
 use crate::modules::capabilities_monitor::CapabilitiesMonitorModule;
+use crate::modules::container_namespace::ContainerNamespaceModule;
 use crate::modules::cron_monitor::CronMonitorModule;
 use crate::modules::dns_monitor::DnsMonitorModule;
 use crate::modules::file_integrity::FileIntegrityModule;
@@ -479,6 +480,16 @@ impl ModuleManager {
             CapabilitiesMonitorModule,
             "capabilities 監視モジュール"
         );
+        start_module!(
+            modules,
+            config,
+            event_bus,
+            startup_scan_enabled,
+            scan_report,
+            container_namespace,
+            ContainerNamespaceModule,
+            "コンテナ・名前空間検知モジュール"
+        );
 
         scan_report.total_duration = scan_start.elapsed();
 
@@ -812,6 +823,17 @@ impl ModuleManager {
             capabilities_monitor,
             CapabilitiesMonitorModule,
             "capabilities 監視モジュール"
+        );
+        reload_module!(
+            result,
+            self.running_modules,
+            new_modules,
+            old_config,
+            new_config,
+            event_bus,
+            container_namespace,
+            ContainerNamespaceModule,
+            "コンテナ・名前空間検知モジュール"
         );
 
         self.running_modules = new_modules;

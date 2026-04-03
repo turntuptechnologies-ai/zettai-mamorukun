@@ -201,6 +201,18 @@ whitelist_processes = [
   "polkitd",
 ]
 
+[modules.container_namespace]
+# コンテナ・名前空間検知モジュールの有効/無効
+# /proc/self/ns/ の inode と /proc/self/cgroup を定期スキャンし、
+# コンテナブレイクアウトや名前空間の不正操作を検知する
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 30
+# 監視対象の名前空間リスト
+watch_namespaces = ["mnt", "pid", "net", "ipc", "uts", "user", "cgroup"]
+# コンテナ環境マーカー（/.dockerenv, /run/.containerenv）のチェック
+check_container_env = true
+
 [modules.suid_sgid_monitor]
 # SUID/SGID ファイル監視モジュールの有効/無効
 enabled = false
