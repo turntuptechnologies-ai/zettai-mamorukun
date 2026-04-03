@@ -15,6 +15,7 @@ pub mod mount_monitor;
 pub mod network_monitor;
 pub mod pam_monitor;
 pub mod pkg_repo_monitor;
+pub mod proc_net_monitor;
 pub mod process_monitor;
 pub mod security_files_monitor;
 pub mod shell_config_monitor;
