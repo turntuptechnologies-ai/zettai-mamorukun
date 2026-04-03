@@ -47,6 +47,7 @@
 - [x] **全モジュール起動時スキャン完備** — v0.41.0 (#85, PR #86)
 - [x] **起動時スキャン結果の永続化** — v0.42.0 (#87, PR #88)
 - [x] **SELinux / AppArmor 監視モジュール** — v0.43.0 (#89, PR #90)
+- [x] **Linux capabilities 監視モジュール** — v0.44.0 (#91, PR #92)
 
 ## 候補
 
@@ -59,4 +60,4 @@
 7. **環境変数インジェクション検知強化** — /proc/*/environ の定期スキャンで不審な環境変数（LD_LIBRARY_PATH 改ざん等）をプロセス単位で検知する
 8. **イベントフィルタ統合テスト追加** — EventBus フィルタリングの TOML パース・Config → EventBus 統合テストを追加する
 9. **スキャン状態の差分レポートコマンド** — `zettai-mamorukun scan-diff` で前回保存されたスキャン状態と現在の状態を比較し、差分をレポートするCLIコマンド
-10. **capabilities 監視モジュール** — Linux capabilities（CAP_SYS_ADMIN 等）の不正な付与を検知する。/proc/*/status の CapEff/CapPrm を監視し、特権昇格の兆候を早期発見
+10. **cgroup 監視モジュール** — cgroup v2 のリソース制限（メモリ上限、CPU 制限）が不正に変更されていないかを監視する。コンテナエスケープ対策に有効
