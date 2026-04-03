@@ -11,7 +11,7 @@ use crate::config::NetworkMonitorConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tokio_util::sync::CancellationToken;
 
@@ -510,6 +510,7 @@ impl Module for NetworkMonitorModule {
                 "ネットワーク接続 {}件をスキャンしました（不審な接続: {}件）",
                 items_scanned, issues_found
             ),
+            snapshot: BTreeMap::new(),
         })
     }
 }

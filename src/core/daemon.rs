@@ -4,9 +4,10 @@ use crate::core::event::{self, EventBus, SecurityEvent, Severity};
 use crate::core::health::HealthChecker;
 use crate::core::metrics::{MetricsCollector, SharedMetrics};
 use crate::core::module_manager::ModuleManager;
+use crate::core::scan_state::{self, DiffKind};
 use crate::core::status::{DaemonState, StatusServer};
 use crate::error::AppError;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::signal::unix::{SignalKind, signal};
@@ -98,6 +99,15 @@ impl Daemon {
             tracing::warn!("アクションエンジンはイベントバスが無効のため起動できません");
         }
 
+        // 前回のスキャン状態を読み込み
+        let previous_scan_state =
+            if self.config.startup_scan.enabled && self.config.startup_scan.persist_state {
+                let state_path = Path::new(&self.config.startup_scan.state_file);
+                scan_state::load_scan_state(state_path)
+            } else {
+                None
+            };
+
         // モジュールマネージャーでモジュールを一括起動（起動時スキャン付き）
         let (mut module_manager, scan_report) = ModuleManager::start_modules(
             &self.config.modules,
@@ -139,6 +149,64 @@ impl Daemon {
                 "daemon",
                 summary,
             ));
+        }
+
+        // スキャン状態の差分検出と永続化
+        if self.config.startup_scan.enabled && self.config.startup_scan.persist_state {
+            // スナップショットデータを収集
+            let snapshot_data: Vec<(String, std::collections::BTreeMap<String, String>)> =
+                scan_report
+                    .results
+                    .iter()
+                    .filter(|(_, r)| !r.snapshot.is_empty())
+                    .map(|(name, r)| (name.clone(), r.snapshot.clone()))
+                    .collect();
+
+            // 前回の状態との差分検出
+            if let Some(ref prev_state) = previous_scan_state {
+                let diffs = scan_state::detect_diffs(prev_state, &snapshot_data);
+                if !diffs.is_empty() {
+                    let total_changes: usize = diffs.iter().map(|d| d.entries.len()).sum();
+                    tracing::warn!(
+                        modules = diffs.len(),
+                        total_changes = total_changes,
+                        "前回起動時からの変更を検出しました"
+                    );
+
+                    if let Some(ref bus) = event_bus {
+                        for diff in &diffs {
+                            for entry in &diff.entries {
+                                let (event_type, message) = match entry.kind {
+                                    DiffKind::Added => (
+                                        "scan_state_added",
+                                        format!("[{}] 新規追加: {}", diff.module_name, entry.key),
+                                    ),
+                                    DiffKind::Removed => (
+                                        "scan_state_removed",
+                                        format!("[{}] 削除: {}", diff.module_name, entry.key),
+                                    ),
+                                    DiffKind::Modified => (
+                                        "scan_state_modified",
+                                        format!("[{}] 変更: {}", diff.module_name, entry.key),
+                                    ),
+                                };
+                                bus.publish(SecurityEvent::new(
+                                    event_type,
+                                    Severity::Warning,
+                                    "daemon",
+                                    message,
+                                ));
+                            }
+                        }
+                    }
+                } else {
+                    tracing::info!("前回起動時からの変更はありません");
+                }
+            }
+
+            // 現在のスナップショットを保存
+            let state_path = Path::new(&self.config.startup_scan.state_file);
+            scan_state::save_scan_state(state_path, &snapshot_data);
         }
 
         // モジュール名を共有状態に反映

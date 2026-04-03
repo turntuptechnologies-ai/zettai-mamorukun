@@ -11,7 +11,7 @@ use crate::config::MountMonitorConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
@@ -285,6 +285,15 @@ impl Module for MountMonitorModule {
         let start = std::time::Instant::now();
         let entries = Self::read_mounts(&self.config.mounts_path)?;
         let items_scanned = entries.len();
+        let snapshot: BTreeMap<String, String> = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.mount_point.clone(),
+                    format!("{}:{}", entry.device, entry.fs_type),
+                )
+            })
+            .collect();
         let duration = start.elapsed();
 
         Ok(InitialScanResult {
@@ -292,6 +301,7 @@ impl Module for MountMonitorModule {
             issues_found: 0,
             duration,
             summary: format!("マウントポイント {}件を検出しました", items_scanned),
+            snapshot,
         })
     }
 

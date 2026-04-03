@@ -13,7 +13,7 @@ use crate::config::SuidSgidMonitorConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
@@ -323,6 +323,16 @@ impl Module for SuidSgidMonitorModule {
         let start = std::time::Instant::now();
         let snapshot = Self::scan_dirs(&self.config.watch_dirs);
         let items_scanned = snapshot.files.len();
+        let scan_snapshot: BTreeMap<String, String> = snapshot
+            .files
+            .iter()
+            .map(|(path, info)| {
+                (
+                    path.display().to_string(),
+                    format!("mode={:o},uid={},size={}", info.mode, info.uid, info.size),
+                )
+            })
+            .collect();
         let duration = start.elapsed();
 
         Ok(InitialScanResult {
@@ -330,6 +340,7 @@ impl Module for SuidSgidMonitorModule {
             issues_found: 0,
             duration,
             summary: format!("SUID/SGID ファイル {}件を検出しました", items_scanned),
+            snapshot: scan_snapshot,
         })
     }
 

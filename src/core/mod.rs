@@ -4,4 +4,5 @@ pub mod event;
 pub mod health;
 pub mod metrics;
 pub mod module_manager;
+pub mod scan_state;
 pub mod status;

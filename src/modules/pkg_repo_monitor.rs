@@ -14,7 +14,7 @@ use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 use walkdir::WalkDir;
@@ -264,6 +264,10 @@ impl Module for PkgRepoMonitorModule {
         let start = std::time::Instant::now();
         let files = Self::scan_files(&self.config.watch_paths);
         let items_scanned = files.len();
+        let snapshot: BTreeMap<String, String> = files
+            .iter()
+            .map(|(path, hash)| (path.display().to_string(), hash.clone()))
+            .collect();
         let duration = start.elapsed();
 
         Ok(InitialScanResult {
@@ -274,6 +278,7 @@ impl Module for PkgRepoMonitorModule {
                 "パッケージリポジトリ設定ファイル {}件をスキャンしました",
                 items_scanned
             ),
+            snapshot,
         })
     }
 

@@ -23,7 +23,7 @@ use crate::config::LogTamperConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
@@ -352,6 +352,18 @@ impl Module for LogTamperModule {
         let start = std::time::Instant::now();
         let files = Self::scan_files(&self.config.watch_paths);
         let items_scanned = files.len();
+        let snapshot: BTreeMap<String, String> = files
+            .iter()
+            .map(|(path, state)| {
+                (
+                    path.display().to_string(),
+                    format!(
+                        "size={},inode={},perm={:o}",
+                        state.size, state.inode, state.permissions
+                    ),
+                )
+            })
+            .collect();
         let duration = start.elapsed();
 
         Ok(InitialScanResult {
@@ -359,6 +371,7 @@ impl Module for LogTamperModule {
             issues_found: 0,
             duration,
             summary: format!("ログファイル {}件をスキャンしました", items_scanned),
+            snapshot,
         })
     }
 

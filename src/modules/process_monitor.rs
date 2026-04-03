@@ -11,7 +11,7 @@ use crate::config::ProcessMonitorConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
@@ -293,6 +293,7 @@ impl Module for ProcessMonitorModule {
                 "プロセス {}件をスキャンしました（不審なプロセス: {}件）",
                 items_scanned, issues_found
             ),
+            snapshot: BTreeMap::new(),
         })
     }
 }

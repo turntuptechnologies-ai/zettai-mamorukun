@@ -10,7 +10,7 @@ use crate::config::KernelModuleConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use tokio_util::sync::CancellationToken;
 
 /// `/proc/modules` の各行をパースした結果
@@ -244,6 +244,15 @@ impl Module for KernelModuleMonitor {
         let content = Self::read_proc_modules()?;
         let entries = Self::parse_proc_modules(&content);
         let items_scanned = entries.len();
+        let snapshot: BTreeMap<String, String> = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.name.clone(),
+                    format!("size={},state={}", entry.size, entry.state),
+                )
+            })
+            .collect();
         let duration = start.elapsed();
 
         Ok(InitialScanResult {
@@ -251,6 +260,7 @@ impl Module for KernelModuleMonitor {
             issues_found: 0,
             duration,
             summary: format!("カーネルモジュール {}件を検出しました", items_scanned),
+            snapshot,
         })
     }
 
