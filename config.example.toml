@@ -213,6 +213,42 @@ watch_namespaces = ["mnt", "pid", "net", "ipc", "uts", "user", "cgroup"]
 # コンテナ環境マーカー（/.dockerenv, /run/.containerenv）のチェック
 check_container_env = true
 
+[modules.kernel_params]
+# /proc/sys/ カーネルパラメータ監視モジュールの有効/無効
+# セキュリティ関連カーネルパラメータを定期スキャンし、
+# 変更や弱体化を検知する
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 60
+# proc/sys のベースパス
+proc_sys_path = "/proc/sys"
+# 監視対象パラメータルール
+# path: パラメータパス（proc_sys_path からの相対パス）
+# min_value: 最小値（この値未満で Critical）
+# expected_value: 期待値（不一致で Warning）
+[[modules.kernel_params.watch_params]]
+path = "kernel/kptr_restrict"
+min_value = 1
+[[modules.kernel_params.watch_params]]
+path = "kernel/dmesg_restrict"
+min_value = 1
+[[modules.kernel_params.watch_params]]
+path = "kernel/randomize_va_space"
+min_value = 2
+[[modules.kernel_params.watch_params]]
+path = "kernel/sysrq"
+[[modules.kernel_params.watch_params]]
+path = "kernel/unprivileged_bpf_disabled"
+min_value = 1
+[[modules.kernel_params.watch_params]]
+path = "kernel/yama/ptrace_scope"
+min_value = 1
+[[modules.kernel_params.watch_params]]
+path = "kernel/perf_event_paranoid"
+min_value = 2
+[[modules.kernel_params.watch_params]]
+path = "kernel/core_pattern"
+
 [modules.suid_sgid_monitor]
 # SUID/SGID ファイル監視モジュールの有効/無効
 enabled = false

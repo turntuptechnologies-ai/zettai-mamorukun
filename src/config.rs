@@ -221,6 +221,10 @@ pub struct ModulesConfig {
     /// コンテナ・名前空間検知モジュールの設定
     #[serde(default)]
     pub container_namespace: ContainerNamespaceConfig,
+
+    /// カーネルパラメータ監視モジュールの設定
+    #[serde(default)]
+    pub kernel_params: KernelParamsConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -1309,6 +1313,107 @@ impl Default for ContainerNamespaceConfig {
             scan_interval_secs: Self::default_scan_interval_secs(),
             watch_namespaces: Self::default_watch_namespaces(),
             check_container_env: Self::default_check_container_env(),
+        }
+    }
+}
+
+/// カーネルパラメータ監視ルール
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct KernelParamRule {
+    /// パラメータのパス（例: "kernel/kptr_restrict"）
+    pub path: String,
+
+    /// 最小値（この値未満で Critical）
+    #[serde(default)]
+    pub min_value: Option<i64>,
+
+    /// 期待値（不一致で Warning）
+    #[serde(default)]
+    pub expected_value: Option<String>,
+}
+
+/// カーネルパラメータ監視モジュールの設定
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct KernelParamsConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "KernelParamsConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// proc/sys のベースパス
+    #[serde(default = "KernelParamsConfig::default_proc_sys_path")]
+    pub proc_sys_path: String,
+
+    /// 監視対象パラメータルール
+    #[serde(default = "KernelParamsConfig::default_watch_params")]
+    pub watch_params: Vec<KernelParamRule>,
+}
+
+impl KernelParamsConfig {
+    fn default_scan_interval_secs() -> u64 {
+        60
+    }
+
+    fn default_proc_sys_path() -> String {
+        "/proc/sys".to_string()
+    }
+
+    fn default_watch_params() -> Vec<KernelParamRule> {
+        vec![
+            KernelParamRule {
+                path: "kernel/kptr_restrict".to_string(),
+                min_value: Some(1),
+                expected_value: None,
+            },
+            KernelParamRule {
+                path: "kernel/dmesg_restrict".to_string(),
+                min_value: Some(1),
+                expected_value: None,
+            },
+            KernelParamRule {
+                path: "kernel/randomize_va_space".to_string(),
+                min_value: Some(2),
+                expected_value: None,
+            },
+            KernelParamRule {
+                path: "kernel/sysrq".to_string(),
+                min_value: None,
+                expected_value: None,
+            },
+            KernelParamRule {
+                path: "kernel/unprivileged_bpf_disabled".to_string(),
+                min_value: Some(1),
+                expected_value: None,
+            },
+            KernelParamRule {
+                path: "kernel/yama/ptrace_scope".to_string(),
+                min_value: Some(1),
+                expected_value: None,
+            },
+            KernelParamRule {
+                path: "kernel/perf_event_paranoid".to_string(),
+                min_value: Some(2),
+                expected_value: None,
+            },
+            KernelParamRule {
+                path: "kernel/core_pattern".to_string(),
+                min_value: None,
+                expected_value: None,
+            },
+        ]
+    }
+}
+
+impl Default for KernelParamsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            proc_sys_path: Self::default_proc_sys_path(),
+            watch_params: Self::default_watch_params(),
         }
     }
 }
