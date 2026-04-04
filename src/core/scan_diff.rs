@@ -147,25 +147,22 @@ fn print_json_report(previous: &ScanState, diffs: &[ModuleDiff]) {
         .map(|d| format!("{}", d.as_secs()))
         .unwrap_or_else(|_| "0".to_string());
 
-    let mut total_changes = 0;
+    let total_changes: usize = diffs.iter().map(|d| d.entries.len()).sum();
     let modules: Vec<ModuleReport> = diffs
         .iter()
         .map(|diff| {
             let changes: Vec<ChangeEntry> = diff
                 .entries
                 .iter()
-                .map(|entry| {
-                    total_changes += 1;
-                    ChangeEntry {
-                        kind: match entry.kind {
-                            DiffKind::Added => "added".to_string(),
-                            DiffKind::Removed => "removed".to_string(),
-                            DiffKind::Modified => "modified".to_string(),
-                        },
-                        key: entry.key.clone(),
-                        old_value: entry.old_value.clone(),
-                        new_value: entry.new_value.clone(),
-                    }
+                .map(|entry| ChangeEntry {
+                    kind: match entry.kind {
+                        DiffKind::Added => "added".to_string(),
+                        DiffKind::Removed => "removed".to_string(),
+                        DiffKind::Modified => "modified".to_string(),
+                    },
+                    key: entry.key.clone(),
+                    old_value: entry.old_value.clone(),
+                    new_value: entry.new_value.clone(),
                 })
                 .collect();
             ModuleReport {
@@ -183,9 +180,9 @@ fn print_json_report(previous: &ScanState, diffs: &[ModuleDiff]) {
         modules,
     };
 
-    // unwrap safety: DiffReport は全フィールドが Serialize なので失敗しない
-    if let Ok(json) = serde_json::to_string_pretty(&report) {
-        println!("{}", json);
+    match serde_json::to_string_pretty(&report) {
+        Ok(json) => println!("{}", json),
+        Err(e) => eprintln!("エラー: JSON シリアライズに失敗しました: {}", e),
     }
 }
 
