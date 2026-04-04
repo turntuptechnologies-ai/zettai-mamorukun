@@ -82,6 +82,7 @@ src/
     health.rs          # ヘルスチェック（ハートビート・メモリ監視）
     metrics.rs         # イベント統計・メトリクス収集
     module_manager.rs  # モジュールマネージャー（モジュール一括管理・設定ホットリロード）
+    scan_diff.rs       # スキャン状態差分レポート（CLI scan-diff コマンド）
     status.rs          # ステータスサーバー（Unix ソケット経由の CLI ステータス問い合わせ）
   modules/
     mod.rs             # モジュールトレイト・レジストリ
