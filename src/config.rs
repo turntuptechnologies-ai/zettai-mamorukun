@@ -237,6 +237,10 @@ pub struct ModulesConfig {
     /// seccomp プロファイル監視モジュールの設定
     #[serde(default)]
     pub seccomp_monitor: SeccompMonitorConfig,
+
+    /// USB デバイス監視モジュールの設定
+    #[serde(default)]
+    pub usb_monitor: UsbMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -1578,6 +1582,42 @@ impl Default for SeccompMonitorConfig {
             enabled: false,
             scan_interval_secs: Self::default_scan_interval_secs(),
             watched_processes: Self::default_watched_processes(),
+        }
+    }
+}
+
+/// USB デバイス監視モジュールの設定
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct UsbMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "UsbMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// USB デバイスディレクトリのパス
+    #[serde(default = "UsbMonitorConfig::default_devices_path")]
+    pub devices_path: PathBuf,
+}
+
+impl UsbMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        10
+    }
+
+    fn default_devices_path() -> PathBuf {
+        PathBuf::from("/sys/bus/usb/devices")
+    }
+}
+
+impl Default for UsbMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            devices_path: Self::default_devices_path(),
         }
     }
 }

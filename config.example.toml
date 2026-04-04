@@ -296,6 +296,16 @@ watched_processes = [
   "haproxy",
 ]
 
+[modules.usb_monitor]
+# USB デバイス監視モジュールの有効/無効
+# /sys/bus/usb/devices/ を定期スキャンし、
+# USB デバイスの接続・切断を検知する（BadUSB 攻撃対策）
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 10
+# USB デバイスディレクトリのパス
+devices_path = "/sys/bus/usb/devices"
+
 [modules.suid_sgid_monitor]
 # SUID/SGID ファイル監視モジュールの有効/無効
 enabled = false
