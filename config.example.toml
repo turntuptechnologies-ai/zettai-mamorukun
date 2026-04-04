@@ -327,6 +327,20 @@ udp_path = "/proc/net/udp"
 # /proc/net/udp6 のパス
 udp6_path = "/proc/net/udp6"
 
+[modules.fd_monitor]
+# ファイルディスクリプタ監視モジュールの有効/無効
+# /proc/[pid]/fd を定期スキャンし、削除済みファイルへの fd 参照、
+# fd 数の閾値超過、不審なソケット参照を検知する
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 60
+# プロセスあたりの最大 fd 数（これを超えると Warning）
+max_fd_per_process = 1024
+# /proc ディレクトリのパス
+proc_path = "/proc"
+# ホワイトリストプロセス名（これらのプロセスは検知対象外）
+whitelist_processes = []
+
 [modules.suid_sgid_monitor]
 # SUID/SGID ファイル監視モジュールの有効/無効
 enabled = false

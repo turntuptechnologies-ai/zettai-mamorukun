@@ -4,6 +4,7 @@ pub mod cgroup_monitor;
 pub mod container_namespace;
 pub mod cron_monitor;
 pub mod dns_monitor;
+pub mod fd_monitor;
 pub mod file_integrity;
 pub mod firewall_monitor;
 pub mod kernel_module;

@@ -245,6 +245,10 @@ pub struct ModulesConfig {
     /// リスニングポート監視モジュールの設定
     #[serde(default)]
     pub listening_port_monitor: ListeningPortMonitorConfig,
+
+    /// ファイルディスクリプタ監視モジュールの設定
+    #[serde(default)]
+    pub fd_monitor: FdMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -1702,6 +1706,56 @@ impl Default for ListeningPortMonitorConfig {
             tcp6_path: Self::default_tcp6_path(),
             udp_path: Self::default_udp_path(),
             udp6_path: Self::default_udp6_path(),
+        }
+    }
+}
+
+/// ファイルディスクリプタ監視モジュールの設定
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct FdMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "FdMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// プロセスあたりの最大 fd 数（これを超えると Warning）
+    #[serde(default = "FdMonitorConfig::default_max_fd_per_process")]
+    pub max_fd_per_process: usize,
+
+    /// /proc ディレクトリのパス
+    #[serde(default = "FdMonitorConfig::default_proc_path")]
+    pub proc_path: PathBuf,
+
+    /// ホワイトリストプロセス名（これらのプロセスは検知対象外）
+    #[serde(default)]
+    pub whitelist_processes: Vec<String>,
+}
+
+impl FdMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        60
+    }
+
+    fn default_max_fd_per_process() -> usize {
+        1024
+    }
+
+    fn default_proc_path() -> PathBuf {
+        PathBuf::from("/proc")
+    }
+}
+
+impl Default for FdMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            max_fd_per_process: Self::default_max_fd_per_process(),
+            proc_path: Self::default_proc_path(),
+            whitelist_processes: Vec::new(),
         }
     }
 }
