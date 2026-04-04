@@ -18,6 +18,7 @@ use crate::modules::listening_port_monitor::ListeningPortMonitorModule;
 use crate::modules::log_tamper::LogTamperModule;
 use crate::modules::mac_monitor::MacMonitorModule;
 use crate::modules::mount_monitor::MountMonitorModule;
+use crate::modules::network_interface_monitor::NetworkInterfaceMonitorModule;
 use crate::modules::network_monitor::NetworkMonitorModule;
 use crate::modules::pam_monitor::PamMonitorModule;
 use crate::modules::pkg_repo_monitor::PkgRepoMonitorModule;
@@ -594,6 +595,16 @@ impl ModuleManager {
             FdMonitorModule,
             "ファイルディスクリプタ監視モジュール"
         );
+        start_module!(
+            modules,
+            config,
+            event_bus,
+            startup_scan_enabled,
+            scan_report,
+            network_interface_monitor,
+            NetworkInterfaceMonitorModule,
+            "ネットワークインターフェース監視モジュール"
+        );
 
         scan_report.total_duration = scan_start.elapsed();
 
@@ -878,6 +889,13 @@ impl ModuleManager {
             fd_monitor,
             FdMonitorModule,
             "ファイルディスクリプタ監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            network_interface_monitor,
+            NetworkInterfaceMonitorModule,
+            "ネットワークインターフェース監視モジュール"
         );
 
         scan_report.total_duration = scan_start.elapsed();
@@ -1256,6 +1274,17 @@ impl ModuleManager {
             fd_monitor,
             FdMonitorModule,
             "ファイルディスクリプタ監視モジュール"
+        );
+        reload_module!(
+            result,
+            self.running_modules,
+            new_modules,
+            old_config,
+            new_config,
+            event_bus,
+            network_interface_monitor,
+            NetworkInterfaceMonitorModule,
+            "ネットワークインターフェース監視モジュール"
         );
 
         self.running_modules = new_modules;

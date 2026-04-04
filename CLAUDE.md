@@ -102,6 +102,7 @@ src/
     log_tamper.rs      # ログファイル改ざん検知モジュール
     mac_monitor.rs     # SELinux/AppArmor 監視モジュール
     mount_monitor.rs   # マウントポイント監視モジュール
+    network_interface_monitor.rs # ネットワークインターフェース監視モジュール
     network_monitor.rs # ネットワーク接続監視モジュール
     pam_monitor.rs     # PAM 設定監視モジュール
     proc_net_monitor.rs # /proc/net/ 監視モジュール（ルーティング・ARP）
