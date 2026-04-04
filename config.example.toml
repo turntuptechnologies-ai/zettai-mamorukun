@@ -306,6 +306,27 @@ scan_interval_secs = 10
 # USB デバイスディレクトリのパス
 devices_path = "/sys/bus/usb/devices"
 
+[modules.listening_port_monitor]
+# リスニングポート監視モジュールの有効/無効
+# /proc/net/tcp{,6}, /proc/net/udp{,6} を定期スキャンし、
+# 想定外のリスニングポートやバインドアドレスの変更を検知する
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 30
+# 許可ポートリスト（"プロトコル:ポート番号" 形式）
+# 空の場合はホワイトリストを適用しない（変更検知のみ）
+allowed_ports = ["tcp:22", "tcp:80", "tcp:443", "udp:53"]
+# IPv6 監視の有効/無効
+enable_ipv6 = true
+# /proc/net/tcp のパス
+tcp_path = "/proc/net/tcp"
+# /proc/net/tcp6 のパス
+tcp6_path = "/proc/net/tcp6"
+# /proc/net/udp のパス
+udp_path = "/proc/net/udp"
+# /proc/net/udp6 のパス
+udp6_path = "/proc/net/udp6"
+
 [modules.suid_sgid_monitor]
 # SUID/SGID ファイル監視モジュールの有効/無効
 enabled = false

@@ -9,6 +9,7 @@ pub mod firewall_monitor;
 pub mod kernel_module;
 pub mod kernel_params;
 pub mod ld_preload_monitor;
+pub mod listening_port_monitor;
 pub mod log_tamper;
 pub mod mac_monitor;
 pub mod mount_monitor;
