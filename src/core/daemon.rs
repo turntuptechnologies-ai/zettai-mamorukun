@@ -1,5 +1,6 @@
 use crate::config::AppConfig;
-use crate::core::action::{ActionEngine, ActionEngineConfig, InFlightTracker};
+use crate::config::DigestConfig;
+use crate::core::action::{ActionEngine, ActionEngineConfig, DigestCollector, InFlightTracker};
 use crate::core::event::{self, EventBus, SecurityEvent, Severity};
 use crate::core::health::HealthChecker;
 use crate::core::metrics::{MetricsCollector, SharedMetrics};
@@ -50,6 +51,7 @@ impl Daemon {
         let mut action_config_sender: Option<watch::Sender<ActionEngineConfig>> = None;
         let mut inflight_tracker: Option<InFlightTracker> = None;
         let mut metrics_config_sender: Option<watch::Sender<u64>> = None;
+        let mut digest_config_sender: Option<watch::Sender<DigestConfig>> = None;
         let event_bus = if self.config.event_bus.enabled {
             let bus = EventBus::with_filters(
                 self.config.event_bus.channel_capacity,
@@ -83,6 +85,20 @@ impl Daemon {
                 tracing::info!(
                     interval_secs = self.config.metrics.interval_secs,
                     "メトリクスコレクターを起動しました"
+                );
+            }
+
+            // ダイジェストコレクターの起動
+            if let Some(ref digest_cfg) = self.config.actions.digest
+                && digest_cfg.enabled
+            {
+                let (collector, sender) = DigestCollector::new(digest_cfg, &bus);
+                digest_config_sender = Some(sender);
+                collector.spawn();
+                tracing::info!(
+                    interval_secs = digest_cfg.interval_secs,
+                    min_events = digest_cfg.min_events,
+                    "ダイジェストコレクターを起動しました"
                 );
             }
 
@@ -335,6 +351,21 @@ impl Daemon {
                                 } else {
                                     tracing::warn!(
                                         "メトリクスのインターバルリロードに失敗しました（受信側が閉じています）"
+                                    );
+                                }
+                            }
+
+                            // ダイジェストコレクターのリロード
+                            if let Some(ref sender) = digest_config_sender
+                                && let Some(ref new_digest) = new_config.actions.digest
+                            {
+                                if sender.send(new_digest.clone()).is_ok() {
+                                    tracing::info!(
+                                        "ダイジェストコレクターの設定をリロードしました"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        "ダイジェストコレクターの設定リロードに失敗しました（受信側が閉じています）"
                                     );
                                 }
                             }

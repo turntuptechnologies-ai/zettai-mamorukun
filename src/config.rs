@@ -1908,6 +1908,10 @@ pub struct ActionConfig {
     /// レートリミット設定（未設定時はレートリミットなし）
     #[serde(default)]
     pub rate_limit: Option<RateLimitConfig>,
+
+    /// ダイジェスト通知設定
+    #[serde(default)]
+    pub digest: Option<DigestConfig>,
 }
 
 /// レートリミット設定
@@ -1963,6 +1967,67 @@ pub struct ActionRuleConfig {
 impl ActionRuleConfig {
     fn default_timeout_secs() -> u64 {
         30
+    }
+}
+
+/// ダイジェスト通知設定
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct DigestConfig {
+    /// ダイジェスト通知の有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+    /// ダイジェスト集約間隔（秒）
+    #[serde(default = "DigestConfig::default_interval_secs")]
+    pub interval_secs: u64,
+    /// ダイジェスト通知の最小イベント数
+    #[serde(default = "DigestConfig::default_min_events")]
+    pub min_events: usize,
+    /// ダイジェスト通知用 Webhook URL
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+    /// HTTP メソッド
+    #[serde(default = "DigestConfig::default_method")]
+    pub method: String,
+    /// HTTP ヘッダー
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
+    /// ボディテンプレート
+    pub body_template: Option<String>,
+    /// リトライ回数
+    #[serde(default = "DigestConfig::default_max_retries")]
+    pub max_retries: u32,
+}
+
+impl Default for DigestConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: Self::default_interval_secs(),
+            min_events: Self::default_min_events(),
+            webhook_url: None,
+            method: Self::default_method(),
+            headers: std::collections::HashMap::new(),
+            body_template: None,
+            max_retries: Self::default_max_retries(),
+        }
+    }
+}
+
+impl DigestConfig {
+    fn default_interval_secs() -> u64 {
+        300
+    }
+
+    fn default_min_events() -> usize {
+        2
+    }
+
+    fn default_method() -> String {
+        "POST".to_string()
+    }
+
+    fn default_max_retries() -> u32 {
+        3
     }
 }
 
