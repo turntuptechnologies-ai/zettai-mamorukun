@@ -373,6 +373,21 @@ threshold_errors_per_sec = 10
 # ドロップ数/秒の閾値（受信+送信の合計、0 で無効化）
 threshold_drops_per_sec = 10
 
+[modules.env_injection_monitor]
+# 環境変数インジェクション検知モジュールの有効/無効
+# /proc/*/environ を定期スキャンし、プロセス単位の不審な環境変数設定を検知する
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 60
+# 除外プロセス名リスト（ランタイムパス変数の検知対象外）
+exclude_processes = ["java", "gradle", "mvn", "node", "npm", "python3", "ruby", "perl"]
+# 不審パスとみなすディレクトリのリスト
+suspicious_paths = ["/tmp", "/dev/shm", "/var/tmp", "."]
+# 追加の危険環境変数名（組み込みリストに加えて検知する変数名）
+extra_dangerous_vars = []
+# proxy 変数（HTTP_PROXY/HTTPS_PROXY）の検知を有効にするか
+check_proxy_vars = true
+
 [modules.suid_sgid_monitor]
 # SUID/SGID ファイル監視モジュールの有効/無効
 enabled = false
