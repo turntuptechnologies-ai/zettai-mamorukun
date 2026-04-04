@@ -1,6 +1,6 @@
 //! アクションエンジン — 検知イベントに対する設定ベースのアクション実行
 
-use crate::config::{ActionConfig, BucketConfig, RateLimitConfig};
+use crate::config::{ActionConfig, BucketConfig, DigestConfig, RateLimitConfig};
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use std::collections::HashMap;
@@ -783,6 +783,265 @@ impl ActionEngine {
     }
 }
 
+/// ダイジェストコレクター — イベントを集約しダイジェスト通知を送信する
+pub struct DigestCollector {
+    receiver: broadcast::Receiver<SecurityEvent>,
+    config: DigestConfig,
+    config_receiver: watch::Receiver<DigestConfig>,
+    client: reqwest::Client,
+}
+
+impl DigestCollector {
+    /// 設定とイベントバスからダイジェストコレクターを構築する
+    pub fn new(config: &DigestConfig, event_bus: &EventBus) -> (Self, watch::Sender<DigestConfig>) {
+        let (config_sender, config_receiver) = watch::channel(config.clone());
+        (
+            Self {
+                receiver: event_bus.subscribe(),
+                config: config.clone(),
+                config_receiver,
+                client: reqwest::Client::new(),
+            },
+            config_sender,
+        )
+    }
+
+    /// 非同期タスクとしてダイジェストコレクターを起動する
+    pub fn spawn(self) {
+        tokio::spawn(async move {
+            Self::run_loop(
+                self.receiver,
+                self.config,
+                self.config_receiver,
+                self.client,
+            )
+            .await;
+        });
+    }
+
+    async fn run_loop(
+        mut receiver: broadcast::Receiver<SecurityEvent>,
+        mut config: DigestConfig,
+        mut config_receiver: watch::Receiver<DigestConfig>,
+        client: reqwest::Client,
+    ) {
+        let mut buffer: Vec<SecurityEvent> = Vec::new();
+        let mut ticker = tokio::time::interval(Duration::from_secs(config.interval_secs));
+        ticker.tick().await; // 最初の tick をスキップ
+
+        loop {
+            tokio::select! {
+                result = receiver.recv() => {
+                    match result {
+                        Ok(event) => {
+                            buffer.push(event);
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!(
+                                skipped = n,
+                                "ダイジェストコレクター: {} 件のイベントをスキップ（遅延）",
+                                n
+                            );
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            // チャネル閉鎖前に残りのバッファをフラッシュ
+                            if buffer.len() >= config.min_events {
+                                Self::flush(&buffer, &config, &client).await;
+                            }
+                            tracing::info!("イベントバスが閉じられました。ダイジェストコレクターを終了します");
+                            break;
+                        }
+                    }
+                }
+                _ = ticker.tick() => {
+                    if buffer.len() >= config.min_events {
+                        Self::flush(&buffer, &config, &client).await;
+                    }
+                    buffer.clear();
+                }
+                result = config_receiver.changed() => {
+                    match result {
+                        Ok(()) => {
+                            let new_config = config_receiver.borrow_and_update().clone();
+                            let old_interval = config.interval_secs;
+                            let new_interval = new_config.interval_secs;
+                            config = new_config;
+                            if old_interval != new_interval {
+                                ticker = tokio::time::interval(Duration::from_secs(new_interval));
+                                ticker.tick().await;
+                                tracing::info!(
+                                    old_interval_secs = old_interval,
+                                    new_interval_secs = new_interval,
+                                    "ダイジェストコレクター: 設定をリロードしました"
+                                );
+                            }
+                        }
+                        Err(_) => {
+                            tracing::info!("設定チャネルが閉じられました。ダイジェストコレクターを終了します");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// バッファ内のイベントを集約してダイジェスト通知を送信する
+    async fn flush(buffer: &[SecurityEvent], config: &DigestConfig, client: &reqwest::Client) {
+        let count = buffer.len();
+        let period_secs = config.interval_secs;
+        let summary = Self::build_summary(buffer, period_secs);
+
+        tracing::info!(count = count, period_secs = period_secs, "{}", summary);
+
+        // Webhook が設定されている場合は送信
+        if let Some(ref url) = config.webhook_url
+            && !url.is_empty()
+        {
+            let body = Self::build_body(config, count, period_secs, &summary);
+            if let Err(e) = Self::send_digest_webhook(
+                client,
+                url,
+                &config.method,
+                &config.headers,
+                &body,
+                config.max_retries,
+            )
+            .await
+            {
+                tracing::error!(
+                    error = %e,
+                    "ダイジェスト Webhook の送信に失敗しました"
+                );
+            }
+        }
+    }
+
+    /// イベントバッファからサマリー文字列を生成する
+    fn build_summary(buffer: &[SecurityEvent], period_secs: u64) -> String {
+        let mut info_count: usize = 0;
+        let mut warning_count: usize = 0;
+        let mut critical_count: usize = 0;
+        let mut module_counts: HashMap<String, usize> = HashMap::new();
+
+        for event in buffer {
+            match event.severity {
+                Severity::Info => info_count += 1,
+                Severity::Warning => warning_count += 1,
+                Severity::Critical => critical_count += 1,
+            }
+            *module_counts
+                .entry(event.source_module.clone())
+                .or_insert(0) += 1;
+        }
+
+        let mut module_parts: Vec<String> = module_counts
+            .iter()
+            .map(|(k, v)| format!("{}({})", k, v))
+            .collect();
+        module_parts.sort();
+
+        format!(
+            "[ダイジェスト] {}秒間に{}件のイベントが発生\n  Critical: {}件, Warning: {}件, Info: {}件\n  モジュール別: {}",
+            period_secs,
+            buffer.len(),
+            critical_count,
+            warning_count,
+            info_count,
+            module_parts.join(", ")
+        )
+    }
+
+    /// テンプレートからボディを生成する
+    fn build_body(config: &DigestConfig, count: usize, period_secs: u64, summary: &str) -> String {
+        match &config.body_template {
+            Some(template) => template
+                .replace("{{count}}", &count.to_string())
+                .replace("{{period_secs}}", &period_secs.to_string())
+                .replace("{{summary}}", summary),
+            None => {
+                fn escape_json(s: &str) -> String {
+                    s.replace('\\', "\\\\")
+                        .replace('"', "\\\"")
+                        .replace('\n', "\\n")
+                        .replace('\r', "\\r")
+                        .replace('\t', "\\t")
+                }
+                format!(
+                    r#"{{"type":"digest","count":{},"period_secs":{},"summary":"{}"}}"#,
+                    count,
+                    period_secs,
+                    escape_json(summary),
+                )
+            }
+        }
+    }
+
+    /// ダイジェスト Webhook を送信する（リトライ付き）
+    async fn send_digest_webhook(
+        client: &reqwest::Client,
+        url: &str,
+        method: &str,
+        headers: &HashMap<String, String>,
+        body: &str,
+        max_retries: u32,
+    ) -> Result<(), AppError> {
+        let masked = ActionEngine::mask_url(url);
+
+        for attempt in 0..=max_retries {
+            if attempt > 0 {
+                let delay = std::cmp::min(1u64 << (attempt - 1), 30);
+                tokio::time::sleep(Duration::from_secs(delay)).await;
+            }
+
+            let mut request = match method.to_uppercase().as_str() {
+                "GET" => client.get(url),
+                _ => client.post(url),
+            };
+
+            for (key, value) in headers {
+                request = request.header(key, value);
+            }
+
+            let result = request
+                .body(body.to_string())
+                .timeout(Duration::from_secs(10))
+                .send()
+                .await;
+
+            match result {
+                Ok(response) => {
+                    let status = response.status();
+                    if status.is_success() {
+                        tracing::info!(
+                            url = %masked,
+                            "ダイジェスト Webhook を送信しました"
+                        );
+                        return Ok(());
+                    } else if status.is_client_error() {
+                        return Err(AppError::WebhookSend {
+                            message: format!("ダイジェスト Webhook: HTTP {}", status),
+                        });
+                    }
+                    // 5xx はリトライ
+                }
+                Err(e) if e.is_timeout() || e.is_connect() => {
+                    // ネットワークエラー/タイムアウトはリトライ
+                }
+                Err(e) => {
+                    return Err(AppError::WebhookSend {
+                        message: format!("ダイジェスト Webhook: {}", e),
+                    });
+                }
+            }
+        }
+
+        Err(AppError::WebhookSend {
+            message: "ダイジェスト Webhook: 最大リトライ回数に達しました".to_string(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -920,6 +1179,7 @@ mod tests {
                 },
             ],
             rate_limit: None,
+            digest: None,
         };
         let bus = EventBus::new(16);
         let result = ActionEngine::new(&config, &bus);
@@ -939,6 +1199,7 @@ mod tests {
             enabled: true,
             rules: vec![make_rule_config("bad_rule", "command", None)],
             rate_limit: None,
+            digest: None,
         };
         let bus = EventBus::new(16);
         let result = ActionEngine::new(&config, &bus);
@@ -957,6 +1218,7 @@ mod tests {
                 r
             }],
             rate_limit: None,
+            digest: None,
         };
         let bus = EventBus::new(16);
         let result = ActionEngine::new(&config, &bus);
@@ -988,6 +1250,7 @@ mod tests {
                 r
             }],
             rate_limit: None,
+            digest: None,
         };
         let bus = EventBus::new(16);
         let result = ActionEngine::new(&config, &bus);
@@ -1055,6 +1318,7 @@ mod tests {
                 r
             }],
             rate_limit: None,
+            digest: None,
         };
         let bus = EventBus::new(16);
         let (engine, _sender, _tracker) = ActionEngine::new(&config, &bus).unwrap();
@@ -1073,6 +1337,7 @@ mod tests {
                 r
             }],
             rate_limit: None,
+            digest: None,
         };
         let bus = EventBus::new(16);
         let (engine, _sender, _tracker) = ActionEngine::new(&config, &bus).unwrap();
@@ -1090,6 +1355,7 @@ mod tests {
                 r
             }],
             rate_limit: None,
+            digest: None,
         };
         let rules = ActionEngine::parse_rules(&config).unwrap();
         assert_eq!(rules.len(), 2);
@@ -1108,6 +1374,7 @@ mod tests {
                 r
             }],
             rate_limit: None,
+            digest: None,
         };
         let result = ActionEngine::parse_rules(&config);
         assert!(result.is_err());
@@ -1119,6 +1386,7 @@ mod tests {
             enabled: true,
             rules: vec![],
             rate_limit: None,
+            digest: None,
         };
         let rules = ActionEngine::parse_rules(&config).unwrap();
         assert!(rules.is_empty());
@@ -1130,6 +1398,7 @@ mod tests {
             enabled: true,
             rules: vec![make_rule_config("log_all", "log", None)],
             rate_limit: None,
+            digest: None,
         };
         let bus = EventBus::new(16);
         let (engine, sender, _tracker) = ActionEngine::new(&config, &bus).unwrap();
@@ -1152,6 +1421,7 @@ mod tests {
             enabled: true,
             rules: vec![make_rule_config("initial_rule", "log", None)],
             rate_limit: None,
+            digest: None,
         };
         let bus = EventBus::new(16);
         let (engine, sender, _tracker) = ActionEngine::new(&config, &bus).unwrap();
@@ -1167,6 +1437,7 @@ mod tests {
                 make_rule_config("rule_b", "log", None),
             ],
             rate_limit: None,
+            digest: None,
         };
         let engine_config = ActionEngine::parse_config(&new_config).unwrap();
         assert!(sender.send(engine_config).is_ok());
@@ -1320,6 +1591,7 @@ mod tests {
                 command: Some(make_bucket_config(5, 1, 60)),
                 webhook: None,
             }),
+            digest: None,
         };
         let engine_config = ActionEngine::parse_config(&config).unwrap();
         assert_eq!(engine_config.rules.len(), 1);
@@ -1414,5 +1686,160 @@ mod tests {
         assert!(result.is_err());
         // パニック時もガードが正しく drop されている
         assert_eq!(tracker.in_flight_count(), 0);
+    }
+
+    // --- DigestCollector テスト ---
+
+    fn make_digest_config() -> DigestConfig {
+        DigestConfig {
+            enabled: true,
+            interval_secs: 1,
+            min_events: 2,
+            webhook_url: None,
+            method: "POST".to_string(),
+            headers: HashMap::new(),
+            body_template: None,
+            max_retries: 3,
+        }
+    }
+
+    #[test]
+    fn test_digest_build_summary() {
+        let events = vec![
+            make_event(Severity::Info, "file_integrity"),
+            make_event(Severity::Warning, "file_integrity"),
+            make_event(Severity::Critical, "process_monitor"),
+            make_event(Severity::Info, "network_monitor"),
+            make_event(Severity::Warning, "network_monitor"),
+        ];
+
+        let summary = DigestCollector::build_summary(&events, 300);
+        assert!(summary.contains("[ダイジェスト]"));
+        assert!(summary.contains("300秒間に5件"));
+        assert!(summary.contains("Critical: 1件"));
+        assert!(summary.contains("Warning: 2件"));
+        assert!(summary.contains("Info: 2件"));
+        assert!(summary.contains("file_integrity(2)"));
+        assert!(summary.contains("process_monitor(1)"));
+        assert!(summary.contains("network_monitor(2)"));
+    }
+
+    #[test]
+    fn test_digest_build_summary_empty() {
+        let events: Vec<SecurityEvent> = vec![];
+        let summary = DigestCollector::build_summary(&events, 60);
+        assert!(summary.contains("60秒間に0件"));
+        assert!(summary.contains("Critical: 0件"));
+    }
+
+    #[test]
+    fn test_digest_build_body_with_template() {
+        let config = DigestConfig {
+            body_template: Some(
+                r#"{"count": {{count}}, "period": {{period_secs}}, "summary": "{{summary}}"}"#
+                    .to_string(),
+            ),
+            ..make_digest_config()
+        };
+        let body = DigestCollector::build_body(&config, 5, 300, "テストサマリー");
+        assert!(body.contains("\"count\": 5"));
+        assert!(body.contains("\"period\": 300"));
+        assert!(body.contains("テストサマリー"));
+    }
+
+    #[test]
+    fn test_digest_build_body_default() {
+        let config = DigestConfig {
+            body_template: None,
+            ..make_digest_config()
+        };
+        let body = DigestCollector::build_body(&config, 3, 60, "テスト\nサマリー");
+        assert!(body.contains("\"type\":\"digest\""));
+        assert!(body.contains("\"count\":3"));
+        assert!(body.contains("\"period_secs\":60"));
+        // 改行がエスケープされていること
+        assert!(body.contains("\\n"));
+        assert!(!body.contains('\n'));
+    }
+
+    #[test]
+    fn test_digest_collector_new() {
+        let config = make_digest_config();
+        let bus = EventBus::new(16);
+        let (collector, _sender) = DigestCollector::new(&config, &bus);
+        assert_eq!(collector.config.interval_secs, 1);
+        assert_eq!(collector.config.min_events, 2);
+    }
+
+    #[tokio::test]
+    async fn test_digest_collector_receives_events() {
+        let config = make_digest_config();
+        let bus = EventBus::new(16);
+        let (collector, _sender) = DigestCollector::new(&config, &bus);
+        collector.spawn();
+
+        // イベントを発行
+        bus.publish(SecurityEvent::new(
+            "test_event",
+            Severity::Info,
+            "test_module",
+            "テストイベント1",
+        ));
+        bus.publish(SecurityEvent::new(
+            "test_event",
+            Severity::Warning,
+            "test_module",
+            "テストイベント2",
+        ));
+
+        // ダイジェストコレクターがイベントを処理しフラッシュする時間を与える（1秒インターバル）
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        // パニックせずに動作することを確認
+    }
+
+    #[tokio::test]
+    async fn test_digest_collector_skips_below_min_events() {
+        let config = DigestConfig {
+            min_events: 5,
+            ..make_digest_config()
+        };
+        let bus = EventBus::new(16);
+        let (collector, _sender) = DigestCollector::new(&config, &bus);
+        collector.spawn();
+
+        // min_events (5) 未満のイベントを発行
+        bus.publish(SecurityEvent::new(
+            "test_event",
+            Severity::Info,
+            "test_module",
+            "テストイベント",
+        ));
+
+        // フラッシュタイミングを待つ
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        // パニックせずに動作することを確認（min_events 未満なのでフラッシュされない）
+    }
+
+    #[tokio::test]
+    async fn test_digest_collector_hot_reload() {
+        let config = make_digest_config();
+        let bus = EventBus::new(16);
+        let (collector, sender) = DigestCollector::new(&config, &bus);
+        collector.spawn();
+
+        // 設定を更新
+        let new_config = DigestConfig {
+            interval_secs: 2,
+            min_events: 1,
+            ..make_digest_config()
+        };
+        assert!(sender.send(new_config).is_ok());
+
+        // 設定更新が処理される時間を与える
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // パニックせずに動作することを確認
     }
 }

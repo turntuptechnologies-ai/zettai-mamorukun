@@ -493,6 +493,27 @@ enabled = false
 # refill_amount = 10        # 補充トークン数
 # refill_interval_secs = 60 # 補充間隔（秒）
 
+# ダイジェスト通知設定
+# 一定期間内のイベントを集約し、まとめてダイジェスト通知として送信する
+# Webhook のノイズ削減に有効
+# [actions.digest]
+# enabled = false
+# # ダイジェスト集約間隔（秒）
+# interval_secs = 300
+# # ダイジェスト通知の最小イベント数（この数未満の場合はスキップ）
+# min_events = 2
+# # ダイジェスト通知用 Webhook URL（未設定の場合はログのみ）
+# webhook_url = "https://hooks.slack.com/services/xxx/yyy/zzz"
+# # HTTP メソッド
+# method = "POST"
+# # リトライ回数
+# max_retries = 3
+# # HTTP ヘッダー
+# [actions.digest.headers]
+# Content-Type = "application/json"
+# # ボディテンプレート（プレースホルダ: {{count}}, {{summary}}, {{period_secs}}）
+# body_template = '{"text": "ダイジェスト通知: {{period_secs}}秒間に{{count}}件のイベントが発生しました\n{{summary}}"}'
+
 [status]
 # ステータスサーバー（Unix ソケット）の有効/無効
 # 有効にすると `zettai-mamorukun status` コマンドでデーモンの状態を確認できる
