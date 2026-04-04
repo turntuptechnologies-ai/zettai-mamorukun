@@ -257,6 +257,10 @@ pub struct ModulesConfig {
     /// ネットワークトラフィック異常検知モジュールの設定
     #[serde(default)]
     pub network_traffic_monitor: NetworkTrafficMonitorConfig,
+
+    /// 環境変数インジェクション検知モジュールの設定
+    #[serde(default)]
+    pub env_injection_monitor: EnvInjectionMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -1890,6 +1894,79 @@ impl Default for NetworkTrafficMonitorConfig {
             threshold_packets_per_sec: Self::default_threshold_packets_per_sec(),
             threshold_errors_per_sec: Self::default_threshold_errors_per_sec(),
             threshold_drops_per_sec: Self::default_threshold_drops_per_sec(),
+        }
+    }
+}
+
+/// 環境変数インジェクション検知モジュールの設定
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct EnvInjectionMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "EnvInjectionMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 除外プロセス名リスト
+    #[serde(default = "EnvInjectionMonitorConfig::default_exclude_processes")]
+    pub exclude_processes: Vec<String>,
+
+    /// 不審パスとみなすディレクトリのリスト
+    #[serde(default = "EnvInjectionMonitorConfig::default_suspicious_paths")]
+    pub suspicious_paths: Vec<String>,
+
+    /// 追加の危険環境変数名
+    #[serde(default)]
+    pub extra_dangerous_vars: Vec<String>,
+
+    /// proxy 変数の検知を有効にするか
+    #[serde(default = "EnvInjectionMonitorConfig::default_check_proxy_vars")]
+    pub check_proxy_vars: bool,
+}
+
+impl EnvInjectionMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        60
+    }
+
+    fn default_exclude_processes() -> Vec<String> {
+        vec![
+            "java".to_string(),
+            "gradle".to_string(),
+            "mvn".to_string(),
+            "node".to_string(),
+            "npm".to_string(),
+            "python3".to_string(),
+            "ruby".to_string(),
+            "perl".to_string(),
+        ]
+    }
+
+    fn default_suspicious_paths() -> Vec<String> {
+        vec![
+            "/tmp".to_string(),
+            "/dev/shm".to_string(),
+            "/var/tmp".to_string(),
+            ".".to_string(),
+        ]
+    }
+
+    fn default_check_proxy_vars() -> bool {
+        true
+    }
+}
+
+impl Default for EnvInjectionMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            exclude_processes: Self::default_exclude_processes(),
+            suspicious_paths: Self::default_suspicious_paths(),
+            extra_dangerous_vars: Vec::new(),
+            check_proxy_vars: Self::default_check_proxy_vars(),
         }
     }
 }

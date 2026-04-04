@@ -92,6 +92,7 @@ src/
     container_namespace.rs # コンテナ・名前空間検知モジュール
     cron_monitor.rs    # Cron ジョブ改ざん検知モジュール
     dns_monitor.rs     # DNS設定改ざん検知モジュール
+    env_injection_monitor.rs # 環境変数インジェクション検知モジュール
     fd_monitor.rs      # ファイルディスクリプタ監視モジュール
     file_integrity.rs  # ファイル整合性監視モジュール
     firewall_monitor.rs # ファイアウォールルール監視モジュール

@@ -8,6 +8,7 @@ use crate::modules::cgroup_monitor::CgroupMonitorModule;
 use crate::modules::container_namespace::ContainerNamespaceModule;
 use crate::modules::cron_monitor::CronMonitorModule;
 use crate::modules::dns_monitor::DnsMonitorModule;
+use crate::modules::env_injection_monitor::EnvInjectionMonitorModule;
 use crate::modules::fd_monitor::FdMonitorModule;
 use crate::modules::file_integrity::FileIntegrityModule;
 use crate::modules::firewall_monitor::FirewallMonitorModule;
@@ -616,6 +617,16 @@ impl ModuleManager {
             NetworkTrafficMonitorModule,
             "ネットワークトラフィック異常検知モジュール"
         );
+        start_module!(
+            modules,
+            config,
+            event_bus,
+            startup_scan_enabled,
+            scan_report,
+            env_injection_monitor,
+            EnvInjectionMonitorModule,
+            "環境変数インジェクション検知モジュール"
+        );
 
         scan_report.total_duration = scan_start.elapsed();
 
@@ -914,6 +925,13 @@ impl ModuleManager {
             network_traffic_monitor,
             NetworkTrafficMonitorModule,
             "ネットワークトラフィック異常検知モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            env_injection_monitor,
+            EnvInjectionMonitorModule,
+            "環境変数インジェクション検知モジュール"
         );
 
         scan_report.total_duration = scan_start.elapsed();
@@ -1314,6 +1332,17 @@ impl ModuleManager {
             network_traffic_monitor,
             NetworkTrafficMonitorModule,
             "ネットワークトラフィック異常検知モジュール"
+        );
+        reload_module!(
+            result,
+            self.running_modules,
+            new_modules,
+            old_config,
+            new_config,
+            event_bus,
+            env_injection_monitor,
+            EnvInjectionMonitorModule,
+            "環境変数インジェクション検知モジュール"
         );
 
         self.running_modules = new_modules;
