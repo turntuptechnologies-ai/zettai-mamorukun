@@ -353,6 +353,26 @@ ignore_interfaces = ["lo"]
 # /sys/class/net/ ディレクトリのパス
 sys_class_net_path = "/sys/class/net"
 
+[modules.network_traffic_monitor]
+# ネットワークトラフィック異常検知モジュールの有効/無効
+# /proc/net/dev の統計値を定期スキャンし、トラフィック量の急激な増減を検知する
+# DDoS やデータ流出の早期警告に有効
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 30
+# 無視するインターフェース名のリスト
+ignore_interfaces = ["lo"]
+# /proc/net/dev ファイルのパス
+proc_net_dev_path = "/proc/net/dev"
+# バイト数/秒の閾値（受信+送信の合計、0 で無効化）
+threshold_bytes_per_sec = 104857600   # 100 MB/s
+# パケット数/秒の閾値（受信+送信の合計、0 で無効化）
+threshold_packets_per_sec = 100000    # 100k packets/s
+# エラー数/秒の閾値（受信+送信の合計、0 で無効化）
+threshold_errors_per_sec = 10
+# ドロップ数/秒の閾値（受信+送信の合計、0 で無効化）
+threshold_drops_per_sec = 10
+
 [modules.suid_sgid_monitor]
 # SUID/SGID ファイル監視モジュールの有効/無効
 enabled = false
