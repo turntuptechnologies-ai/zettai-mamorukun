@@ -8,6 +8,7 @@ use crate::modules::cgroup_monitor::CgroupMonitorModule;
 use crate::modules::container_namespace::ContainerNamespaceModule;
 use crate::modules::cron_monitor::CronMonitorModule;
 use crate::modules::dns_monitor::DnsMonitorModule;
+use crate::modules::fd_monitor::FdMonitorModule;
 use crate::modules::file_integrity::FileIntegrityModule;
 use crate::modules::firewall_monitor::FirewallMonitorModule;
 use crate::modules::kernel_module::KernelModuleMonitor;
@@ -583,6 +584,16 @@ impl ModuleManager {
             ListeningPortMonitorModule,
             "リスニングポート監視モジュール"
         );
+        start_module!(
+            modules,
+            config,
+            event_bus,
+            startup_scan_enabled,
+            scan_report,
+            fd_monitor,
+            FdMonitorModule,
+            "ファイルディスクリプタ監視モジュール"
+        );
 
         scan_report.total_duration = scan_start.elapsed();
 
@@ -860,6 +871,13 @@ impl ModuleManager {
             listening_port_monitor,
             ListeningPortMonitorModule,
             "リスニングポート監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            fd_monitor,
+            FdMonitorModule,
+            "ファイルディスクリプタ監視モジュール"
         );
 
         scan_report.total_duration = scan_start.elapsed();
@@ -1227,6 +1245,17 @@ impl ModuleManager {
             listening_port_monitor,
             ListeningPortMonitorModule,
             "リスニングポート監視モジュール"
+        );
+        reload_module!(
+            result,
+            self.running_modules,
+            new_modules,
+            old_config,
+            new_config,
+            event_bus,
+            fd_monitor,
+            FdMonitorModule,
+            "ファイルディスクリプタ監視モジュール"
         );
 
         self.running_modules = new_modules;
