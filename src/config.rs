@@ -241,6 +241,10 @@ pub struct ModulesConfig {
     /// USB デバイス監視モジュールの設定
     #[serde(default)]
     pub usb_monitor: UsbMonitorConfig,
+
+    /// リスニングポート監視モジュールの設定
+    #[serde(default)]
+    pub listening_port_monitor: ListeningPortMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -1618,6 +1622,86 @@ impl Default for UsbMonitorConfig {
             enabled: false,
             scan_interval_secs: Self::default_scan_interval_secs(),
             devices_path: Self::default_devices_path(),
+        }
+    }
+}
+
+/// リスニングポート監視モジュールの設定
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct ListeningPortMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "ListeningPortMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 許可ポートリスト（"プロトコル:ポート番号" 形式）
+    ///
+    /// 例: ["tcp:22", "tcp:80", "tcp:443", "udp:53"]
+    /// 空の場合はホワイトリストを適用しない（変更検知のみ）
+    #[serde(default)]
+    pub allowed_ports: Vec<String>,
+
+    /// IPv6 監視の有効/無効
+    #[serde(default = "ListeningPortMonitorConfig::default_enable_ipv6")]
+    pub enable_ipv6: bool,
+
+    /// /proc/net/tcp のパス
+    #[serde(default = "ListeningPortMonitorConfig::default_tcp_path")]
+    pub tcp_path: String,
+
+    /// /proc/net/tcp6 のパス
+    #[serde(default = "ListeningPortMonitorConfig::default_tcp6_path")]
+    pub tcp6_path: String,
+
+    /// /proc/net/udp のパス
+    #[serde(default = "ListeningPortMonitorConfig::default_udp_path")]
+    pub udp_path: String,
+
+    /// /proc/net/udp6 のパス
+    #[serde(default = "ListeningPortMonitorConfig::default_udp6_path")]
+    pub udp6_path: String,
+}
+
+impl ListeningPortMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_enable_ipv6() -> bool {
+        true
+    }
+
+    fn default_tcp_path() -> String {
+        "/proc/net/tcp".to_string()
+    }
+
+    fn default_tcp6_path() -> String {
+        "/proc/net/tcp6".to_string()
+    }
+
+    fn default_udp_path() -> String {
+        "/proc/net/udp".to_string()
+    }
+
+    fn default_udp6_path() -> String {
+        "/proc/net/udp6".to_string()
+    }
+}
+
+impl Default for ListeningPortMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            allowed_ports: Vec::new(),
+            enable_ipv6: Self::default_enable_ipv6(),
+            tcp_path: Self::default_tcp_path(),
+            tcp6_path: Self::default_tcp6_path(),
+            udp_path: Self::default_udp_path(),
+            udp6_path: Self::default_udp6_path(),
         }
     }
 }
