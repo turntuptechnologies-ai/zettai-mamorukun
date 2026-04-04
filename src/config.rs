@@ -253,6 +253,10 @@ pub struct ModulesConfig {
     /// ネットワークインターフェース監視モジュールの設定
     #[serde(default)]
     pub network_interface_monitor: NetworkInterfaceMonitorConfig,
+
+    /// ネットワークトラフィック異常検知モジュールの設定
+    #[serde(default)]
+    pub network_traffic_monitor: NetworkTrafficMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -1805,6 +1809,87 @@ impl Default for NetworkInterfaceMonitorConfig {
             scan_interval_secs: Self::default_scan_interval_secs(),
             ignore_interfaces: Self::default_ignore_interfaces(),
             sys_class_net_path: Self::default_sys_class_net_path(),
+        }
+    }
+}
+
+/// ネットワークトラフィック異常検知モジュールの設定
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct NetworkTrafficMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "NetworkTrafficMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 無視するインターフェース名のリスト
+    #[serde(default = "NetworkTrafficMonitorConfig::default_ignore_interfaces")]
+    pub ignore_interfaces: Vec<String>,
+
+    /// /proc/net/dev ファイルのパス
+    #[serde(default = "NetworkTrafficMonitorConfig::default_proc_net_dev_path")]
+    pub proc_net_dev_path: PathBuf,
+
+    /// バイト数/秒の閾値（受信+送信の合計）
+    #[serde(default = "NetworkTrafficMonitorConfig::default_threshold_bytes_per_sec")]
+    pub threshold_bytes_per_sec: u64,
+
+    /// パケット数/秒の閾値（受信+送信の合計）
+    #[serde(default = "NetworkTrafficMonitorConfig::default_threshold_packets_per_sec")]
+    pub threshold_packets_per_sec: u64,
+
+    /// エラー数/秒の閾値（受信+送信の合計）
+    #[serde(default = "NetworkTrafficMonitorConfig::default_threshold_errors_per_sec")]
+    pub threshold_errors_per_sec: u64,
+
+    /// ドロップ数/秒の閾値（受信+送信の合計）
+    #[serde(default = "NetworkTrafficMonitorConfig::default_threshold_drops_per_sec")]
+    pub threshold_drops_per_sec: u64,
+}
+
+impl NetworkTrafficMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_ignore_interfaces() -> Vec<String> {
+        vec!["lo".to_string()]
+    }
+
+    fn default_proc_net_dev_path() -> PathBuf {
+        PathBuf::from("/proc/net/dev")
+    }
+
+    fn default_threshold_bytes_per_sec() -> u64 {
+        104_857_600 // 100 MB/s
+    }
+
+    fn default_threshold_packets_per_sec() -> u64 {
+        100_000 // 100k packets/s
+    }
+
+    fn default_threshold_errors_per_sec() -> u64 {
+        10
+    }
+
+    fn default_threshold_drops_per_sec() -> u64 {
+        10
+    }
+}
+
+impl Default for NetworkTrafficMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            ignore_interfaces: Self::default_ignore_interfaces(),
+            proc_net_dev_path: Self::default_proc_net_dev_path(),
+            threshold_bytes_per_sec: Self::default_threshold_bytes_per_sec(),
+            threshold_packets_per_sec: Self::default_threshold_packets_per_sec(),
+            threshold_errors_per_sec: Self::default_threshold_errors_per_sec(),
+            threshold_drops_per_sec: Self::default_threshold_drops_per_sec(),
         }
     }
 }

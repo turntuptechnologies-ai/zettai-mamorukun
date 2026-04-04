@@ -20,6 +20,7 @@ use crate::modules::mac_monitor::MacMonitorModule;
 use crate::modules::mount_monitor::MountMonitorModule;
 use crate::modules::network_interface_monitor::NetworkInterfaceMonitorModule;
 use crate::modules::network_monitor::NetworkMonitorModule;
+use crate::modules::network_traffic_monitor::NetworkTrafficMonitorModule;
 use crate::modules::pam_monitor::PamMonitorModule;
 use crate::modules::pkg_repo_monitor::PkgRepoMonitorModule;
 use crate::modules::proc_net_monitor::ProcNetMonitorModule;
@@ -605,6 +606,16 @@ impl ModuleManager {
             NetworkInterfaceMonitorModule,
             "ネットワークインターフェース監視モジュール"
         );
+        start_module!(
+            modules,
+            config,
+            event_bus,
+            startup_scan_enabled,
+            scan_report,
+            network_traffic_monitor,
+            NetworkTrafficMonitorModule,
+            "ネットワークトラフィック異常検知モジュール"
+        );
 
         scan_report.total_duration = scan_start.elapsed();
 
@@ -896,6 +907,13 @@ impl ModuleManager {
             network_interface_monitor,
             NetworkInterfaceMonitorModule,
             "ネットワークインターフェース監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            network_traffic_monitor,
+            NetworkTrafficMonitorModule,
+            "ネットワークトラフィック異常検知モジュール"
         );
 
         scan_report.total_duration = scan_start.elapsed();
@@ -1285,6 +1303,17 @@ impl ModuleManager {
             network_interface_monitor,
             NetworkInterfaceMonitorModule,
             "ネットワークインターフェース監視モジュール"
+        );
+        reload_module!(
+            result,
+            self.running_modules,
+            new_modules,
+            old_config,
+            new_config,
+            event_bus,
+            network_traffic_monitor,
+            NetworkTrafficMonitorModule,
+            "ネットワークトラフィック異常検知モジュール"
         );
 
         self.running_modules = new_modules;
