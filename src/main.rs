@@ -37,6 +37,18 @@ enum Commands {
         #[arg(long, default_value = "/var/run/zettai-mamorukun/status.sock")]
         socket_path: PathBuf,
     },
+    /// 前回のスキャン状態と現在の状態を比較し、差分をレポートする
+    ScanDiff {
+        /// スキャン状態ファイルのパス（省略時は設定ファイルの値を使用）
+        #[arg(long, value_name = "PATH")]
+        state_file: Option<PathBuf>,
+        /// 特定モジュールのみ表示
+        #[arg(long, value_name = "NAME")]
+        module: Option<String>,
+        /// JSON 形式で出力
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn init_logging(log_level: &str) {
@@ -152,6 +164,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => {
                     eprintln!("エラー: {}", e);
                     process::exit(1);
+                }
+            }
+            return Ok(());
+        }
+        Some(Commands::ScanDiff {
+            state_file,
+            module,
+            json,
+        }) => {
+            let config_path_ref = &cli.config;
+            let config = match AppConfig::load(config_path_ref) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("エラー: 設定ファイルの読み込みに失敗しました: {}", e);
+                    process::exit(2);
+                }
+            };
+
+            let options = zettai_mamorukun::core::scan_diff::ScanDiffOptions {
+                module_filter: module.clone(),
+                json_output: *json,
+            };
+
+            match zettai_mamorukun::core::scan_diff::run_scan_diff(
+                &config,
+                state_file.as_deref(),
+                &options,
+            )
+            .await
+            {
+                Ok(has_diff) => {
+                    if has_diff {
+                        process::exit(1);
+                    }
+                    // 差分なし: exit(0)
+                }
+                Err(e) => {
+                    eprintln!("エラー: {}", e);
+                    process::exit(2);
                 }
             }
             return Ok(());

@@ -227,6 +227,33 @@ macro_rules! reload_module {
     }};
 }
 
+/// スキャンのみ実行するマクロ（init→initial_scan のみ。start() は呼ばない）
+macro_rules! scan_only_module {
+    ($config:expr, $scan_report:expr, $field:ident, $ModuleType:ty, $label:expr) => {
+        if $config.$field.enabled {
+            let event_bus: Option<crate::core::event::EventBus> = None;
+            let mut module = <$ModuleType>::new($config.$field.clone(), event_bus);
+            match module.init() {
+                Ok(()) => match module.initial_scan().await {
+                    Ok(result) => {
+                        $scan_report.results.push(($label.to_string(), result));
+                    }
+                    Err(e) => {
+                        $scan_report
+                            .errors
+                            .push(($label.to_string(), e.to_string()));
+                    }
+                },
+                Err(e) => {
+                    $scan_report
+                        .errors
+                        .push(($label.to_string(), format!("初期化失敗: {}", e)));
+                }
+            }
+        }
+    };
+}
+
 impl ModuleManager {
     /// 設定に基づいてモジュールを起動し、ModuleManager と起動時スキャンレポートを返す
     ///
@@ -592,6 +619,233 @@ impl ModuleManager {
             tracing::info!(module = %module.name, "モジュールを停止しました");
         }
         self.running_modules.clear();
+    }
+
+    /// スキャンのみ実行する（デーモン起動なし）
+    ///
+    /// CLI の scan-diff コマンドで使用する。各モジュールの `init()` → `initial_scan()` のみ実行し、
+    /// `start()` は呼ばない。
+    pub async fn run_scan_only(config: &ModulesConfig) -> StartupScanReport {
+        let scan_start = Instant::now();
+        let mut scan_report = StartupScanReport {
+            results: Vec::new(),
+            total_duration: Duration::default(),
+            errors: Vec::new(),
+        };
+
+        scan_only_module!(
+            config,
+            scan_report,
+            file_integrity,
+            FileIntegrityModule,
+            "ファイル整合性監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            process_monitor,
+            ProcessMonitorModule,
+            "プロセス異常検知モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            kernel_module,
+            KernelModuleMonitor,
+            "カーネルモジュール監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            at_job_monitor,
+            AtJobMonitorModule,
+            "at/batch ジョブ監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            cron_monitor,
+            CronMonitorModule,
+            "Cron ジョブ改ざん検知モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            log_tamper,
+            LogTamperModule,
+            "ログファイル改ざん検知モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            systemd_service,
+            SystemdServiceModule,
+            "systemd サービス監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            firewall_monitor,
+            FirewallMonitorModule,
+            "ファイアウォールルール監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            dns_monitor,
+            DnsMonitorModule,
+            "DNS設定改ざん検知モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            ssh_key_monitor,
+            SshKeyMonitorModule,
+            "SSH公開鍵ファイル監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            shell_config_monitor,
+            ShellConfigMonitorModule,
+            "シェル設定ファイル監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            tmp_exec_monitor,
+            TmpExecMonitorModule,
+            "一時ディレクトリ実行ファイル検知モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            sudoers_monitor,
+            SudoersMonitorModule,
+            "sudoers ファイル監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            suid_sgid_monitor,
+            SuidSgidMonitorModule,
+            "SUID/SGID ファイル監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            mount_monitor,
+            MountMonitorModule,
+            "マウントポイント監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            ssh_brute_force,
+            SshBruteForceModule,
+            "SSH ブルートフォース検知モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            pkg_repo_monitor,
+            PkgRepoMonitorModule,
+            "パッケージリポジトリ改ざん検知モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            ld_preload_monitor,
+            LdPreloadMonitorModule,
+            "環境変数・LD_PRELOAD 監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            network_monitor,
+            NetworkMonitorModule,
+            "ネットワーク接続監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            user_account,
+            UserAccountModule,
+            "ユーザーアカウント監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            pam_monitor,
+            PamMonitorModule,
+            "PAM 設定監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            security_files_monitor,
+            SecurityFilesMonitorModule,
+            "/etc/security/ 監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            mac_monitor,
+            MacMonitorModule,
+            "SELinux / AppArmor 監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            capabilities_monitor,
+            CapabilitiesMonitorModule,
+            "capabilities 監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            container_namespace,
+            ContainerNamespaceModule,
+            "コンテナ・名前空間検知モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            cgroup_monitor,
+            CgroupMonitorModule,
+            "cgroup 監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            kernel_params,
+            KernelParamsModule,
+            "カーネルパラメータ監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            proc_net_monitor,
+            ProcNetMonitorModule,
+            "/proc/net/ 監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            seccomp_monitor,
+            SeccompMonitorModule,
+            "seccomp 監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            usb_monitor,
+            UsbMonitorModule,
+            "USB デバイス監視モジュール"
+        );
+
+        scan_report.total_duration = scan_start.elapsed();
+        scan_report
     }
 
     /// 設定差分に基づいてモジュールをリロードする

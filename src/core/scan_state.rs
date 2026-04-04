@@ -16,7 +16,8 @@ pub struct ScanState {
 }
 
 /// スナップショットの差分種別
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum DiffKind {
     /// 新規追加されたアイテム
     Added,
@@ -27,7 +28,7 @@ pub enum DiffKind {
 }
 
 /// 個別の差分エントリ
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct DiffEntry {
     /// 差分種別
     pub kind: DiffKind,
@@ -40,7 +41,7 @@ pub struct DiffEntry {
 }
 
 /// モジュール単位の差分結果
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct ModuleDiff {
     /// モジュール名
     pub module_name: String,
