@@ -14,6 +14,7 @@ pub mod listening_port_monitor;
 pub mod log_tamper;
 pub mod mac_monitor;
 pub mod mount_monitor;
+pub mod network_interface_monitor;
 pub mod network_monitor;
 pub mod pam_monitor;
 pub mod pkg_repo_monitor;

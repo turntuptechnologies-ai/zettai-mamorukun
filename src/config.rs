@@ -249,6 +249,10 @@ pub struct ModulesConfig {
     /// ファイルディスクリプタ監視モジュールの設定
     #[serde(default)]
     pub fd_monitor: FdMonitorConfig,
+
+    /// ネットワークインターフェース監視モジュールの設定
+    #[serde(default)]
+    pub network_interface_monitor: NetworkInterfaceMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -1756,6 +1760,51 @@ impl Default for FdMonitorConfig {
             max_fd_per_process: Self::default_max_fd_per_process(),
             proc_path: Self::default_proc_path(),
             whitelist_processes: Vec::new(),
+        }
+    }
+}
+
+/// ネットワークインターフェース監視モジュールの設定
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct NetworkInterfaceMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "NetworkInterfaceMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 無視するインターフェース名のリスト
+    #[serde(default = "NetworkInterfaceMonitorConfig::default_ignore_interfaces")]
+    pub ignore_interfaces: Vec<String>,
+
+    /// /sys/class/net/ ディレクトリのパス
+    #[serde(default = "NetworkInterfaceMonitorConfig::default_sys_class_net_path")]
+    pub sys_class_net_path: PathBuf,
+}
+
+impl NetworkInterfaceMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_ignore_interfaces() -> Vec<String> {
+        vec!["lo".to_string()]
+    }
+
+    fn default_sys_class_net_path() -> PathBuf {
+        PathBuf::from("/sys/class/net")
+    }
+}
+
+impl Default for NetworkInterfaceMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            ignore_interfaces: Self::default_ignore_interfaces(),
+            sys_class_net_path: Self::default_sys_class_net_path(),
         }
     }
 }

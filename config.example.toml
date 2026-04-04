@@ -341,6 +341,18 @@ proc_path = "/proc"
 # ホワイトリストプロセス名（これらのプロセスは検知対象外）
 whitelist_processes = []
 
+[modules.network_interface_monitor]
+# ネットワークインターフェース監視モジュールの有効/無効
+# /sys/class/net/ を定期スキャンし、インターフェースの追加・削除・
+# プロミスキャスモード・フラグ変更を検知する
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 30
+# 無視するインターフェース名のリスト
+ignore_interfaces = ["lo"]
+# /sys/class/net/ ディレクトリのパス
+sys_class_net_path = "/sys/class/net"
+
 [modules.suid_sgid_monitor]
 # SUID/SGID ファイル監視モジュールの有効/無効
 enabled = false
