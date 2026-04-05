@@ -26,6 +26,7 @@ use crate::modules::pam_monitor::PamMonitorModule;
 use crate::modules::pkg_repo_monitor::PkgRepoMonitorModule;
 use crate::modules::proc_net_monitor::ProcNetMonitorModule;
 use crate::modules::process_monitor::ProcessMonitorModule;
+use crate::modules::process_tree_monitor::ProcessTreeMonitorModule;
 use crate::modules::seccomp_monitor::SeccompMonitorModule;
 use crate::modules::security_files_monitor::SecurityFilesMonitorModule;
 use crate::modules::shell_config_monitor::ShellConfigMonitorModule;
@@ -638,6 +639,16 @@ impl ModuleManager {
             ShmMonitorModule,
             "共有メモリ監視モジュール"
         );
+        start_module!(
+            modules,
+            config,
+            event_bus,
+            startup_scan_enabled,
+            scan_report,
+            process_tree_monitor,
+            ProcessTreeMonitorModule,
+            "プロセスツリー監視モジュール"
+        );
 
         scan_report.total_duration = scan_start.elapsed();
 
@@ -950,6 +961,13 @@ impl ModuleManager {
             shm_monitor,
             ShmMonitorModule,
             "共有メモリ監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            process_tree_monitor,
+            ProcessTreeMonitorModule,
+            "プロセスツリー監視モジュール"
         );
 
         scan_report.total_duration = scan_start.elapsed();
@@ -1372,6 +1390,17 @@ impl ModuleManager {
             shm_monitor,
             ShmMonitorModule,
             "共有メモリ監視モジュール"
+        );
+        reload_module!(
+            result,
+            self.running_modules,
+            new_modules,
+            old_config,
+            new_config,
+            event_bus,
+            process_tree_monitor,
+            ProcessTreeMonitorModule,
+            "プロセスツリー監視モジュール"
         );
 
         self.running_modules = new_modules;
