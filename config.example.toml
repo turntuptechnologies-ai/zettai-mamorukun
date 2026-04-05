@@ -399,6 +399,23 @@ watch_dir = "/dev/shm"
 # 大容量ファイルと判定する閾値（MB）
 large_file_threshold_mb = 10
 
+[modules.process_tree_monitor]
+# プロセスツリー監視モジュールの有効/無効
+# プロセスの親子関係を分析し、不審なパターン（Webサーバからのシェル起動等）を検知する
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 60
+# プロセスツリーの最大深度
+max_depth = 10
+# 除外パス
+whitelist_paths = []
+
+# 不審な親子関係パターン（デフォルトパターンは組み込み済み）
+# [[modules.process_tree_monitor.suspicious_patterns]]
+# parent = "nginx|httpd|apache2"
+# child = "sh|bash|dash|zsh|fish"
+# description = "Web サーバからのシェル起動"
+
 [modules.suid_sgid_monitor]
 # SUID/SGID ファイル監視モジュールの有効/無効
 enabled = false

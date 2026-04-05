@@ -265,6 +265,10 @@ pub struct ModulesConfig {
     /// 共有メモリ（/dev/shm）監視モジュールの設定
     #[serde(default)]
     pub shm_monitor: ShmMonitorConfig,
+
+    /// プロセスツリー監視モジュールの設定
+    #[serde(default)]
+    pub process_tree_monitor: ProcessTreeMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -2016,6 +2020,83 @@ impl Default for ShmMonitorConfig {
             scan_interval_secs: Self::default_scan_interval_secs(),
             watch_dir: Self::default_watch_dir(),
             large_file_threshold_mb: Self::default_large_file_threshold_mb(),
+        }
+    }
+}
+
+/// 不審なプロセスツリーパターンの定義
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct SuspiciousTreePattern {
+    /// 親プロセス名の正規表現パターン
+    pub parent: String,
+    /// 子プロセス名の正規表現パターン
+    pub child: String,
+    /// パターンの説明
+    pub description: String,
+}
+
+/// プロセスツリー監視モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct ProcessTreeMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "ProcessTreeMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// プロセスツリーの最大深度
+    #[serde(default = "ProcessTreeMonitorConfig::default_max_depth")]
+    pub max_depth: usize,
+
+    /// 不審な親子関係パターン
+    #[serde(default = "ProcessTreeMonitorConfig::default_suspicious_patterns")]
+    pub suspicious_patterns: Vec<SuspiciousTreePattern>,
+
+    /// 除外パス
+    #[serde(default)]
+    pub whitelist_paths: Vec<PathBuf>,
+}
+
+impl ProcessTreeMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        60
+    }
+
+    fn default_max_depth() -> usize {
+        10
+    }
+
+    fn default_suspicious_patterns() -> Vec<SuspiciousTreePattern> {
+        vec![
+            SuspiciousTreePattern {
+                parent: "nginx|httpd|apache2".to_string(),
+                child: "sh|bash|dash|zsh|fish".to_string(),
+                description: "Web サーバからのシェル起動".to_string(),
+            },
+            SuspiciousTreePattern {
+                parent: "mysqld|postgres|mongod".to_string(),
+                child: "sh|bash|dash|zsh|fish".to_string(),
+                description: "データベースからのシェル起動".to_string(),
+            },
+            SuspiciousTreePattern {
+                parent: "nginx|httpd|apache2".to_string(),
+                child: "python[23]?|perl|ruby|php".to_string(),
+                description: "Web サーバからのインタプリタ起動".to_string(),
+            },
+        ]
+    }
+}
+
+impl Default for ProcessTreeMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            max_depth: Self::default_max_depth(),
+            suspicious_patterns: Self::default_suspicious_patterns(),
+            whitelist_paths: Vec::new(),
         }
     }
 }
