@@ -388,6 +388,17 @@ extra_dangerous_vars = []
 # proxy 変数（HTTP_PROXY/HTTPS_PROXY）の検知を有効にするか
 check_proxy_vars = true
 
+[modules.shm_monitor]
+# 共有メモリ（/dev/shm）監視モジュールの有効/無効
+# /dev/shm 内の不審なファイル（実行可能ファイル、ELFバイナリ、大容量ファイル、隠しファイル）を検知する
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 30
+# 監視対象ディレクトリのパス
+watch_dir = "/dev/shm"
+# 大容量ファイルと判定する閾値（MB）
+large_file_threshold_mb = 10
+
 [modules.suid_sgid_monitor]
 # SUID/SGID ファイル監視モジュールの有効/無効
 enabled = false

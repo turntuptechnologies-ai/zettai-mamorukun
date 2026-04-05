@@ -25,6 +25,7 @@ pub mod process_monitor;
 pub mod seccomp_monitor;
 pub mod security_files_monitor;
 pub mod shell_config_monitor;
+pub mod shm_monitor;
 pub mod ssh_brute_force;
 pub mod ssh_key_monitor;
 pub mod sudoers_monitor;
