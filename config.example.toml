@@ -416,6 +416,25 @@ whitelist_paths = []
 # child = "sh|bash|dash|zsh|fish"
 # description = "Web サーバからのシェル起動"
 
+[modules.inotify_monitor]
+# inotify ベースのリアルタイムファイル変更検知モジュールの有効/無効
+# inotify を使ってファイルシステムの変更をリアルタイムに検知する
+# 既存の file_integrity モジュール（ポーリング型）と異なり、低レイテンシで検知可能
+enabled = false
+# 監視対象パスのリスト
+watch_paths = ["/etc", "/usr/bin", "/usr/sbin"]
+# 再帰的監視の有効/無効（サブディレクトリも監視するか）
+recursive = true
+# 除外パターン（glob）のリスト
+# マッチするファイル名・ディレクトリ名は監視対象から除外される
+exclude_patterns = ["*.swp", "*.tmp", "*~", ".git"]
+# inotify watch の最大数
+# /proc/sys/fs/inotify/max_user_watches を超えないよう設定
+max_watches = 65536
+# デバウンス時間（ミリ秒）
+# 同一ファイルの連続イベントをこの時間内で集約する
+debounce_ms = 100
+
 [modules.xattr_monitor]
 # ファイルシステム xattr（拡張属性）監視モジュールの有効/無効
 # SELinux ラベル、capabilities 属性、ACL 等の拡張属性の変更を検知する

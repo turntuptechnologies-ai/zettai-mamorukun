@@ -12,6 +12,7 @@ use crate::modules::env_injection_monitor::EnvInjectionMonitorModule;
 use crate::modules::fd_monitor::FdMonitorModule;
 use crate::modules::file_integrity::FileIntegrityModule;
 use crate::modules::firewall_monitor::FirewallMonitorModule;
+use crate::modules::inotify_monitor::InotifyMonitorModule;
 use crate::modules::kernel_module::KernelModuleMonitor;
 use crate::modules::kernel_params::KernelParamsModule;
 use crate::modules::ld_preload_monitor::LdPreloadMonitorModule;
@@ -660,6 +661,16 @@ impl ModuleManager {
             XattrMonitorModule,
             "xattr 監視モジュール"
         );
+        start_module!(
+            modules,
+            config,
+            event_bus,
+            startup_scan_enabled,
+            scan_report,
+            inotify_monitor,
+            InotifyMonitorModule,
+            "inotify 監視モジュール"
+        );
 
         scan_report.total_duration = scan_start.elapsed();
 
@@ -986,6 +997,13 @@ impl ModuleManager {
             xattr_monitor,
             XattrMonitorModule,
             "xattr 監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            inotify_monitor,
+            InotifyMonitorModule,
+            "inotify 監視モジュール"
         );
 
         scan_report.total_duration = scan_start.elapsed();
@@ -1430,6 +1448,17 @@ impl ModuleManager {
             xattr_monitor,
             XattrMonitorModule,
             "xattr 監視モジュール"
+        );
+        reload_module!(
+            result,
+            self.running_modules,
+            new_modules,
+            old_config,
+            new_config,
+            event_bus,
+            inotify_monitor,
+            InotifyMonitorModule,
+            "inotify 監視モジュール"
         );
 
         self.running_modules = new_modules;

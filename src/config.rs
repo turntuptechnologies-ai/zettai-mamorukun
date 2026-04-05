@@ -273,6 +273,10 @@ pub struct ModulesConfig {
     /// ファイルシステム xattr 監視モジュールの設定
     #[serde(default)]
     pub xattr_monitor: XattrMonitorConfig,
+
+    /// inotify ベースのリアルタイムファイル変更検知モジュールの設定
+    #[serde(default)]
+    pub inotify_monitor: InotifyMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -2155,6 +2159,69 @@ impl Default for XattrMonitorConfig {
             scan_interval_secs: Self::default_scan_interval_secs(),
             watch_paths: Self::default_watch_paths(),
             namespaces: Self::default_namespaces(),
+        }
+    }
+}
+
+/// inotify ベースのリアルタイムファイル変更検知モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct InotifyMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// 監視対象パスのリスト
+    #[serde(default = "InotifyMonitorConfig::default_watch_paths")]
+    pub watch_paths: Vec<PathBuf>,
+
+    /// 再帰的監視の有効/無効（サブディレクトリも監視するか）
+    #[serde(default = "InotifyMonitorConfig::default_recursive")]
+    pub recursive: bool,
+
+    /// 除外パターン（glob）のリスト
+    #[serde(default)]
+    pub exclude_patterns: Vec<String>,
+
+    /// inotify watch の最大数
+    #[serde(default = "InotifyMonitorConfig::default_max_watches")]
+    pub max_watches: u32,
+
+    /// デバウンス時間（ミリ秒）
+    #[serde(default = "InotifyMonitorConfig::default_debounce_ms")]
+    pub debounce_ms: u64,
+}
+
+impl InotifyMonitorConfig {
+    fn default_watch_paths() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/etc"),
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/usr/sbin"),
+        ]
+    }
+
+    fn default_recursive() -> bool {
+        true
+    }
+
+    fn default_max_watches() -> u32 {
+        65536
+    }
+
+    fn default_debounce_ms() -> u64 {
+        100
+    }
+}
+
+impl Default for InotifyMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            watch_paths: Self::default_watch_paths(),
+            recursive: Self::default_recursive(),
+            exclude_patterns: Vec::new(),
+            max_watches: Self::default_max_watches(),
+            debounce_ms: Self::default_debounce_ms(),
         }
     }
 }

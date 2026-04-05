@@ -8,6 +8,7 @@ pub mod env_injection_monitor;
 pub mod fd_monitor;
 pub mod file_integrity;
 pub mod firewall_monitor;
+pub mod inotify_monitor;
 pub mod kernel_module;
 pub mod kernel_params;
 pub mod ld_preload_monitor;
