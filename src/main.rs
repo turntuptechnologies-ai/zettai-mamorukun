@@ -30,6 +30,9 @@ enum Commands {
         /// チェック対象の設定ファイルパス（省略時は --config の値を使用）
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
+        /// デフォルト設定との差分を表示する
+        #[arg(long)]
+        diff: bool,
     },
     /// デーモンの動作状態を表示する
     Status {
@@ -145,15 +148,85 @@ fn run_check_config(config_path: &Path) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
+/// デフォルト設定との差分を表示する
+fn run_check_config_diff(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    eprintln!(
+        "設定ファイルの差分を表示しています: {}",
+        config_path.display()
+    );
+
+    // ファイル存在チェック
+    if !config_path.exists() {
+        eprintln!(
+            "エラー: 設定ファイルが見つかりません: {}",
+            config_path.display()
+        );
+        process::exit(1);
+    }
+
+    // TOML パース
+    let config = match AppConfig::load(config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("エラー: {}", e);
+            if let AppError::ConfigParse { source, .. } = &e {
+                eprintln!("  詳細: {}", source);
+            }
+            process::exit(1);
+        }
+    };
+
+    // セマンティックバリデーション
+    if let Err(e) = config.validate() {
+        if let AppError::ConfigValidation { errors, .. } = &e {
+            eprintln!("\n設定バリデーションエラー:");
+            for (i, err) in errors.iter().enumerate() {
+                eprintln!("  {}. {}", i + 1, err);
+            }
+            eprintln!("\n{} 件のエラーが見つかりました。", errors.len());
+        }
+        process::exit(1);
+    }
+
+    // デフォルト設定と比較
+    let diffs = config.diff_from_default();
+
+    if diffs.is_empty() {
+        eprintln!("デフォルト設定との差分はありません。");
+    } else {
+        // セクションごとにグループ化して表示
+        let mut current_section = String::new();
+        for (path, old_val, new_val) in &diffs {
+            let section = path.rsplitn(2, '.').last().unwrap_or(path);
+            if section != current_section {
+                if !current_section.is_empty() {
+                    println!();
+                }
+                println!("[{}]", section);
+                current_section = section.to_string();
+            }
+            let field = path.rsplit('.').next().unwrap_or(path);
+            println!("  {}: {} → {}", field, old_val, new_val);
+        }
+        eprintln!("\n{} 件の差分が見つかりました。", diffs.len());
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     // サブコマンド処理
     match &cli.command {
-        Some(Commands::CheckConfig { path }) => {
+        Some(Commands::CheckConfig { path, diff }) => {
             let config_path = path.as_ref().unwrap_or(&cli.config);
-            run_check_config(config_path)?;
+            if *diff {
+                run_check_config_diff(config_path)?;
+            } else {
+                run_check_config(config_path)?;
+            }
             return Ok(());
         }
         Some(Commands::Status { socket_path }) => {
