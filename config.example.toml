@@ -609,6 +609,22 @@ enabled = false
 # # ボディテンプレート（プレースホルダ: {{count}}, {{summary}}, {{period_secs}}）
 # body_template = '{"text": "ダイジェスト通知: {{period_secs}}秒間に{{count}}件のイベントが発生しました\n{{summary}}"}'
 
+[event_store]
+# イベントストア（SQLite 永続化）の有効/無効
+# 有効にすると SecurityEvent を SQLite データベースに永続保存する
+# 過去のイベント検索・分析・フォレンジック対応に利用可能
+enabled = false
+# SQLite データベースファイルパス
+database_path = "/var/lib/zettai-mamorukun/events.db"
+# イベント保持期間（日数）— この期間を超えた古いイベントは自動削除される
+retention_days = 90
+# バッチ挿入サイズ — この件数に達するとバッファをフラッシュする
+batch_size = 100
+# バッチフラッシュ間隔（秒）— バッチサイズに達しなくてもこの間隔でフラッシュ
+batch_interval_secs = 5
+# クリーンアップ実行間隔（時間）— 古いイベントの削除を実行する間隔
+cleanup_interval_hours = 24
+
 [status]
 # ステータスサーバー（Unix ソケット）の有効/無効
 # 有効にすると `zettai-mamorukun status` コマンドでデーモンの状態を確認できる

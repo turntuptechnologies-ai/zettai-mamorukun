@@ -67,4 +67,8 @@ pub enum AppError {
     /// ステータスサーバーエラー
     #[error("ステータスサーバーエラー: {message}")]
     StatusServer { message: String },
+
+    /// イベントストアエラー
+    #[error("イベントストアエラー: {message}")]
+    EventStore { message: String },
 }

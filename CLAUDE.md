@@ -64,6 +64,7 @@ Linux サーバ上でデーモンとして動作し（systemd で管理）、あ
 - **Event Bus**: `SecurityEvent` を `tokio::sync::broadcast` で各モジュールからサブスクライバーへ伝達。ログサブスクライバーが全イベントを構造化ログに記録
 - **Action Engine**: 検知イベントに対するアクション（ログ・コマンド実行・Webhook 送信）を設定ベースで実行。イベントバスのサブスクライバーとして動作し、Severity やモジュール名に基づくルールマッチングでアクションを選択する
 - **Metrics Collector**: SecurityEvent の発生件数・種別・Severity を集計し、定期的にサマリーをログ出力する。イベントバスのサブスクライバーとして動作。`tokio::sync::watch` チャネルによるインターバルのホットリロードに対応
+- **Event Store**: SecurityEvent を SQLite データベースに永続保存する。イベントバスのサブスクライバーとして動作し、バッチ挿入・自動クリーンアップ・設定ホットリロードに対応
 - **Module Manager**: モジュールの一括起動・停止・リロードを管理。設定変更の差分検出により、変更のあったモジュールのみ再起動する
 
 ## ディレクトリ構成
@@ -79,6 +80,7 @@ src/
     daemon.rs          # デーモンライフサイクル管理
     action.rs          # アクションエンジン（ルールベースのアクション実行）
     event.rs           # イベントバス（SecurityEvent / EventBus / ログサブスクライバー）
+    event_store.rs     # イベントストア（SQLite 永続化）
     health.rs          # ヘルスチェック（ハートビート・メモリ監視）
     metrics.rs         # イベント統計・メトリクス収集
     module_manager.rs  # モジュールマネージャー（モジュール一括管理・設定ホットリロード）
