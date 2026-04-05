@@ -35,6 +35,7 @@ pub mod systemd_service;
 pub mod tmp_exec_monitor;
 pub mod usb_monitor;
 pub mod user_account;
+pub mod xattr_monitor;
 
 use crate::error::AppError;
 use std::collections::BTreeMap;

@@ -39,6 +39,7 @@ use crate::modules::systemd_service::SystemdServiceModule;
 use crate::modules::tmp_exec_monitor::TmpExecMonitorModule;
 use crate::modules::usb_monitor::UsbMonitorModule;
 use crate::modules::user_account::UserAccountModule;
+use crate::modules::xattr_monitor::XattrMonitorModule;
 use crate::modules::{InitialScanResult, Module};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -649,6 +650,16 @@ impl ModuleManager {
             ProcessTreeMonitorModule,
             "プロセスツリー監視モジュール"
         );
+        start_module!(
+            modules,
+            config,
+            event_bus,
+            startup_scan_enabled,
+            scan_report,
+            xattr_monitor,
+            XattrMonitorModule,
+            "xattr 監視モジュール"
+        );
 
         scan_report.total_duration = scan_start.elapsed();
 
@@ -968,6 +979,13 @@ impl ModuleManager {
             process_tree_monitor,
             ProcessTreeMonitorModule,
             "プロセスツリー監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            xattr_monitor,
+            XattrMonitorModule,
+            "xattr 監視モジュール"
         );
 
         scan_report.total_duration = scan_start.elapsed();
@@ -1401,6 +1419,17 @@ impl ModuleManager {
             process_tree_monitor,
             ProcessTreeMonitorModule,
             "プロセスツリー監視モジュール"
+        );
+        reload_module!(
+            result,
+            self.running_modules,
+            new_modules,
+            old_config,
+            new_config,
+            event_bus,
+            xattr_monitor,
+            XattrMonitorModule,
+            "xattr 監視モジュール"
         );
 
         self.running_modules = new_modules;

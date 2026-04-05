@@ -123,6 +123,7 @@ src/
     systemd_service.rs # systemd サービス監視モジュール
     tmp_exec_monitor.rs # 一時ディレクトリ実行ファイル検知モジュール
     user_account.rs    # ユーザーアカウント監視モジュール
+    xattr_monitor.rs   # ファイルシステム xattr（拡張属性）監視モジュール
 tests/
   integration_test.rs  # 統合テスト
 config.example.toml    # 設定ファイルサンプル

@@ -269,6 +269,10 @@ pub struct ModulesConfig {
     /// プロセスツリー監視モジュールの設定
     #[serde(default)]
     pub process_tree_monitor: ProcessTreeMonitorConfig,
+
+    /// ファイルシステム xattr 監視モジュールの設定
+    #[serde(default)]
+    pub xattr_monitor: XattrMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -2097,6 +2101,60 @@ impl Default for ProcessTreeMonitorConfig {
             max_depth: Self::default_max_depth(),
             suspicious_patterns: Self::default_suspicious_patterns(),
             whitelist_paths: Vec::new(),
+        }
+    }
+}
+
+/// フ���イルシステム xattr（��張属性）監視モジュ��ルの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct XattrMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "XattrMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象パスのリスト
+    #[serde(default = "XattrMonitorConfig::default_watch_paths")]
+    pub watch_paths: Vec<PathBuf>,
+
+    /// 監視対象の xattr 名前空間のリスト
+    #[serde(default = "XattrMonitorConfig::default_namespaces")]
+    pub namespaces: Vec<String>,
+}
+
+impl XattrMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        300
+    }
+
+    fn default_watch_paths() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/etc"),
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/usr/sbin"),
+            PathBuf::from("/usr/local/bin"),
+        ]
+    }
+
+    fn default_namespaces() -> Vec<String> {
+        vec![
+            "security".to_string(),
+            "system".to_string(),
+            "user".to_string(),
+        ]
+    }
+}
+
+impl Default for XattrMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            watch_paths: Self::default_watch_paths(),
+            namespaces: Self::default_namespaces(),
         }
     }
 }

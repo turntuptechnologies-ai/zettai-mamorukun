@@ -416,6 +416,20 @@ whitelist_paths = []
 # child = "sh|bash|dash|zsh|fish"
 # description = "Web サーバからのシェル起動"
 
+[modules.xattr_monitor]
+# ファイルシステム xattr（拡張属性）監視モジュールの有効/無効
+# SELinux ラベル、capabilities 属性、ACL 等の拡張属性の変更を検知する
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 300
+# 監視対象パスのリスト
+watch_paths = ["/etc", "/usr/bin", "/usr/sbin", "/usr/local/bin"]
+# 監視対象の xattr 名前空間のリスト
+# security.*: SELinux コンテキスト、capabilities（変更時 High）
+# system.*: POSIX ACL（変更時 Medium）
+# user.*: ユーザー定義属性（変更時 Low）
+namespaces = ["security", "system", "user"]
+
 [modules.suid_sgid_monitor]
 # SUID/SGID ファイル監視モジュールの有効/無効
 enabled = false
