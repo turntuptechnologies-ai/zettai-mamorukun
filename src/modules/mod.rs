@@ -22,6 +22,7 @@ pub mod network_traffic_monitor;
 pub mod pam_monitor;
 pub mod pkg_repo_monitor;
 pub mod proc_net_monitor;
+pub mod process_exec_monitor;
 pub mod process_monitor;
 pub mod process_tree_monitor;
 pub mod seccomp_monitor;

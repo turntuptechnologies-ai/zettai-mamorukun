@@ -277,6 +277,10 @@ pub struct ModulesConfig {
     /// inotify ベースのリアルタイムファイル変更検知モジュールの設定
     #[serde(default)]
     pub inotify_monitor: InotifyMonitorConfig,
+
+    /// プロセス起動監視モジュールの設定
+    #[serde(default)]
+    pub process_exec_monitor: ProcessExecMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -2222,6 +2226,69 @@ impl Default for InotifyMonitorConfig {
             exclude_patterns: Vec::new(),
             max_watches: Self::default_max_watches(),
             debounce_ms: Self::default_debounce_ms(),
+        }
+    }
+}
+
+/// プロセス起動監視モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct ProcessExecMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "ProcessExecMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 不審とみなすパスのリスト
+    #[serde(default = "ProcessExecMonitorConfig::default_suspicious_paths")]
+    pub suspicious_paths: Vec<PathBuf>,
+
+    /// 不審なコマンドパターン（正規表現）のリスト
+    #[serde(default = "ProcessExecMonitorConfig::default_suspicious_commands")]
+    pub suspicious_commands: Vec<String>,
+
+    /// 許可リスト（このパスのプロセスは無視）
+    #[serde(default)]
+    pub allowed_processes: Vec<String>,
+}
+
+impl ProcessExecMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        3
+    }
+
+    pub(crate) fn default_suspicious_paths() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/tmp"),
+            PathBuf::from("/dev/shm"),
+            PathBuf::from("/var/tmp"),
+        ]
+    }
+
+    pub(crate) fn default_suspicious_commands() -> Vec<String> {
+        vec![
+            r"nc\s+.*-e".to_string(),
+            r"ncat\s+.*-e".to_string(),
+            r"bash\s+-i\s+>&\s+/dev/tcp".to_string(),
+            r"python[23]?\s+-c\s+.*socket".to_string(),
+            r"perl\s+-e\s+.*socket".to_string(),
+            r"ruby\s+-e\s+.*socket".to_string(),
+            r"curl\s+.*\|\s*sh".to_string(),
+            r"wget\s+.*\|\s*sh".to_string(),
+        ]
+    }
+}
+
+impl Default for ProcessExecMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            suspicious_paths: Self::default_suspicious_paths(),
+            suspicious_commands: Self::default_suspicious_commands(),
+            allowed_processes: Vec::new(),
         }
     }
 }

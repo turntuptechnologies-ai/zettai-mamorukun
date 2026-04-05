@@ -111,6 +111,7 @@ src/
     proc_net_monitor.rs # /proc/net/ 監視モジュール（ルーティング・ARP）
     pkg_repo_monitor.rs # パッケージリポジトリ改ざん検知モジュール
     security_files_monitor.rs # /etc/security/ 監視モジュール
+    process_exec_monitor.rs # プロセス起動監視モジュール
     process_monitor.rs # プロセス異常検知モジュール
     process_tree_monitor.rs # プロセスツリー監視モジュール
     seccomp_monitor.rs # seccomp プロファイル監視モジュール
