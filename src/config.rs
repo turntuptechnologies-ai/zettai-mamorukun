@@ -261,6 +261,10 @@ pub struct ModulesConfig {
     /// 環境変数インジェクション検知モジュールの設定
     #[serde(default)]
     pub env_injection_monitor: EnvInjectionMonitorConfig,
+
+    /// 共有メモリ（/dev/shm）監視モジュールの設定
+    #[serde(default)]
+    pub shm_monitor: ShmMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -1967,6 +1971,51 @@ impl Default for EnvInjectionMonitorConfig {
             suspicious_paths: Self::default_suspicious_paths(),
             extra_dangerous_vars: Vec::new(),
             check_proxy_vars: Self::default_check_proxy_vars(),
+        }
+    }
+}
+
+/// 共有メモリ（/dev/shm）監視モジュールの設定
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct ShmMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "ShmMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象ディレクトリのパス
+    #[serde(default = "ShmMonitorConfig::default_watch_dir")]
+    pub watch_dir: PathBuf,
+
+    /// 大容量ファイルと判定する閾値（MB）
+    #[serde(default = "ShmMonitorConfig::default_large_file_threshold_mb")]
+    pub large_file_threshold_mb: u64,
+}
+
+impl ShmMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_watch_dir() -> PathBuf {
+        PathBuf::from("/dev/shm")
+    }
+
+    fn default_large_file_threshold_mb() -> u64 {
+        10
+    }
+}
+
+impl Default for ShmMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            watch_dir: Self::default_watch_dir(),
+            large_file_threshold_mb: Self::default_large_file_threshold_mb(),
         }
     }
 }

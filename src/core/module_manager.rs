@@ -29,6 +29,7 @@ use crate::modules::process_monitor::ProcessMonitorModule;
 use crate::modules::seccomp_monitor::SeccompMonitorModule;
 use crate::modules::security_files_monitor::SecurityFilesMonitorModule;
 use crate::modules::shell_config_monitor::ShellConfigMonitorModule;
+use crate::modules::shm_monitor::ShmMonitorModule;
 use crate::modules::ssh_brute_force::SshBruteForceModule;
 use crate::modules::ssh_key_monitor::SshKeyMonitorModule;
 use crate::modules::sudoers_monitor::SudoersMonitorModule;
@@ -627,6 +628,16 @@ impl ModuleManager {
             EnvInjectionMonitorModule,
             "環境変数インジェクション検知モジュール"
         );
+        start_module!(
+            modules,
+            config,
+            event_bus,
+            startup_scan_enabled,
+            scan_report,
+            shm_monitor,
+            ShmMonitorModule,
+            "共有メモリ監視モジュール"
+        );
 
         scan_report.total_duration = scan_start.elapsed();
 
@@ -932,6 +943,13 @@ impl ModuleManager {
             env_injection_monitor,
             EnvInjectionMonitorModule,
             "環境変数インジェクション検知モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            shm_monitor,
+            ShmMonitorModule,
+            "共有メモリ監視モジュール"
         );
 
         scan_report.total_duration = scan_start.elapsed();
@@ -1343,6 +1361,17 @@ impl ModuleManager {
             env_injection_monitor,
             EnvInjectionMonitorModule,
             "環境変数インジェクション検知モジュール"
+        );
+        reload_module!(
+            result,
+            self.running_modules,
+            new_modules,
+            old_config,
+            new_config,
+            event_bus,
+            shm_monitor,
+            ShmMonitorModule,
+            "共有メモリ監視モジュール"
         );
 
         self.running_modules = new_modules;
