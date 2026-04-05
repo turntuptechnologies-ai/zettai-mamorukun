@@ -435,6 +435,25 @@ max_watches = 65536
 # 同一ファイルの連続イベントをこの時間内で集約する
 debounce_ms = 100
 
+[modules.process_exec_monitor]
+# プロセス起動監視モジュールの有効/無効
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 3
+# 不審とみなす実行パス
+suspicious_paths = ["/tmp", "/dev/shm", "/var/tmp"]
+# 不審なコマンドパターン（正規表現）
+suspicious_commands = [
+    "nc\\s+.*-e",
+    "ncat\\s+.*-e",
+    "bash\\s+-i\\s+>&\\s+/dev/tcp",
+    "python[23]?\\s+-c\\s+.*socket",
+    "perl\\s+-e\\s+.*socket",
+    "ruby\\s+-e\\s+.*socket",
+]
+# 許可リスト（このパスのプロセスは無視）
+allowed_processes = []
+
 [modules.xattr_monitor]
 # ファイルシステム xattr（拡張属性）監視モジュールの有効/無効
 # SELinux ラベル、capabilities 属性、ACL 等の拡張属性の変更を検知する
