@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use zettai_mamorukun::config::AppConfig;
 use zettai_mamorukun::core::daemon::Daemon;
+use zettai_mamorukun::core::event_store;
 use zettai_mamorukun::core::status;
 use zettai_mamorukun::error::AppError;
 
@@ -51,6 +52,33 @@ enum Commands {
         /// JSON 形式で出力
         #[arg(long)]
         json: bool,
+    },
+    /// 永続化されたセキュリティイベントを検索する
+    SearchEvents {
+        /// ソースモジュール名でフィルタ
+        #[arg(long, value_name = "NAME")]
+        module: Option<String>,
+        /// 重要度でフィルタ (INFO, WARNING, CRITICAL)
+        #[arg(long, value_name = "LEVEL")]
+        severity: Option<String>,
+        /// 指定日時以降のイベントを表示 (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)
+        #[arg(long, value_name = "DATETIME")]
+        since: Option<String>,
+        /// 指定日時以前のイベントを表示 (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)
+        #[arg(long, value_name = "DATETIME")]
+        until: Option<String>,
+        /// イベント種別でフィルタ
+        #[arg(long, value_name = "TYPE")]
+        event_type: Option<String>,
+        /// 表示件数の上限
+        #[arg(long, default_value = "100", value_name = "N")]
+        limit: u32,
+        /// JSON Lines 形式で出力
+        #[arg(long)]
+        json: bool,
+        /// データベースファイルパス（省略時は設定ファイルの値を使用）
+        #[arg(long, value_name = "PATH")]
+        db: Option<String>,
     },
 }
 
@@ -214,6 +242,142 @@ fn run_check_config_diff(config_path: &Path) -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
+/// イベント検索を実行する
+#[allow(clippy::too_many_arguments)]
+fn run_search_events(
+    config_path: &Path,
+    module: &Option<String>,
+    severity: &Option<String>,
+    since: &Option<String>,
+    until: &Option<String>,
+    event_type: &Option<String>,
+    limit: u32,
+    json: bool,
+    db: &Option<String>,
+) {
+    // severity の値を検証
+    if let Some(sev) = severity {
+        let upper = sev.to_uppercase();
+        if upper != "INFO" && upper != "WARNING" && upper != "CRITICAL" {
+            eprintln!(
+                "エラー: 不正な重要度です: {} (INFO, WARNING, CRITICAL のいずれかを指定してください)",
+                sev
+            );
+            process::exit(1);
+        }
+    }
+
+    // 日時パース
+    let since_ts = since.as_ref().map(|s| {
+        event_store::parse_datetime(s).unwrap_or_else(|e| {
+            eprintln!("エラー: --since の値が不正です: {}", e);
+            process::exit(1);
+        })
+    });
+
+    let until_ts = until.as_ref().map(|s| {
+        event_store::parse_datetime(s).unwrap_or_else(|e| {
+            eprintln!("エラー: --until の値が不正です: {}", e);
+            process::exit(1);
+        })
+    });
+
+    // DB パスを決定: --db > 設定ファイル
+    let db_path = if let Some(path) = db {
+        path.clone()
+    } else {
+        match AppConfig::load(config_path) {
+            Ok(config) => config.event_store.database_path,
+            Err(_) => {
+                // 設定ファイルが読めない場合はデフォルトパスを使用
+                "/var/lib/zettai-mamorukun/events.db".to_string()
+            }
+        }
+    };
+
+    // DB を開く
+    let conn = match event_store::open_readonly(&db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("エラー: {}", e);
+            process::exit(1);
+        }
+    };
+
+    // クエリ実行
+    let query = event_store::EventQuery {
+        module: module.clone(),
+        severity: severity.as_ref().map(|s| s.to_uppercase()),
+        since: since_ts,
+        until: until_ts,
+        event_type: event_type.clone(),
+        limit,
+    };
+
+    let records = match event_store::query_events(&conn, &query) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("エラー: {}", e);
+            process::exit(1);
+        }
+    };
+
+    if records.is_empty() {
+        eprintln!("該当するイベントはありません。");
+        return;
+    }
+
+    if json {
+        print_json(&records);
+    } else {
+        print_table(&records);
+    }
+
+    eprintln!("{} 件のイベントが見つかりました。", records.len());
+}
+
+/// JSON Lines 形式でイベントを出力する
+fn print_json(records: &[event_store::EventRecord]) {
+    for record in records {
+        // timestamp を ISO 8601 に変換した構造体を出力
+        let json_obj = serde_json::json!({
+            "id": record.id,
+            "timestamp": event_store::format_timestamp_iso(record.timestamp),
+            "severity": record.severity,
+            "source_module": record.source_module,
+            "event_type": record.event_type,
+            "message": record.message,
+            "details": record.details,
+        });
+        // unwrap safety: serde_json::to_string は基本的な型で失敗しない
+        println!("{}", serde_json::to_string(&json_obj).unwrap());
+    }
+}
+
+/// テーブル形式でイベントを出力する
+fn print_table(records: &[event_store::EventRecord]) {
+    println!(
+        "{:<6}| {:<19} | {:<8} | {:<20} | {:<18} | メッセージ",
+        "ID", "日時", "重要度", "モジュール", "種別"
+    );
+    println!(
+        "{}|{}|{}|{}|{}|{}",
+        "-".repeat(6),
+        "-".repeat(21),
+        "-".repeat(10),
+        "-".repeat(22),
+        "-".repeat(20),
+        "-".repeat(30)
+    );
+    for record in records {
+        let ts = event_store::format_timestamp(record.timestamp);
+        println!(
+            "{:<6}| {} | {:<8} | {:<20} | {:<18} | {}",
+            record.id, ts, record.severity, record.source_module, record.event_type, record.message
+        );
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -239,6 +403,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     process::exit(1);
                 }
             }
+            return Ok(());
+        }
+        Some(Commands::SearchEvents {
+            module,
+            severity,
+            since,
+            until,
+            event_type,
+            limit,
+            json,
+            db,
+        }) => {
+            run_search_events(
+                &cli.config,
+                module,
+                severity,
+                since,
+                until,
+                event_type,
+                *limit,
+                *json,
+                db,
+            );
             return Ok(());
         }
         Some(Commands::ScanDiff {

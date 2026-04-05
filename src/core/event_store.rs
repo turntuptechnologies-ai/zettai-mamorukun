@@ -3,7 +3,8 @@
 use crate::config::EventStoreConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OpenFlags, params};
+use serde::Serialize;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, watch};
@@ -350,6 +351,278 @@ impl EventStore {
     }
 }
 
+/// イベント検索クエリ条件
+pub struct EventQuery {
+    /// ソースモジュール名フィルタ
+    pub module: Option<String>,
+    /// 重要度フィルタ（"INFO", "WARNING", "CRITICAL"）
+    pub severity: Option<String>,
+    /// 開始タイムスタンプ（UNIX 秒、以上）
+    pub since: Option<i64>,
+    /// 終了タイムスタンプ（UNIX 秒、以下）
+    pub until: Option<i64>,
+    /// イベント種別フィルタ
+    pub event_type: Option<String>,
+    /// 表示件数上限
+    pub limit: u32,
+}
+
+/// 検索結果のイベントレコード
+#[derive(Debug, Serialize)]
+pub struct EventRecord {
+    /// レコード ID
+    pub id: i64,
+    /// タイムスタンプ（UNIX 秒）
+    pub timestamp: i64,
+    /// 重要度
+    pub severity: String,
+    /// ソースモジュール名
+    pub source_module: String,
+    /// イベント種別
+    pub event_type: String,
+    /// メッセージ
+    pub message: String,
+    /// 追加情報
+    pub details: Option<String>,
+}
+
+/// 読み取り専用で SQLite データベースを開く（CLI 検索用）
+pub fn open_readonly(db_path: &str) -> Result<Connection, AppError> {
+    Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| AppError::EventStore {
+        message: format!("データベースを開けません ({}): {}", db_path, e),
+    })
+}
+
+/// 指定された条件でイベントを検索する
+pub fn query_events(conn: &Connection, query: &EventQuery) -> Result<Vec<EventRecord>, AppError> {
+    let mut sql = String::from(
+        "SELECT id, timestamp, severity, source_module, event_type, message, details \
+         FROM security_events WHERE 1=1",
+    );
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut idx = 1;
+
+    if let Some(module) = &query.module {
+        sql.push_str(&format!(" AND source_module = ?{}", idx));
+        param_values.push(Box::new(module.clone()));
+        idx += 1;
+    }
+    if let Some(severity) = &query.severity {
+        sql.push_str(&format!(" AND severity = ?{}", idx));
+        param_values.push(Box::new(severity.to_uppercase()));
+        idx += 1;
+    }
+    if let Some(since) = query.since {
+        sql.push_str(&format!(" AND timestamp >= ?{}", idx));
+        param_values.push(Box::new(since));
+        idx += 1;
+    }
+    if let Some(until) = query.until {
+        sql.push_str(&format!(" AND timestamp <= ?{}", idx));
+        param_values.push(Box::new(until));
+        idx += 1;
+    }
+    if let Some(event_type) = &query.event_type {
+        sql.push_str(&format!(" AND event_type = ?{}", idx));
+        param_values.push(Box::new(event_type.clone()));
+        idx += 1;
+    }
+
+    sql.push_str(&format!(" ORDER BY timestamp DESC LIMIT ?{}", idx));
+    param_values.push(Box::new(query.limit));
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| AppError::EventStore {
+        message: format!("クエリの準備に失敗: {}", e),
+    })?;
+
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(EventRecord {
+                id: row.get(0)?,
+                timestamp: row.get(1)?,
+                severity: row.get(2)?,
+                source_module: row.get(3)?,
+                event_type: row.get(4)?,
+                message: row.get(5)?,
+                details: row.get(6)?,
+            })
+        })
+        .map_err(|e| AppError::EventStore {
+            message: format!("クエリの実行に失敗: {}", e),
+        })?;
+
+    let mut records = Vec::new();
+    for row in rows {
+        records.push(row.map_err(|e| AppError::EventStore {
+            message: format!("行の読み取りに失敗: {}", e),
+        })?);
+    }
+
+    Ok(records)
+}
+
+/// UNIX タイムスタンプを "YYYY-MM-DD HH:MM:SS" (UTC) 形式に変換する
+pub fn format_timestamp(ts: i64) -> String {
+    let secs_per_day: i64 = 86400;
+    let secs_per_hour: i64 = 3600;
+    let secs_per_min: i64 = 60;
+
+    let days = ts / secs_per_day;
+    let remaining = ts % secs_per_day;
+    let hour = remaining / secs_per_hour;
+    let min = (remaining % secs_per_hour) / secs_per_min;
+    let sec = remaining % secs_per_min;
+
+    // 1970-01-01 からの日数を年月日に変換
+    let (year, month, day) = days_to_ymd(days);
+
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        year, month, day, hour, min, sec
+    )
+}
+
+/// UNIX タイムスタンプを ISO 8601 形式に変換する（JSON 出力用）
+pub fn format_timestamp_iso(ts: i64) -> String {
+    let secs_per_day: i64 = 86400;
+    let secs_per_hour: i64 = 3600;
+    let secs_per_min: i64 = 60;
+
+    let days = ts / secs_per_day;
+    let remaining = ts % secs_per_day;
+    let hour = remaining / secs_per_hour;
+    let min = (remaining % secs_per_hour) / secs_per_min;
+    let sec = remaining % secs_per_min;
+
+    let (year, month, day) = days_to_ymd(days);
+
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, month, day, hour, min, sec
+    )
+}
+
+/// 1970-01-01 からの日数を (year, month, day) に変換する
+fn days_to_ymd(mut days: i64) -> (i64, u32, u32) {
+    // 1970-01-01 = day 0
+    let mut year = 1970;
+
+    loop {
+        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+        if days < days_in_year {
+            break;
+        }
+        days -= days_in_year;
+        year += 1;
+    }
+
+    let leap = is_leap_year(year);
+    let months_days = if leap {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+
+    let mut month = 0;
+    for (i, &d) in months_days.iter().enumerate() {
+        if days < d as i64 {
+            month = i as u32 + 1;
+            break;
+        }
+        days -= d as i64;
+    }
+
+    (year, month, days as u32 + 1)
+}
+
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+/// 日時文字列を UNIX タイムスタンプ（秒）に変換する
+///
+/// サポート形式:
+/// - `YYYY-MM-DD` → その日の 00:00:00 UTC
+/// - `YYYY-MM-DD HH:MM:SS` → UTC
+pub fn parse_datetime(s: &str) -> Result<i64, String> {
+    let parts: Vec<&str> = s.split(' ').collect();
+    let (date_str, time_str) = match parts.len() {
+        1 => (parts[0], "00:00:00"),
+        2 => (parts[0], parts[1]),
+        _ => return Err(format!("不正な日時形式です: {}", s)),
+    };
+
+    let date_parts: Vec<&str> = date_str.split('-').collect();
+    if date_parts.len() != 3 {
+        return Err(format!("不正な日付形式です (YYYY-MM-DD): {}", date_str));
+    }
+
+    let year: i64 = date_parts[0]
+        .parse()
+        .map_err(|_| format!("不正な年: {}", date_parts[0]))?;
+    let month: u32 = date_parts[1]
+        .parse()
+        .map_err(|_| format!("不正な月: {}", date_parts[1]))?;
+    let day: u32 = date_parts[2]
+        .parse()
+        .map_err(|_| format!("不正な日: {}", date_parts[2]))?;
+
+    if !(1..=12).contains(&month) {
+        return Err(format!("月は 1-12 の範囲で指定してください: {}", month));
+    }
+    if !(1..=31).contains(&day) {
+        return Err(format!("日は 1-31 の範囲で指定してください: {}", day));
+    }
+
+    let time_parts: Vec<&str> = time_str.split(':').collect();
+    if time_parts.len() != 3 {
+        return Err(format!("不正な時刻形式です (HH:MM:SS): {}", time_str));
+    }
+
+    let hour: u32 = time_parts[0]
+        .parse()
+        .map_err(|_| format!("不正な時: {}", time_parts[0]))?;
+    let min: u32 = time_parts[1]
+        .parse()
+        .map_err(|_| format!("不正な分: {}", time_parts[1]))?;
+    let sec: u32 = time_parts[2]
+        .parse()
+        .map_err(|_| format!("不正な秒: {}", time_parts[2]))?;
+
+    if hour >= 24 || min >= 60 || sec >= 60 {
+        return Err(format!("不正な時刻です: {}", time_str));
+    }
+
+    // 1970-01-01 からの日数を計算
+    let mut total_days: i64 = 0;
+    for y in 1970..year {
+        total_days += if is_leap_year(y) { 366 } else { 365 };
+    }
+
+    let leap = is_leap_year(year);
+    let months_days = if leap {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+
+    for &d in months_days.iter().take(month as usize - 1) {
+        total_days += d as i64;
+    }
+    total_days += (day as i64) - 1;
+
+    let timestamp = total_days * 86400 + (hour as i64) * 3600 + (min as i64) * 60 + (sec as i64);
+
+    Ok(timestamp)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -598,5 +871,197 @@ mod tests {
         assert_eq!(config.batch_size, 100);
         assert_eq!(config.batch_interval_secs, 5);
         assert_eq!(config.cleanup_interval_hours, 24);
+    }
+
+    #[test]
+    fn test_parse_datetime_date_only() {
+        let ts = parse_datetime("2026-04-05").unwrap();
+        // 2026-04-05 00:00:00 UTC
+        assert_eq!(format_timestamp(ts), "2026-04-05 00:00:00");
+    }
+
+    #[test]
+    fn test_parse_datetime_full() {
+        let ts = parse_datetime("2026-04-05 12:34:56").unwrap();
+        assert_eq!(format_timestamp(ts), "2026-04-05 12:34:56");
+    }
+
+    #[test]
+    fn test_parse_datetime_epoch() {
+        let ts = parse_datetime("1970-01-01").unwrap();
+        assert_eq!(ts, 0);
+    }
+
+    #[test]
+    fn test_parse_datetime_invalid() {
+        assert!(parse_datetime("not-a-date").is_err());
+        assert!(parse_datetime("2026-13-01").is_err());
+        assert!(parse_datetime("2026-04-05 25:00:00").is_err());
+    }
+
+    #[test]
+    fn test_format_timestamp_roundtrip() {
+        let original = "2026-01-15 08:30:45";
+        let ts = parse_datetime(original).unwrap();
+        assert_eq!(format_timestamp(ts), original);
+    }
+
+    #[test]
+    fn test_format_timestamp_iso() {
+        let ts = parse_datetime("2026-04-05 12:34:56").unwrap();
+        assert_eq!(format_timestamp_iso(ts), "2026-04-05T12:34:56Z");
+    }
+
+    #[test]
+    fn test_query_events_empty() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+
+        let query = EventQuery {
+            module: None,
+            severity: None,
+            since: None,
+            until: None,
+            event_type: None,
+            limit: 100,
+        };
+        let results = query_events(&conn, &query).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_query_events_with_data() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+
+        let events = vec![
+            SecurityEvent::new(
+                "file_modified",
+                Severity::Warning,
+                "file_integrity",
+                "ファイル変更",
+            ),
+            SecurityEvent::new(
+                "brute_force",
+                Severity::Critical,
+                "ssh_brute_force",
+                "SSH攻撃",
+            ),
+            SecurityEvent::new(
+                "process_anomaly",
+                Severity::Info,
+                "process_monitor",
+                "異常プロセス",
+            ),
+        ];
+        EventStore::insert_events(&mut conn, &events).unwrap();
+
+        // 全件取得
+        let query = EventQuery {
+            module: None,
+            severity: None,
+            since: None,
+            until: None,
+            event_type: None,
+            limit: 100,
+        };
+        let results = query_events(&conn, &query).unwrap();
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn test_query_events_filter_module() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+
+        let events = vec![
+            SecurityEvent::new(
+                "file_modified",
+                Severity::Warning,
+                "file_integrity",
+                "ファイル変更",
+            ),
+            SecurityEvent::new(
+                "brute_force",
+                Severity::Critical,
+                "ssh_brute_force",
+                "SSH攻撃",
+            ),
+        ];
+        EventStore::insert_events(&mut conn, &events).unwrap();
+
+        let query = EventQuery {
+            module: Some("ssh_brute_force".to_string()),
+            severity: None,
+            since: None,
+            until: None,
+            event_type: None,
+            limit: 100,
+        };
+        let results = query_events(&conn, &query).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].source_module, "ssh_brute_force");
+    }
+
+    #[test]
+    fn test_query_events_filter_severity() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+
+        let events = vec![
+            SecurityEvent::new("ev1", Severity::Info, "mod1", "情報"),
+            SecurityEvent::new("ev2", Severity::Critical, "mod2", "重大"),
+        ];
+        EventStore::insert_events(&mut conn, &events).unwrap();
+
+        let query = EventQuery {
+            module: None,
+            severity: Some("CRITICAL".to_string()),
+            since: None,
+            until: None,
+            event_type: None,
+            limit: 100,
+        };
+        let results = query_events(&conn, &query).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].severity, "CRITICAL");
+    }
+
+    #[test]
+    fn test_query_events_limit() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+
+        let events: Vec<SecurityEvent> = (0..10)
+            .map(|i| SecurityEvent::new("ev", Severity::Info, "mod", &format!("イベント{}", i)))
+            .collect();
+        EventStore::insert_events(&mut conn, &events).unwrap();
+
+        let query = EventQuery {
+            module: None,
+            severity: None,
+            since: None,
+            until: None,
+            event_type: None,
+            limit: 3,
+        };
+        let results = query_events(&conn, &query).unwrap();
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn test_days_to_ymd() {
+        assert_eq!(days_to_ymd(0), (1970, 1, 1));
+        assert_eq!(days_to_ymd(365), (1971, 1, 1));
+        // 2000-03-01 (leap year)
+        assert_eq!(days_to_ymd(11017), (2000, 3, 1));
+    }
+
+    #[test]
+    fn test_leap_year() {
+        assert!(is_leap_year(2000));
+        assert!(is_leap_year(2024));
+        assert!(!is_leap_year(1900));
+        assert!(!is_leap_year(2023));
     }
 }
