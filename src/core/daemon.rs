@@ -2,6 +2,7 @@ use crate::config::AppConfig;
 use crate::config::DigestConfig;
 use crate::core::action::{ActionEngine, ActionEngineConfig, DigestCollector, InFlightTracker};
 use crate::core::event::{self, EventBus, SecurityEvent, Severity};
+use crate::core::event_store::{EventStore, EventStoreRuntimeConfig};
 use crate::core::health::HealthChecker;
 use crate::core::metrics::{MetricsCollector, SharedMetrics};
 use crate::core::module_manager::ModuleManager;
@@ -52,6 +53,7 @@ impl Daemon {
         let mut inflight_tracker: Option<InFlightTracker> = None;
         let mut metrics_config_sender: Option<watch::Sender<u64>> = None;
         let mut digest_config_sender: Option<watch::Sender<DigestConfig>> = None;
+        let mut event_store_config_sender: Option<watch::Sender<EventStoreRuntimeConfig>> = None;
         let event_bus = if self.config.event_bus.enabled {
             let bus = EventBus::with_filters(
                 self.config.event_bus.channel_capacity,
@@ -100,6 +102,24 @@ impl Daemon {
                     min_events = digest_cfg.min_events,
                     "ダイジェストコレクターを起動しました"
                 );
+            }
+
+            // イベントストアの起動
+            if self.config.event_store.enabled {
+                match EventStore::new(&self.config.event_store, &bus) {
+                    Ok((store, sender)) => {
+                        event_store_config_sender = Some(sender);
+                        store.spawn();
+                        tracing::info!(
+                            database_path = %self.config.event_store.database_path,
+                            retention_days = self.config.event_store.retention_days,
+                            "イベントストアを起動しました"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "イベントストアの初期化に失敗しました");
+                    }
+                }
             }
 
             tracing::info!(
@@ -366,6 +386,27 @@ impl Daemon {
                                 } else {
                                     tracing::warn!(
                                         "ダイジェストコレクターの設定リロードに失敗しました（受信側が閉じています）"
+                                    );
+                                }
+                            }
+
+                            // イベントストアのリロード
+                            if let Some(ref sender) = event_store_config_sender {
+                                if new_config.event_store.database_path
+                                    != self.config.event_store.database_path
+                                {
+                                    tracing::warn!(
+                                        "event_store.database_path の変更はホットリロードに対応していません。デーモンを再起動してください"
+                                    );
+                                }
+                                let new_runtime = EventStoreRuntimeConfig::from(&new_config.event_store);
+                                if sender.send(new_runtime).is_ok() {
+                                    tracing::info!(
+                                        "イベントストアの設定をリロードしました"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        "イベントストアの設定リロードに失敗しました（受信側が閉じています）"
                                     );
                                 }
                             }

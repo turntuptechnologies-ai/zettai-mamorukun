@@ -41,6 +41,10 @@ pub struct AppConfig {
     /// 起動時スキャン設定
     #[serde(default)]
     pub startup_scan: StartupScanConfig,
+
+    /// イベントストア設定
+    #[serde(default)]
+    pub event_store: EventStoreConfig,
 }
 
 /// デーモン動作設定
@@ -2546,6 +2550,65 @@ impl Default for MetricsConfig {
     }
 }
 
+/// イベントストア（SQLite 永続化）設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct EventStoreConfig {
+    /// イベントストアの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// SQLite データベースファイルパス
+    #[serde(default = "EventStoreConfig::default_database_path")]
+    pub database_path: String,
+
+    /// イベント保持期間（日数）
+    #[serde(default = "EventStoreConfig::default_retention_days")]
+    pub retention_days: u64,
+
+    /// バッチ挿入サイズ
+    #[serde(default = "EventStoreConfig::default_batch_size")]
+    pub batch_size: usize,
+
+    /// バッチフラッシュ間隔（秒）
+    #[serde(default = "EventStoreConfig::default_batch_interval_secs")]
+    pub batch_interval_secs: u64,
+
+    /// クリーンアップ実行間隔（時間）
+    #[serde(default = "EventStoreConfig::default_cleanup_interval_hours")]
+    pub cleanup_interval_hours: u64,
+}
+
+impl EventStoreConfig {
+    fn default_database_path() -> String {
+        "/var/lib/zettai-mamorukun/events.db".to_string()
+    }
+    fn default_retention_days() -> u64 {
+        90
+    }
+    fn default_batch_size() -> usize {
+        100
+    }
+    fn default_batch_interval_secs() -> u64 {
+        5
+    }
+    fn default_cleanup_interval_hours() -> u64 {
+        24
+    }
+}
+
+impl Default for EventStoreConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            database_path: Self::default_database_path(),
+            retention_days: Self::default_retention_days(),
+            batch_size: Self::default_batch_size(),
+            batch_interval_secs: Self::default_batch_interval_secs(),
+            cleanup_interval_hours: Self::default_cleanup_interval_hours(),
+        }
+    }
+}
+
 /// ステータスサーバー設定
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub struct StatusConfig {
@@ -2621,6 +2684,23 @@ impl AppConfig {
         // metrics 設定の検証
         if self.metrics.enabled && self.metrics.interval_secs == 0 {
             errors.push("metrics.interval_secs: 0 より大きい値を指定してください".to_string());
+        }
+
+        // event_store 設定の検証
+        if self.event_store.enabled {
+            if self.event_store.database_path.is_empty() {
+                errors.push("event_store.database_path: 空文字列は指定できません".to_string());
+            }
+            if self.event_store.retention_days == 0 {
+                errors.push(
+                    "event_store.retention_days: 0 より大きい値を指定してください".to_string(),
+                );
+            }
+            if self.event_store.batch_interval_secs == 0 {
+                errors.push(
+                    "event_store.batch_interval_secs: 0 より大きい値を指定してください".to_string(),
+                );
+            }
         }
 
         // 各モジュールの interval 検証
