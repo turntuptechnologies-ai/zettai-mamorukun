@@ -36,6 +36,7 @@ pub mod ssh_key_monitor;
 pub mod sudoers_monitor;
 pub mod suid_sgid_monitor;
 pub mod systemd_service;
+pub mod systemd_timer_monitor;
 pub mod tls_cert_monitor;
 pub mod tmp_exec_monitor;
 pub mod usb_monitor;

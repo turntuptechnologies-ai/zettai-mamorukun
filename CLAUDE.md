@@ -128,6 +128,7 @@ src/
     sudoers_monitor.rs # sudoers ファイル監視モジュール
     suid_sgid_monitor.rs # SUID/SGID ファイル監視モジュール
     systemd_service.rs # systemd サービス監視モジュール
+    systemd_timer_monitor.rs # systemd タイマーユニット監視モジュール
     tls_cert_monitor.rs # TLS 証明書有効期限監視モジュール
     tmp_exec_monitor.rs # 一時ディレクトリ実行ファイル検知モジュール
     user_account.rs    # ユーザーアカウント監視モジュール

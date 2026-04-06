@@ -170,6 +170,10 @@ pub struct ModulesConfig {
     #[serde(default)]
     pub systemd_service: SystemdServiceConfig,
 
+    /// systemd タイマー監視モジュールの設定
+    #[serde(default)]
+    pub systemd_timer_monitor: SystemdTimerMonitorConfig,
+
     /// ファイアウォールルール監視モジュールの設定
     #[serde(default)]
     pub firewall_monitor: FirewallMonitorConfig,
@@ -665,6 +669,55 @@ impl Default for SystemdServiceConfig {
             enabled: false,
             scan_interval_secs: Self::default_scan_interval_secs(),
             watch_paths: Self::default_watch_paths(),
+        }
+    }
+}
+
+/// systemd タイマー監視モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct SystemdTimerMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "SystemdTimerMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象ディレクトリのリスト
+    #[serde(default = "SystemdTimerMonitorConfig::default_timer_dirs")]
+    pub timer_dirs: Vec<PathBuf>,
+
+    /// 不審と判定するインターバルの閾値（秒）
+    #[serde(default = "SystemdTimerMonitorConfig::default_min_interval_warn_seconds")]
+    pub min_interval_warn_seconds: u64,
+}
+
+impl SystemdTimerMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_timer_dirs() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/etc/systemd/system/"),
+            PathBuf::from("/usr/lib/systemd/system/"),
+            PathBuf::from("/run/systemd/system/"),
+        ]
+    }
+
+    fn default_min_interval_warn_seconds() -> u64 {
+        60
+    }
+}
+
+impl Default for SystemdTimerMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            timer_dirs: Self::default_timer_dirs(),
+            min_interval_warn_seconds: Self::default_min_interval_warn_seconds(),
         }
     }
 }
@@ -3137,6 +3190,11 @@ impl AppConfig {
             &mut errors,
         );
         Self::validate_interval(
+            self.modules.systemd_timer_monitor.scan_interval_secs,
+            "modules.systemd_timer_monitor.scan_interval_secs",
+            &mut errors,
+        );
+        Self::validate_interval(
             self.modules.firewall_monitor.scan_interval_secs,
             "modules.firewall_monitor.scan_interval_secs",
             &mut errors,
@@ -3334,6 +3392,7 @@ impl AppConfig {
             m.user_account.enabled,
             m.log_tamper.enabled,
             m.systemd_service.enabled,
+            m.systemd_timer_monitor.enabled,
             m.firewall_monitor.enabled,
             m.dns_monitor.enabled,
             m.ssh_key_monitor.enabled,

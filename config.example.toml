@@ -108,6 +108,16 @@ scan_interval_secs = 120
 # 監視対象パスのリスト
 watch_paths = ["/etc/systemd/system", "/usr/lib/systemd/system", "/usr/local/lib/systemd/system"]
 
+[modules.systemd_timer_monitor]
+# systemd タイマー監視モジュールの有効/無効
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 30
+# 監視対象ディレクトリのリスト
+timer_dirs = ["/etc/systemd/system", "/usr/lib/systemd/system", "/run/systemd/system"]
+# 不審と判定するインターバルの閾値（秒）
+min_interval_warn_seconds = 60
+
 [modules.firewall_monitor]
 # ファイアウォールルール監視モジュールの有効/無効
 enabled = false

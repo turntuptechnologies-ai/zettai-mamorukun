@@ -40,6 +40,7 @@ use crate::modules::ssh_key_monitor::SshKeyMonitorModule;
 use crate::modules::sudoers_monitor::SudoersMonitorModule;
 use crate::modules::suid_sgid_monitor::SuidSgidMonitorModule;
 use crate::modules::systemd_service::SystemdServiceModule;
+use crate::modules::systemd_timer_monitor::SystemdTimerMonitorModule;
 use crate::modules::tls_cert_monitor::TlsCertMonitorModule;
 use crate::modules::tmp_exec_monitor::TmpExecMonitorModule;
 use crate::modules::usb_monitor::UsbMonitorModule;
@@ -364,6 +365,16 @@ impl ModuleManager {
             systemd_service,
             SystemdServiceModule,
             "systemd サービス監視モジュール"
+        );
+        start_module!(
+            modules,
+            config,
+            event_bus,
+            startup_scan_enabled,
+            scan_report,
+            systemd_timer_monitor,
+            SystemdTimerMonitorModule,
+            "systemd タイマー監視モジュール"
         );
         start_module!(
             modules,
@@ -835,6 +846,13 @@ impl ModuleManager {
         scan_only_module!(
             config,
             scan_report,
+            systemd_timer_monitor,
+            SystemdTimerMonitorModule,
+            "systemd タイマー監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
             firewall_monitor,
             FirewallMonitorModule,
             "ファイアウォールルール監視モジュール"
@@ -1190,6 +1208,17 @@ impl ModuleManager {
             systemd_service,
             SystemdServiceModule,
             "systemd サービス監視モジュール"
+        );
+        reload_module!(
+            result,
+            self.running_modules,
+            new_modules,
+            old_config,
+            new_config,
+            event_bus,
+            systemd_timer_monitor,
+            SystemdTimerMonitorModule,
+            "systemd タイマー監視モジュール"
         );
         reload_module!(
             result,
