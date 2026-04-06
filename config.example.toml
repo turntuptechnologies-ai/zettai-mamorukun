@@ -625,6 +625,17 @@ batch_interval_secs = 5
 # クリーンアップ実行間隔（時間）— 古いイベントの削除を実行する間隔
 cleanup_interval_hours = 24
 
+[event_stream]
+# イベントストリーム（Unix ソケット経由リアルタイムイベント配信）の有効/無効
+# 有効にすると外部プロセスが Unix ソケットに接続して NDJSON 形式のイベントストリームを受信できる
+# `zettai-mamorukun stream-events` コマンドで接続可能
+enabled = false
+# Unix ソケットのパス
+socket_path = "/var/run/zettai-mamorukun/event_stream.sock"
+# クライアントごとの送信バッファサイズ
+# バッファが溢れた場合はイベントを破棄する（遅いクライアントのバックプレッシャー対策）
+buffer_size = 256
+
 [status]
 # ステータスサーバー（Unix ソケット）の有効/無効
 # 有効にすると `zettai-mamorukun status` コマンドでデーモンの状態を確認できる

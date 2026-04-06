@@ -3,6 +3,7 @@ use crate::config::DigestConfig;
 use crate::core::action::{ActionEngine, ActionEngineConfig, DigestCollector, InFlightTracker};
 use crate::core::event::{self, EventBus, SecurityEvent, Severity};
 use crate::core::event_store::{EventStore, EventStoreRuntimeConfig};
+use crate::core::event_stream::{EventStreamRuntimeConfig, EventStreamServer};
 use crate::core::health::HealthChecker;
 use crate::core::metrics::{MetricsCollector, SharedMetrics};
 use crate::core::module_manager::ModuleManager;
@@ -54,6 +55,8 @@ impl Daemon {
         let mut metrics_config_sender: Option<watch::Sender<u64>> = None;
         let mut digest_config_sender: Option<watch::Sender<DigestConfig>> = None;
         let mut event_store_config_sender: Option<watch::Sender<EventStoreRuntimeConfig>> = None;
+        let mut event_stream_cancel_token: Option<CancellationToken> = None;
+        let mut event_stream_config_sender: Option<watch::Sender<EventStreamRuntimeConfig>> = None;
         let event_bus = if self.config.event_bus.enabled {
             let bus = EventBus::with_filters(
                 self.config.event_bus.channel_capacity,
@@ -122,6 +125,27 @@ impl Daemon {
                 }
             }
 
+            // イベントストリームサーバーの起動
+            if self.config.event_stream.enabled {
+                let (server, sender) = EventStreamServer::new(&self.config.event_stream, &bus);
+                event_stream_config_sender = Some(sender);
+                event_stream_cancel_token = Some(server.cancel_token());
+                match server.spawn() {
+                    Ok(()) => {
+                        tracing::info!(
+                            socket_path = %self.config.event_stream.socket_path,
+                            "イベントストリームサーバーを起動しました"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "イベントストリームサーバーの起動に失敗しました"
+                        );
+                    }
+                }
+            }
+
             tracing::info!(
                 channel_capacity = self.config.event_bus.channel_capacity,
                 "イベントバスを起動しました"
@@ -133,6 +157,10 @@ impl Daemon {
 
         if event_bus.is_none() && self.config.actions.enabled {
             tracing::warn!("アクションエンジンはイベントバスが無効のため起動できません");
+        }
+
+        if event_bus.is_none() && self.config.event_stream.enabled {
+            tracing::warn!("イベントストリームはイベントバスが無効のため起動できません");
         }
 
         // 前回のスキャン状態を読み込み
@@ -411,6 +439,29 @@ impl Daemon {
                                 }
                             }
 
+                            // イベントストリームのリロード
+                            if let Some(ref sender) = event_stream_config_sender {
+                                if new_config.event_stream.socket_path
+                                    != self.config.event_stream.socket_path
+                                {
+                                    tracing::warn!(
+                                        "event_stream.socket_path の変更はホットリロードに対応していません。デーモンを再起動してください"
+                                    );
+                                }
+                                let new_runtime = EventStreamRuntimeConfig {
+                                    buffer_size: new_config.event_stream.buffer_size,
+                                };
+                                if sender.send(new_runtime).is_ok() {
+                                    tracing::info!(
+                                        "イベントストリームの設定をリロードしました"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        "イベントストリームの設定リロードに失敗しました（受信側が閉じています）"
+                                    );
+                                }
+                            }
+
                             self.config = new_config;
                         }
                         Err(e) => {
@@ -451,6 +502,11 @@ impl Daemon {
 
         // ステータスサーバーの停止
         if let Some(token) = status_cancel_token {
+            token.cancel();
+        }
+
+        // イベントストリームサーバーの停止
+        if let Some(token) = event_stream_cancel_token {
             token.cancel();
         }
 

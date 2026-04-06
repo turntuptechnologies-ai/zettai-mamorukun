@@ -45,6 +45,10 @@ pub struct AppConfig {
     /// イベントストア設定
     #[serde(default)]
     pub event_store: EventStoreConfig,
+
+    /// イベントストリーム設定
+    #[serde(default)]
+    pub event_stream: EventStreamConfig,
 }
 
 /// デーモン動作設定
@@ -2640,6 +2644,42 @@ impl Default for StatusConfig {
     }
 }
 
+/// イベントストリーム設定
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+pub struct EventStreamConfig {
+    /// イベントストリームの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Unix ソケットのパス
+    #[serde(default = "EventStreamConfig::default_socket_path")]
+    pub socket_path: String,
+
+    /// クライアントごとの送信バッファサイズ
+    #[serde(default = "EventStreamConfig::default_buffer_size")]
+    pub buffer_size: usize,
+}
+
+impl EventStreamConfig {
+    fn default_socket_path() -> String {
+        "/var/run/zettai-mamorukun/event_stream.sock".to_string()
+    }
+
+    fn default_buffer_size() -> usize {
+        256
+    }
+}
+
+impl Default for EventStreamConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            socket_path: Self::default_socket_path(),
+            buffer_size: Self::default_buffer_size(),
+        }
+    }
+}
+
 impl GeneralConfig {
     fn default_log_level() -> String {
         "info".to_string()
@@ -2701,6 +2741,11 @@ impl AppConfig {
                     "event_store.batch_interval_secs: 0 より大きい値を指定してください".to_string(),
                 );
             }
+        }
+
+        // event_stream 設定の検証
+        if self.event_stream.enabled && self.event_stream.buffer_size == 0 {
+            errors.push("event_stream.buffer_size: 0 より大きい値を指定してください".to_string());
         }
 
         // 各モジュールの interval 検証
