@@ -104,6 +104,7 @@ src/
     kernel_params.rs   # /proc/sys/ カーネルパラメータ監視モジュール
     ld_preload_monitor.rs # 環境変数・LD_PRELOAD 監視モジュール
     listening_port_monitor.rs # リスニングポート監視モジュール
+    login_session_monitor.rs # ログインセッション監視モジュール
     log_tamper.rs      # ログファイル改ざん検知モジュール
     mac_monitor.rs     # SELinux/AppArmor 監視モジュール
     mount_monitor.rs   # マウントポイント監視モジュール
