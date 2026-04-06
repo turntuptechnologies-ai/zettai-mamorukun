@@ -514,6 +514,20 @@ suspicious_ports = [4444, 5555, 6666, 8888, 1337]
 # 接続数閾値
 max_connections = 1000
 
+[modules.tls_cert_monitor]
+# TLS 証明書有効期限監視モジュールの有効/無効
+enabled = false
+# チェック間隔（秒）
+check_interval_secs = 3600
+# 監視対象ディレクトリのリスト
+watch_dirs = ["/etc/ssl/certs", "/etc/pki/tls/certs"]
+# 警告を発行する残日数の閾値
+warning_days = 30
+# 重大アラートを発行する残日数の閾値
+critical_days = 7
+# 対象ファイル拡張子
+file_extensions = [".pem", ".crt", ".cer"]
+
 [modules.ssh_brute_force]
 # SSH ブルートフォース検知モジュールの有効/無効
 enabled = false
