@@ -1,4 +1,5 @@
 pub mod at_job_monitor;
+pub mod auditd_monitor;
 pub mod capabilities_monitor;
 pub mod cgroup_monitor;
 pub mod container_namespace;
