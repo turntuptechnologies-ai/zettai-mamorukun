@@ -297,6 +297,10 @@ pub struct ModulesConfig {
     /// TLS 証明書有効期限監視モジュールの設定
     #[serde(default)]
     pub tls_cert_monitor: TlsCertMonitorConfig,
+
+    /// ログインセッション監視モジュールの設定
+    #[serde(default)]
+    pub login_session_monitor: LoginSessionMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -841,6 +845,88 @@ impl Default for TlsCertMonitorConfig {
             warning_days: Self::default_warning_days(),
             critical_days: Self::default_critical_days(),
             file_extensions: Self::default_file_extensions(),
+        }
+    }
+}
+
+/// ログインセッション監視モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct LoginSessionMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// チェック間隔（秒）
+    #[serde(default = "LoginSessionMonitorConfig::default_check_interval_secs")]
+    pub check_interval_secs: u64,
+
+    /// utmp ファイルパス
+    #[serde(default = "LoginSessionMonitorConfig::default_utmp_path")]
+    pub utmp_path: String,
+
+    /// wtmp ファイルパス
+    #[serde(default = "LoginSessionMonitorConfig::default_wtmp_path")]
+    pub wtmp_path: String,
+
+    /// root 直接ログインの検知を有効化
+    #[serde(default = "LoginSessionMonitorConfig::default_alert_root_login")]
+    pub alert_root_login: bool,
+
+    /// 同一ユーザーの最大同時セッション数
+    #[serde(default = "LoginSessionMonitorConfig::default_max_concurrent_sessions")]
+    pub max_concurrent_sessions: u32,
+
+    /// 不審な時間帯の開始時刻（0-23）
+    #[serde(default)]
+    pub suspicious_hours_start: u32,
+
+    /// 不審な時間帯の終了時刻（0-23）
+    #[serde(default = "LoginSessionMonitorConfig::default_suspicious_hours_end")]
+    pub suspicious_hours_end: u32,
+
+    /// 不審な時間帯のログイン検知を有効化
+    #[serde(default)]
+    pub alert_suspicious_hours: bool,
+}
+
+impl LoginSessionMonitorConfig {
+    fn default_check_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_utmp_path() -> String {
+        "/var/run/utmp".to_string()
+    }
+
+    fn default_wtmp_path() -> String {
+        "/var/log/wtmp".to_string()
+    }
+
+    fn default_alert_root_login() -> bool {
+        true
+    }
+
+    fn default_max_concurrent_sessions() -> u32 {
+        3
+    }
+
+    fn default_suspicious_hours_end() -> u32 {
+        6
+    }
+}
+
+impl Default for LoginSessionMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            check_interval_secs: Self::default_check_interval_secs(),
+            utmp_path: Self::default_utmp_path(),
+            wtmp_path: Self::default_wtmp_path(),
+            alert_root_login: Self::default_alert_root_login(),
+            max_concurrent_sessions: Self::default_max_concurrent_sessions(),
+            suspicious_hours_start: 0,
+            suspicious_hours_end: Self::default_suspicious_hours_end(),
+            alert_suspicious_hours: false,
         }
     }
 }
