@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use zettai_mamorukun::config::AppConfig;
@@ -64,6 +65,33 @@ enum Commands {
         /// JSON 形式で出力
         #[arg(long)]
         json: bool,
+    },
+    /// セキュリティイベントを CSV / JSON ファイルにエクスポートする
+    ExportEvents {
+        /// 出力フォーマット (csv, json)
+        #[arg(long, default_value = "json", value_name = "FORMAT")]
+        format: String,
+        /// 出力ファイルパス（省略時は stdout）
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+        /// ソースモジュール名でフィルタ
+        #[arg(long, value_name = "NAME")]
+        module: Option<String>,
+        /// 重要度でフィルタ (INFO, WARNING, CRITICAL)
+        #[arg(long, value_name = "LEVEL")]
+        severity: Option<String>,
+        /// 指定日時以降のイベントを表示 (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)
+        #[arg(long, value_name = "DATETIME")]
+        since: Option<String>,
+        /// 指定日時以前のイベントを表示 (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)
+        #[arg(long, value_name = "DATETIME")]
+        until: Option<String>,
+        /// 最大件数（省略時は全件）
+        #[arg(long, value_name = "N")]
+        limit: Option<u32>,
+        /// データベースファイルパス（省略時は設定ファイルの値を使用）
+        #[arg(long, value_name = "PATH")]
+        db: Option<String>,
     },
     /// 永続化されたセキュリティイベントを検索する
     SearchEvents {
@@ -390,6 +418,195 @@ fn print_table(records: &[event_store::EventRecord]) {
     }
 }
 
+/// イベントをエクスポートする
+#[allow(clippy::too_many_arguments)]
+fn run_export_events(
+    config_path: &Path,
+    format: &str,
+    output: Option<&Path>,
+    module: &Option<String>,
+    severity: &Option<String>,
+    since: &Option<String>,
+    until: &Option<String>,
+    limit: Option<u32>,
+    db: &Option<String>,
+) {
+    // フォーマットの検証
+    let fmt_lower = format.to_lowercase();
+    if fmt_lower != "csv" && fmt_lower != "json" {
+        eprintln!(
+            "エラー: 不正なフォーマットです: {} (csv, json のいずれかを指定してください)",
+            format
+        );
+        process::exit(1);
+    }
+
+    // severity の値を検証
+    if let Some(sev) = severity {
+        let upper = sev.to_uppercase();
+        if upper != "INFO" && upper != "WARNING" && upper != "CRITICAL" {
+            eprintln!(
+                "エラー: 不正な重要度です: {} (INFO, WARNING, CRITICAL のいずれかを指定してください)",
+                sev
+            );
+            process::exit(1);
+        }
+    }
+
+    // 日時パース
+    let since_ts = since.as_ref().map(|s| {
+        event_store::parse_datetime(s).unwrap_or_else(|e| {
+            eprintln!("エラー: --since の値が不正です: {}", e);
+            process::exit(1);
+        })
+    });
+
+    let until_ts = until.as_ref().map(|s| {
+        event_store::parse_datetime(s).unwrap_or_else(|e| {
+            eprintln!("エラー: --until の値が不正です: {}", e);
+            process::exit(1);
+        })
+    });
+
+    // DB パスを決定
+    let db_path = if let Some(path) = db {
+        path.clone()
+    } else {
+        match AppConfig::load(config_path) {
+            Ok(config) => config.event_store.database_path,
+            Err(_) => "/var/lib/zettai-mamorukun/events.db".to_string(),
+        }
+    };
+
+    // DB を開く
+    let conn = match event_store::open_readonly(&db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("エラー: {}", e);
+            process::exit(1);
+        }
+    };
+
+    // クエリ実行
+    let query = event_store::EventQuery {
+        module: module.clone(),
+        severity: severity.as_ref().map(|s| s.to_uppercase()),
+        since: since_ts,
+        until: until_ts,
+        event_type: None,
+        limit: limit.unwrap_or(u32::MAX),
+    };
+
+    let records = match event_store::query_events(&conn, &query) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("エラー: {}", e);
+            process::exit(1);
+        }
+    };
+
+    // 出力先を決定
+    let result = if let Some(path) = output {
+        let file = match std::fs::File::create(path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!(
+                    "エラー: ファイルを作成できません ({}): {}",
+                    path.display(),
+                    e
+                );
+                process::exit(1);
+            }
+        };
+        let mut writer = BufWriter::new(file);
+        let res = if fmt_lower == "csv" {
+            export_csv(&records, &mut writer)
+        } else {
+            export_json(&records, &mut writer)
+        };
+        if let Err(e) = writer.flush() {
+            eprintln!("エラー: ファイルの書き込みに失敗しました: {}", e);
+            process::exit(1);
+        }
+        res
+    } else {
+        let stdout = io::stdout();
+        let mut writer = BufWriter::new(stdout.lock());
+        let res = if fmt_lower == "csv" {
+            export_csv(&records, &mut writer)
+        } else {
+            export_json(&records, &mut writer)
+        };
+        if let Err(e) = writer.flush() {
+            eprintln!("エラー: stdout への書き込みに失敗しました: {}", e);
+            process::exit(1);
+        }
+        res
+    };
+
+    if let Err(e) = result {
+        eprintln!("エラー: エクスポートに失敗しました: {}", e);
+        process::exit(1);
+    }
+
+    eprintln!("{} 件のイベントをエクスポートしました。", records.len());
+}
+
+/// JSON Lines 形式でイベントをエクスポートする
+fn export_json<W: Write>(records: &[event_store::EventRecord], writer: &mut W) -> io::Result<()> {
+    for record in records {
+        let json_obj = serde_json::json!({
+            "id": record.id,
+            "timestamp": event_store::format_timestamp_iso(record.timestamp),
+            "severity": record.severity,
+            "source_module": record.source_module,
+            "event_type": record.event_type,
+            "message": record.message,
+            "details": record.details,
+        });
+        // unwrap safety: serde_json::to_string は基本的な型で失敗しない
+        writeln!(writer, "{}", serde_json::to_string(&json_obj).unwrap())?;
+    }
+    Ok(())
+}
+
+/// CSV 形式でイベントをエクスポートする
+fn export_csv<W: Write>(records: &[event_store::EventRecord], writer: &mut W) -> io::Result<()> {
+    let mut csv_writer = csv::Writer::from_writer(writer);
+
+    // ヘッダー
+    csv_writer
+        .write_record([
+            "timestamp",
+            "severity",
+            "source_module",
+            "event_type",
+            "message",
+            "details",
+        ])
+        .map_err(io::Error::other)?;
+
+    // データ行
+    for record in records {
+        let ts = event_store::format_timestamp_iso(record.timestamp);
+        let details = record.details.as_deref().unwrap_or("");
+        csv_writer
+            .write_record([
+                ts.as_str(),
+                &record.severity,
+                &record.source_module,
+                &record.event_type,
+                &record.message,
+                details,
+            ])
+            .map_err(io::Error::other)?;
+    }
+
+    csv_writer.flush().map_err(io::Error::other)?;
+
+    Ok(())
+}
+
 /// 数値をカンマ区切りでフォーマットする
 fn format_number(n: u64) -> String {
     let s = n.to_string();
@@ -560,6 +777,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             run_event_stats(&cli.config, db, *days, *json);
             return Ok(());
         }
+        Some(Commands::ExportEvents {
+            format,
+            output,
+            module,
+            severity,
+            since,
+            until,
+            limit,
+            db,
+        }) => {
+            run_export_events(
+                &cli.config,
+                format,
+                output.as_deref(),
+                module,
+                severity,
+                since,
+                until,
+                *limit,
+                db,
+            );
+            return Ok(());
+        }
         Some(Commands::SearchEvents {
             module,
             severity,
@@ -646,4 +886,151 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     daemon.run().await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_test_records() -> Vec<event_store::EventRecord> {
+        vec![
+            event_store::EventRecord {
+                id: 1,
+                timestamp: 1704067200, // 2024-01-01T00:00:00Z
+                severity: "WARNING".to_string(),
+                source_module: "file_integrity".to_string(),
+                event_type: "file_modified".to_string(),
+                message: "ファイルが変更されました".to_string(),
+                details: Some("/etc/passwd".to_string()),
+            },
+            event_store::EventRecord {
+                id: 2,
+                timestamp: 1704153600, // 2024-01-02T00:00:00Z
+                severity: "CRITICAL".to_string(),
+                source_module: "ssh_brute_force".to_string(),
+                event_type: "brute_force_detected".to_string(),
+                message: "SSH ブルートフォース攻撃を検知".to_string(),
+                details: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn test_export_json_basic() {
+        let records = make_test_records();
+        let mut buf = Vec::new();
+        export_json(&records, &mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        let lines: Vec<&str> = output.trim().lines().collect();
+        assert_eq!(lines.len(), 2);
+
+        // 各行が有効な JSON かパース検証
+        let v1: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(v1["severity"], "WARNING");
+        assert_eq!(v1["source_module"], "file_integrity");
+        assert_eq!(v1["details"], "/etc/passwd");
+
+        let v2: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(v2["severity"], "CRITICAL");
+        assert!(v2["details"].is_null());
+    }
+
+    #[test]
+    fn test_export_json_empty() {
+        let records: Vec<event_store::EventRecord> = vec![];
+        let mut buf = Vec::new();
+        export_json(&records, &mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        assert_eq!(output, "");
+    }
+
+    #[test]
+    fn test_export_json_timestamp_format() {
+        let records = make_test_records();
+        let mut buf = Vec::new();
+        export_json(&records, &mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        let v: serde_json::Value = serde_json::from_str(output.lines().next().unwrap()).unwrap();
+        let ts = v["timestamp"].as_str().unwrap();
+        assert!(ts.ends_with('Z'), "timestamp should be ISO 8601 UTC");
+        assert!(ts.contains('T'), "timestamp should contain 'T' separator");
+    }
+
+    #[test]
+    fn test_export_csv_basic() {
+        let records = make_test_records();
+        let mut buf = Vec::new();
+        export_csv(&records, &mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        let lines: Vec<&str> = output.trim().lines().collect();
+        assert_eq!(lines.len(), 3); // header + 2 data rows
+
+        // ヘッダー検証
+        assert_eq!(
+            lines[0],
+            "timestamp,severity,source_module,event_type,message,details"
+        );
+
+        // データ行のフィールド数を検証
+        let mut rdr = csv::ReaderBuilder::new().from_reader(output.as_bytes());
+        let mut count = 0;
+        for result in rdr.records() {
+            let record = result.unwrap();
+            assert_eq!(record.len(), 6);
+            count += 1;
+        }
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_export_csv_empty() {
+        let records: Vec<event_store::EventRecord> = vec![];
+        let mut buf = Vec::new();
+        export_csv(&records, &mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        let lines: Vec<&str> = output.trim().lines().collect();
+        assert_eq!(lines.len(), 1); // header only
+    }
+
+    #[test]
+    fn test_export_csv_details_none() {
+        let records = make_test_records();
+        let mut buf = Vec::new();
+        export_csv(&records, &mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        let mut rdr = csv::ReaderBuilder::new().from_reader(output.as_bytes());
+        let mut rows: Vec<csv::StringRecord> = Vec::new();
+        for result in rdr.records() {
+            rows.push(result.unwrap());
+        }
+
+        // 2 行目の details は None → 空文字列
+        assert_eq!(&rows[1][5], "");
+    }
+
+    #[test]
+    fn test_export_csv_special_characters() {
+        let records = vec![event_store::EventRecord {
+            id: 1,
+            timestamp: 1704067200,
+            severity: "INFO".to_string(),
+            source_module: "test_module".to_string(),
+            event_type: "test".to_string(),
+            message: "カンマ,を含む\"メッセージ\"\n改行も".to_string(),
+            details: Some("details with, commas".to_string()),
+        }];
+        let mut buf = Vec::new();
+        export_csv(&records, &mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        // CSV として再パース可能であることを検証
+        let mut rdr = csv::ReaderBuilder::new().from_reader(output.as_bytes());
+        let record = rdr.records().next().unwrap().unwrap();
+        assert!(record[4].contains("カンマ,を含む"));
+        assert!(record[5].contains("commas"));
+    }
 }
