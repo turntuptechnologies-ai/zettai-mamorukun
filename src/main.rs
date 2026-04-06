@@ -5,6 +5,7 @@ use std::process;
 use zettai_mamorukun::config::AppConfig;
 use zettai_mamorukun::core::daemon::Daemon;
 use zettai_mamorukun::core::event_store;
+use zettai_mamorukun::core::event_stream;
 use zettai_mamorukun::core::status;
 use zettai_mamorukun::error::AppError;
 
@@ -92,6 +93,15 @@ enum Commands {
         /// データベースファイルパス（省略時は設定ファイルの値を使用）
         #[arg(long, value_name = "PATH")]
         db: Option<String>,
+    },
+    /// リアルタイムイベントストリームに接続する
+    StreamEvents {
+        /// ソケットのパス
+        #[arg(long, default_value = "/var/run/zettai-mamorukun/event_stream.sock")]
+        socket_path: PathBuf,
+        /// 出力フォーマット (json, text)
+        #[arg(long, default_value = "json")]
+        format: String,
     },
     /// 永続化されたセキュリティイベントを検索する
     SearchEvents {
@@ -821,6 +831,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 *json,
                 db,
             );
+            return Ok(());
+        }
+        Some(Commands::StreamEvents {
+            socket_path,
+            format,
+        }) => {
+            match event_stream::stream_events(socket_path, format).await {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("エラー: {}", e);
+                    process::exit(1);
+                }
+            }
             return Ok(());
         }
         Some(Commands::ScanDiff {

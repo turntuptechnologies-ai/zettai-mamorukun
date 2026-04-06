@@ -2,6 +2,7 @@ pub mod action;
 pub mod daemon;
 pub mod event;
 pub mod event_store;
+pub mod event_stream;
 pub mod health;
 pub mod metrics;
 pub mod module_manager;
