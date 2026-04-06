@@ -1,4 +1,5 @@
 pub mod action;
+pub mod correlation;
 pub mod daemon;
 pub mod event;
 pub mod event_store;

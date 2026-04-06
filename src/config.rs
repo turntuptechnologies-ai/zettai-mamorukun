@@ -49,6 +49,10 @@ pub struct AppConfig {
     /// イベントストリーム設定
     #[serde(default)]
     pub event_stream: EventStreamConfig,
+
+    /// 相関分析エンジン設定
+    #[serde(default)]
+    pub correlation: CorrelationConfig,
 }
 
 /// デーモン動作設定
@@ -2892,6 +2896,89 @@ impl Default for EventStreamConfig {
     }
 }
 
+/// 相関分析エンジン設定
+#[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
+pub struct CorrelationConfig {
+    /// 相関分析エンジンの有効/無効（デフォルト: false）
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// イベントウィンドウの保持期間（秒、デフォルト: 600 = 10分）
+    #[serde(default = "CorrelationConfig::default_window_secs")]
+    pub window_secs: u64,
+
+    /// ウィンドウ内の最大イベント保持数（デフォルト: 10000）
+    #[serde(default = "CorrelationConfig::default_max_events")]
+    pub max_events: usize,
+
+    /// クリーンアップ間隔（秒、デフォルト: 30）
+    #[serde(default = "CorrelationConfig::default_cleanup_interval_secs")]
+    pub cleanup_interval_secs: u64,
+
+    /// 相関ルールのリスト
+    #[serde(default)]
+    pub rules: Vec<CorrelationRuleConfig>,
+}
+
+impl CorrelationConfig {
+    fn default_window_secs() -> u64 {
+        600
+    }
+
+    fn default_max_events() -> usize {
+        10_000
+    }
+
+    fn default_cleanup_interval_secs() -> u64 {
+        30
+    }
+}
+
+impl Default for CorrelationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            window_secs: Self::default_window_secs(),
+            max_events: Self::default_max_events(),
+            cleanup_interval_secs: Self::default_cleanup_interval_secs(),
+            rules: Vec::new(),
+        }
+    }
+}
+
+/// 相関ルール設定
+#[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
+pub struct CorrelationRuleConfig {
+    /// ルール名（一意識別子）
+    pub name: String,
+
+    /// ルールの説明
+    pub description: String,
+
+    /// ルールの各ステップ（順序付き）
+    pub steps: Vec<CorrelationStepConfig>,
+
+    /// 全ステップが完了すべき時間窓（秒）
+    /// 未設定の場合は CorrelationConfig の window_secs を使用
+    pub within_secs: Option<u64>,
+}
+
+/// 相関ルールのステップ設定
+#[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
+pub struct CorrelationStepConfig {
+    /// ステップ名（ログ出力用）
+    pub name: String,
+
+    /// マッチ対象のイベント種別（正規表現）
+    pub event_type: String,
+
+    /// マッチ対象のソースモジュール（正規表現、オプション）
+    pub source_module: Option<String>,
+
+    /// マッチ対象の最小重要度（オプション）
+    pub min_severity: Option<String>,
+}
+
 impl GeneralConfig {
     fn default_log_level() -> String {
         "info".to_string()
@@ -2958,6 +3045,54 @@ impl AppConfig {
         // event_stream 設定の検証
         if self.event_stream.enabled && self.event_stream.buffer_size == 0 {
             errors.push("event_stream.buffer_size: 0 より大きい値を指定してください".to_string());
+        }
+
+        // correlation 設定の検証
+        if self.correlation.enabled {
+            if self.correlation.window_secs == 0 {
+                errors
+                    .push("correlation.window_secs: 0 より大きい値を指定してください".to_string());
+            }
+            if self.correlation.max_events == 0 {
+                errors.push("correlation.max_events: 0 より大きい値を指定してください".to_string());
+            }
+            if self.correlation.cleanup_interval_secs == 0 {
+                errors.push(
+                    "correlation.cleanup_interval_secs: 0 より大きい値を指定してください"
+                        .to_string(),
+                );
+            }
+            for (i, rule) in self.correlation.rules.iter().enumerate() {
+                if rule.name.is_empty() {
+                    errors.push(format!(
+                        "correlation.rules[{}].name: 空文字列は指定できません",
+                        i
+                    ));
+                }
+                if rule.steps.is_empty() {
+                    errors.push(format!(
+                        "correlation.rules[{}].steps: 少なくとも1つのステップが必要です",
+                        i
+                    ));
+                }
+                for (j, step) in rule.steps.iter().enumerate() {
+                    if step.event_type.is_empty() {
+                        errors.push(format!(
+                            "correlation.rules[{}].steps[{}].event_type: 空文字列は指定できません",
+                            i, j
+                        ));
+                    }
+                    if let Some(ref sev) = step.min_severity {
+                        let valid_severities = ["info", "warning", "critical"];
+                        if !valid_severities.contains(&sev.to_lowercase().as_str()) {
+                            errors.push(format!(
+                                "correlation.rules[{}].steps[{}].min_severity: 無効な値 '{}' (有効値: info, warning, critical)",
+                                i, j, sev
+                            ));
+                        }
+                    }
+                }
+            }
         }
 
         // 各モジュールの interval 検証

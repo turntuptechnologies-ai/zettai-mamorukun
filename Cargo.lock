@@ -2586,7 +2586,7 @@ dependencies = [
 
 [[package]]
 name = "zettai-mamorukun"
-version = "0.70.0"
+version = "0.72.0"
 dependencies = [
  "clap",
  "csv",

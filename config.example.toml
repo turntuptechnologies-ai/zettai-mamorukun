@@ -687,6 +687,50 @@ enabled = false
 # Unix ソケットのパス
 socket_path = "/var/run/zettai-mamorukun/status.sock"
 
+[correlation]
+# 相関分析エンジンの有効/無効
+# 複数のセキュリティイベントを時系列で相関分析し、多段階攻撃パターンを検知する
+enabled = false
+# イベントウィンドウの保持期間（秒）
+window_secs = 600
+# ウィンドウ内の最大イベント保持数
+max_events = 10000
+# クリーンアップ間隔（秒）
+cleanup_interval_secs = 30
+
+# 多段階攻撃パターン: SSH ブルートフォース → ユーザー追加 → cron 変更
+[[correlation.rules]]
+name = "ssh_to_persistence"
+description = "SSH ブルートフォース成功後の永続化試行を検知"
+within_secs = 3600
+
+[[correlation.rules.steps]]
+name = "ssh_brute_force"
+event_type = "ssh_brute_force"
+min_severity = "warning"
+
+[[correlation.rules.steps]]
+name = "user_added"
+event_type = "user_added"
+
+[[correlation.rules.steps]]
+name = "cron_modified"
+event_type = "cron_modified"
+
+# 権限昇格パターン: sudoers 変更 → SUID ファイル作成
+[[correlation.rules]]
+name = "privilege_escalation"
+description = "sudoers 変更後の SUID ファイル作成を検知"
+within_secs = 1800
+
+[[correlation.rules.steps]]
+name = "sudoers_changed"
+event_type = "sudoers_modified"
+
+[[correlation.rules.steps]]
+name = "suid_created"
+event_type = "suid_sgid_new"
+
 [health]
 # ハートビート（定期的なヘルスチェックログ出力）の有効/無効
 enabled = true

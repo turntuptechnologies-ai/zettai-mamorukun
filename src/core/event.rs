@@ -466,6 +466,11 @@ impl EventBus {
     pub fn subscribe(&self) -> broadcast::Receiver<SecurityEvent> {
         self.sender.subscribe()
     }
+
+    /// イベント送信用のセンダーを取得する
+    pub fn sender(&self) -> broadcast::Sender<SecurityEvent> {
+        self.sender.clone()
+    }
 }
 
 /// デフォルトのログサブスクライバーを起動する
