@@ -3,6 +3,7 @@
 use crate::config::ModulesConfig;
 use crate::core::event::EventBus;
 use crate::modules::at_job_monitor::AtJobMonitorModule;
+use crate::modules::auditd_monitor::AuditdMonitorModule;
 use crate::modules::capabilities_monitor::CapabilitiesMonitorModule;
 use crate::modules::cgroup_monitor::CgroupMonitorModule;
 use crate::modules::container_namespace::ContainerNamespaceModule;
@@ -312,6 +313,16 @@ impl ModuleManager {
             kernel_module,
             KernelModuleMonitor,
             "カーネルモジュール監視モジュール"
+        );
+        start_module!(
+            modules,
+            config,
+            event_bus,
+            startup_scan_enabled,
+            scan_report,
+            auditd_monitor,
+            AuditdMonitorModule,
+            "auditd ログ統合モジュール"
         );
         start_module!(
             modules,
@@ -778,6 +789,13 @@ impl ModuleManager {
         scan_only_module!(
             config,
             scan_report,
+            auditd_monitor,
+            AuditdMonitorModule,
+            "auditd ログ統合モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
             at_job_monitor,
             AtJobMonitorModule,
             "at/batch ジョブ監視モジュール"
@@ -1099,6 +1117,17 @@ impl ModuleManager {
             kernel_module,
             KernelModuleMonitor,
             "カーネルモジュール監視モジュール"
+        );
+        reload_module!(
+            result,
+            self.running_modules,
+            new_modules,
+            old_config,
+            new_config,
+            event_bus,
+            auditd_monitor,
+            AuditdMonitorModule,
+            "auditd ログ統合モジュール"
         );
         reload_module!(
             result,

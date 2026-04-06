@@ -142,6 +142,10 @@ pub struct ModulesConfig {
     #[serde(default)]
     pub kernel_module: KernelModuleConfig,
 
+    /// auditd ログ統合モジュールの設定
+    #[serde(default)]
+    pub auditd_monitor: AuditdMonitorConfig,
+
     /// at/batch ジョブ監視モジュールの設定
     #[serde(default)]
     pub at_job_monitor: AtJobMonitorConfig,
@@ -390,6 +394,58 @@ impl Default for KernelModuleConfig {
         Self {
             enabled: false,
             scan_interval_secs: Self::default_scan_interval_secs(),
+        }
+    }
+}
+
+/// auditd ログ統合モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct AuditdMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// チェック間隔（秒）
+    #[serde(default = "AuditdMonitorConfig::default_check_interval_secs")]
+    pub check_interval_secs: u64,
+
+    /// auditd ログファイルのパス
+    #[serde(default = "AuditdMonitorConfig::default_log_path")]
+    pub log_path: PathBuf,
+
+    /// 監視対象のイベントタイプリスト
+    #[serde(default = "AuditdMonitorConfig::default_watch_types")]
+    pub watch_types: Vec<String>,
+}
+
+impl AuditdMonitorConfig {
+    fn default_check_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_log_path() -> PathBuf {
+        PathBuf::from("/var/log/audit/audit.log")
+    }
+
+    fn default_watch_types() -> Vec<String> {
+        vec![
+            "EXECVE".to_string(),
+            "SYSCALL".to_string(),
+            "USER_AUTH".to_string(),
+            "USER_LOGIN".to_string(),
+            "AVC".to_string(),
+            "ANOMALY".to_string(),
+        ]
+    }
+}
+
+impl Default for AuditdMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            check_interval_secs: Self::default_check_interval_secs(),
+            log_path: Self::default_log_path(),
+            watch_types: Self::default_watch_types(),
         }
     }
 }

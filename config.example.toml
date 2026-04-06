@@ -46,6 +46,17 @@ enabled = false
 # スキャン間隔（秒）
 scan_interval_secs = 120
 
+[modules.auditd_monitor]
+# Linux Audit サブシステム（auditd）のログを解析し、セキュリティイベントを検知する
+# auditd が有効な環境でのみ機能する
+enabled = false
+# チェック間隔（秒）
+check_interval_secs = 30
+# auditd ログファイルのパス
+log_path = "/var/log/audit/audit.log"
+# 監視対象のイベントタイプ
+watch_types = ["EXECVE", "SYSCALL", "USER_AUTH", "USER_LOGIN", "AVC", "ANOMALY"]
+
 [modules.at_job_monitor]
 # at/batch ジョブ監視モジュールの有効/無効
 enabled = false
