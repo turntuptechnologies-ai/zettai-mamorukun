@@ -386,6 +386,218 @@ pub struct EventRecord {
     pub details: Option<String>,
 }
 
+/// イベント統計結果
+#[derive(Debug, Serialize)]
+pub struct EventStats {
+    /// 期間別イベント件数
+    pub period_counts: PeriodCounts,
+    /// 重要度別件数
+    pub severity_counts: SeverityCounts,
+    /// モジュール別 TOP 10
+    pub top_modules: Vec<ModuleCount>,
+    /// 日次推移
+    pub daily_trend: Vec<DailyCount>,
+}
+
+/// 期間別イベント件数
+#[derive(Debug, Serialize)]
+pub struct PeriodCounts {
+    /// 直近 24 時間
+    pub last_24h: u64,
+    /// 直近 7 日間
+    pub last_7d: u64,
+    /// 直近 30 日間
+    pub last_30d: u64,
+}
+
+/// 重要度別件数
+#[derive(Debug, Serialize)]
+pub struct SeverityCounts {
+    /// CRITICAL
+    pub critical: u64,
+    /// WARNING
+    pub warning: u64,
+    /// INFO
+    pub info: u64,
+}
+
+/// モジュール別件数
+#[derive(Debug, Serialize)]
+pub struct ModuleCount {
+    /// モジュール名
+    pub module: String,
+    /// 件数
+    pub count: u64,
+}
+
+/// 日次件数
+#[derive(Debug, Serialize)]
+pub struct DailyCount {
+    /// 日付（YYYY-MM-DD）
+    pub date: String,
+    /// 件数
+    pub count: u64,
+}
+
+/// イベント統計を集計する
+pub fn query_event_stats(conn: &Connection, days: u32) -> Result<EventStats, AppError> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    let cutoff_24h = now - 86400;
+    let cutoff_7d = now - 7 * 86400;
+    let cutoff_30d = now - 30 * 86400;
+
+    // 期間別イベント件数
+    let period_counts: PeriodCounts = conn
+        .query_row(
+            "SELECT \
+                COALESCE(SUM(CASE WHEN timestamp >= ?1 THEN 1 ELSE 0 END), 0) AS last_24h, \
+                COALESCE(SUM(CASE WHEN timestamp >= ?2 THEN 1 ELSE 0 END), 0) AS last_7d, \
+                COALESCE(SUM(CASE WHEN timestamp >= ?3 THEN 1 ELSE 0 END), 0) AS last_30d \
+             FROM security_events",
+            params![cutoff_24h, cutoff_7d, cutoff_30d],
+            |row| {
+                Ok(PeriodCounts {
+                    last_24h: row.get::<_, i64>(0).map(|v| v as u64)?,
+                    last_7d: row.get::<_, i64>(1).map(|v| v as u64)?,
+                    last_30d: row.get::<_, i64>(2).map(|v| v as u64)?,
+                })
+            },
+        )
+        .map_err(|e| AppError::EventStore {
+            message: format!("期間別集計に失敗: {}", e),
+        })?;
+
+    // Severity 別集計（days 期間内）
+    let cutoff_days = now - i64::from(days) * 86400;
+    let mut severity_counts = SeverityCounts {
+        critical: 0,
+        warning: 0,
+        info: 0,
+    };
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT severity, COUNT(*) AS count \
+                 FROM security_events \
+                 WHERE timestamp >= ?1 \
+                 GROUP BY severity",
+            )
+            .map_err(|e| AppError::EventStore {
+                message: format!("重要度別集計の準備に失敗: {}", e),
+            })?;
+
+        let rows = stmt
+            .query_map(params![cutoff_days], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|e| AppError::EventStore {
+                message: format!("重要度別集計の実行に失敗: {}", e),
+            })?;
+
+        for row in rows {
+            let (severity, count) = row.map_err(|e| AppError::EventStore {
+                message: format!("重要度別集計の行読み取りに失敗: {}", e),
+            })?;
+            let count = count as u64;
+            match severity.as_str() {
+                "CRITICAL" => severity_counts.critical = count,
+                "WARNING" => severity_counts.warning = count,
+                "INFO" => severity_counts.info = count,
+                _ => {}
+            }
+        }
+    }
+
+    // モジュール別集計（上位10件）
+    let top_modules: Vec<ModuleCount> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT source_module, COUNT(*) AS count \
+                 FROM security_events \
+                 WHERE timestamp >= ?1 \
+                 GROUP BY source_module \
+                 ORDER BY count DESC \
+                 LIMIT 10",
+            )
+            .map_err(|e| AppError::EventStore {
+                message: format!("モジュール別集計の準備に失敗: {}", e),
+            })?;
+
+        let rows = stmt
+            .query_map(params![cutoff_days], |row| {
+                Ok(ModuleCount {
+                    module: row.get(0)?,
+                    count: row.get::<_, i64>(1).map(|v| v as u64)?,
+                })
+            })
+            .map_err(|e| AppError::EventStore {
+                message: format!("モジュール別集計の実行に失敗: {}", e),
+            })?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(|e| AppError::EventStore {
+                message: format!("モジュール別集計の行読み取りに失敗: {}", e),
+            })?);
+        }
+        result
+    };
+
+    // 日次推移（days 日間）
+    let daily_trend: Vec<DailyCount> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT (timestamp / 86400) AS day, COUNT(*) AS count \
+                 FROM security_events \
+                 WHERE timestamp >= ?1 \
+                 GROUP BY day \
+                 ORDER BY day ASC",
+            )
+            .map_err(|e| AppError::EventStore {
+                message: format!("日次推移集計の準備に失敗: {}", e),
+            })?;
+
+        let rows = stmt
+            .query_map(params![cutoff_days], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|e| AppError::EventStore {
+                message: format!("日次推移集計の実行に失敗: {}", e),
+            })?;
+
+        let mut day_map = std::collections::HashMap::new();
+        for row in rows {
+            let (day, count) = row.map_err(|e| AppError::EventStore {
+                message: format!("日次推移集計の行読み取りに失敗: {}", e),
+            })?;
+            day_map.insert(day, count as u64);
+        }
+
+        // 欠損日を 0 で補完
+        let start_day = cutoff_days / 86400;
+        let end_day = now / 86400;
+        let mut result = Vec::new();
+        for d in start_day..=end_day {
+            let (year, month, day) = days_to_ymd(d);
+            let date = format!("{:04}-{:02}-{:02}", year, month, day);
+            let count = day_map.get(&d).copied().unwrap_or(0);
+            result.push(DailyCount { date, count });
+        }
+        result
+    };
+
+    Ok(EventStats {
+        period_counts,
+        severity_counts,
+        top_modules,
+        daily_trend,
+    })
+}
+
 /// 読み取り専用で SQLite データベースを開く（CLI 検索用）
 pub fn open_readonly(db_path: &str) -> Result<Connection, AppError> {
     Connection::open_with_flags(
@@ -1047,6 +1259,132 @@ mod tests {
         };
         let results = query_events(&conn, &query).unwrap();
         assert_eq!(results.len(), 3);
+    }
+
+    fn insert_event_at(conn: &Connection, timestamp: i64, severity: &str, module: &str) {
+        conn.execute(
+            "INSERT INTO security_events (timestamp, severity, source_module, event_type, message) \
+             VALUES (?1, ?2, ?3, 'test_event', 'テスト')",
+            params![timestamp, severity, module],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_query_event_stats_empty() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+
+        let stats = query_event_stats(&conn, 7).unwrap();
+        assert_eq!(stats.period_counts.last_24h, 0);
+        assert_eq!(stats.period_counts.last_7d, 0);
+        assert_eq!(stats.period_counts.last_30d, 0);
+        assert_eq!(stats.severity_counts.critical, 0);
+        assert_eq!(stats.severity_counts.warning, 0);
+        assert_eq!(stats.severity_counts.info, 0);
+        assert!(stats.top_modules.is_empty());
+        // daily_trend は days 分の 0 件エントリがある
+        assert!(!stats.daily_trend.is_empty());
+        for dc in &stats.daily_trend {
+            assert_eq!(dc.count, 0);
+        }
+    }
+
+    #[test]
+    fn test_query_event_stats_with_data() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // 直近 1 時間以内のイベント
+        insert_event_at(&conn, now - 3600, "INFO", "mod_a");
+        insert_event_at(&conn, now - 7200, "WARNING", "mod_b");
+        insert_event_at(&conn, now - 100, "CRITICAL", "mod_a");
+
+        let stats = query_event_stats(&conn, 7).unwrap();
+        assert_eq!(stats.period_counts.last_24h, 3);
+        assert_eq!(stats.period_counts.last_7d, 3);
+        assert_eq!(stats.period_counts.last_30d, 3);
+    }
+
+    #[test]
+    fn test_query_event_stats_daily_trend_fills_gaps() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // 2日前にだけイベントを入れる
+        let two_days_ago = now - 2 * 86400;
+        insert_event_at(&conn, two_days_ago, "INFO", "mod_a");
+
+        let stats = query_event_stats(&conn, 7).unwrap();
+        // 7 日分 + 今日 = 8 エントリ（start_day から end_day まで）
+        assert!(stats.daily_trend.len() >= 7);
+
+        // データがある日は count > 0、それ以外は 0
+        let non_zero: Vec<&DailyCount> = stats.daily_trend.iter().filter(|d| d.count > 0).collect();
+        assert_eq!(non_zero.len(), 1);
+        assert_eq!(non_zero[0].count, 1);
+    }
+
+    #[test]
+    fn test_query_event_stats_severity_counts() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        insert_event_at(&conn, now - 100, "CRITICAL", "mod_a");
+        insert_event_at(&conn, now - 200, "CRITICAL", "mod_a");
+        insert_event_at(&conn, now - 300, "WARNING", "mod_b");
+        insert_event_at(&conn, now - 400, "INFO", "mod_c");
+        insert_event_at(&conn, now - 500, "INFO", "mod_c");
+        insert_event_at(&conn, now - 600, "INFO", "mod_c");
+
+        let stats = query_event_stats(&conn, 7).unwrap();
+        assert_eq!(stats.severity_counts.critical, 2);
+        assert_eq!(stats.severity_counts.warning, 1);
+        assert_eq!(stats.severity_counts.info, 3);
+    }
+
+    #[test]
+    fn test_query_event_stats_top_modules() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // mod_a: 3件, mod_b: 2件, mod_c: 1件
+        for _ in 0..3 {
+            insert_event_at(&conn, now - 100, "INFO", "mod_a");
+        }
+        for _ in 0..2 {
+            insert_event_at(&conn, now - 100, "WARNING", "mod_b");
+        }
+        insert_event_at(&conn, now - 100, "CRITICAL", "mod_c");
+
+        let stats = query_event_stats(&conn, 7).unwrap();
+        assert_eq!(stats.top_modules.len(), 3);
+        assert_eq!(stats.top_modules[0].module, "mod_a");
+        assert_eq!(stats.top_modules[0].count, 3);
+        assert_eq!(stats.top_modules[1].module, "mod_b");
+        assert_eq!(stats.top_modules[1].count, 2);
+        assert_eq!(stats.top_modules[2].module, "mod_c");
+        assert_eq!(stats.top_modules[2].count, 1);
     }
 
     #[test]

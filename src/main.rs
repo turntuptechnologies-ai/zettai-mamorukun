@@ -53,6 +53,18 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// イベントストアの統計サマリーを表示する
+    EventStats {
+        /// データベースファイルパス（省略時は設定ファイルの値を使用）
+        #[arg(long, value_name = "PATH")]
+        db: Option<String>,
+        /// 統計対象の日数（デフォルト: 7）
+        #[arg(long, default_value = "7", value_name = "N")]
+        days: u32,
+        /// JSON 形式で出力
+        #[arg(long)]
+        json: bool,
+    },
     /// 永続化されたセキュリティイベントを検索する
     SearchEvents {
         /// ソースモジュール名でフィルタ
@@ -378,6 +390,145 @@ fn print_table(records: &[event_store::EventRecord]) {
     }
 }
 
+/// 数値をカンマ区切りでフォーマットする
+fn format_number(n: u64) -> String {
+    let s = n.to_string();
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    if len <= 3 {
+        return s;
+    }
+    let mut result = String::with_capacity(len + (len - 1) / 3);
+    for (i, &b) in bytes.iter().enumerate() {
+        if i > 0 && (len - i).is_multiple_of(3) {
+            result.push(',');
+        }
+        result.push(b as char);
+    }
+    result
+}
+
+/// イベント統計を実行する
+fn run_event_stats(config_path: &Path, db: &Option<String>, days: u32, json: bool) {
+    if days < 1 {
+        eprintln!("エラー: --days は 1 以上を指定してください");
+        process::exit(1);
+    }
+
+    // DB パスを決定: --db > 設定ファイル > デフォルト
+    let db_path = if let Some(path) = db {
+        path.clone()
+    } else {
+        match AppConfig::load(config_path) {
+            Ok(config) => config.event_store.database_path,
+            Err(_) => "/var/lib/zettai-mamorukun/events.db".to_string(),
+        }
+    };
+
+    // DB を開く
+    let conn = match event_store::open_readonly(&db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("エラー: {}", e);
+            process::exit(1);
+        }
+    };
+
+    // 統計クエリ実行
+    let stats = match event_store::query_event_stats(&conn, days) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("エラー: {}", e);
+            process::exit(1);
+        }
+    };
+
+    if json {
+        let output = serde_json::json!({
+            "days": days,
+            "period_counts": stats.period_counts,
+            "severity_counts": stats.severity_counts,
+            "top_modules": stats.top_modules,
+            "daily_trend": stats.daily_trend,
+        });
+        // unwrap safety: serde_json::to_string_pretty は基本的な型で失敗しない
+        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+    } else {
+        print_event_stats(&stats, days);
+    }
+}
+
+/// イベント統計をテキスト形式で出力する
+fn print_event_stats(stats: &event_store::EventStats, days: u32) {
+    println!("=== イベント統計サマリー（直近 {} 日間） ===", days);
+    println!();
+
+    // 期間別イベント件数
+    println!("■ 期間別イベント件数");
+    println!(
+        "  直近 24 時間: {:>10} 件",
+        format_number(stats.period_counts.last_24h)
+    );
+    println!(
+        "  直近  7 日間: {:>10} 件",
+        format_number(stats.period_counts.last_7d)
+    );
+    println!(
+        "  直近 30 日間: {:>10} 件",
+        format_number(stats.period_counts.last_30d)
+    );
+    println!();
+
+    // 重要度別
+    println!("■ 重要度別（直近 {} 日間）", days);
+    println!(
+        "  CRITICAL: {:>10} 件",
+        format_number(stats.severity_counts.critical)
+    );
+    println!(
+        "  WARNING:  {:>10} 件",
+        format_number(stats.severity_counts.warning)
+    );
+    println!(
+        "  INFO:     {:>10} 件",
+        format_number(stats.severity_counts.info)
+    );
+    println!();
+
+    // モジュール別 TOP 10
+    println!("■ モジュール別 TOP 10（直近 {} 日間）", days);
+    if stats.top_modules.is_empty() {
+        println!("  （データなし）");
+    } else {
+        for (i, mc) in stats.top_modules.iter().enumerate() {
+            println!(
+                "  {:>2}. {:<24} {:>8} 件",
+                i + 1,
+                mc.module,
+                format_number(mc.count)
+            );
+        }
+    }
+    println!();
+
+    // 日次推移
+    println!("■ 日次推移（直近 {} 日間）", days);
+    if stats.daily_trend.is_empty() {
+        println!("  （データなし）");
+    } else {
+        let max_count = stats.daily_trend.iter().map(|d| d.count).max().unwrap_or(0);
+        for dc in &stats.daily_trend {
+            let bar = if max_count > 0 && dc.count > 0 {
+                let bar_len = ((dc.count as f64 / max_count as f64) * 20.0).ceil() as usize;
+                "█".repeat(bar_len)
+            } else {
+                String::new()
+            };
+            println!("  {}: {:>8} 件 {}", dc.date, format_number(dc.count), bar);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -403,6 +554,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     process::exit(1);
                 }
             }
+            return Ok(());
+        }
+        Some(Commands::EventStats { db, days, json }) => {
+            run_event_stats(&cli.config, db, *days, *json);
             return Ok(());
         }
         Some(Commands::SearchEvents {
