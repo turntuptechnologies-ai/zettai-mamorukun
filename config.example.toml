@@ -57,6 +57,25 @@ log_path = "/var/log/audit/audit.log"
 # 監視対象のイベントタイプ
 watch_types = ["EXECVE", "SYSCALL", "USER_AUTH", "USER_LOGIN", "AVC", "ANOMALY"]
 
+[modules.login_session_monitor]
+# ログインセッション監視モジュール — utmp/wtmp を監視して不審なセッションを検知
+enabled = false
+# チェック間隔（秒）
+check_interval_secs = 30
+# utmp ファイルパス
+utmp_path = "/var/run/utmp"
+# wtmp ファイルパス
+wtmp_path = "/var/log/wtmp"
+# root 直接ログインの検知を有効化
+alert_root_login = true
+# 同一ユーザーの最大同時セッション数
+max_concurrent_sessions = 3
+# 不審な時間帯（24時間制）
+suspicious_hours_start = 0
+suspicious_hours_end = 6
+# 不審な時間帯のログイン検知を有効化
+alert_suspicious_hours = false
+
 [modules.at_job_monitor]
 # at/batch ジョブ監視モジュールの有効/無効
 enabled = false

@@ -19,6 +19,7 @@ use crate::modules::kernel_params::KernelParamsModule;
 use crate::modules::ld_preload_monitor::LdPreloadMonitorModule;
 use crate::modules::listening_port_monitor::ListeningPortMonitorModule;
 use crate::modules::log_tamper::LogTamperModule;
+use crate::modules::login_session_monitor::LoginSessionMonitorModule;
 use crate::modules::mac_monitor::MacMonitorModule;
 use crate::modules::mount_monitor::MountMonitorModule;
 use crate::modules::network_interface_monitor::NetworkInterfaceMonitorModule;
@@ -704,6 +705,16 @@ impl ModuleManager {
             TlsCertMonitorModule,
             "TLS 証明書有効期限監視モジュール"
         );
+        start_module!(
+            modules,
+            config,
+            event_bus,
+            startup_scan_enabled,
+            scan_report,
+            login_session_monitor,
+            LoginSessionMonitorModule,
+            "ログインセッション監視モジュール"
+        );
 
         scan_report.total_duration = scan_start.elapsed();
 
@@ -1058,6 +1069,13 @@ impl ModuleManager {
             tls_cert_monitor,
             TlsCertMonitorModule,
             "TLS 証明書有効期限監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            login_session_monitor,
+            LoginSessionMonitorModule,
+            "ログインセッション監視モジュール"
         );
 
         scan_report.total_duration = scan_start.elapsed();
@@ -1535,6 +1553,17 @@ impl ModuleManager {
             process_exec_monitor,
             ProcessExecMonitorModule,
             "プロセス起動監視モジュール"
+        );
+        reload_module!(
+            result,
+            self.running_modules,
+            new_modules,
+            old_config,
+            new_config,
+            event_bus,
+            login_session_monitor,
+            LoginSessionMonitorModule,
+            "ログインセッション監視モジュール"
         );
 
         self.running_modules = new_modules;
