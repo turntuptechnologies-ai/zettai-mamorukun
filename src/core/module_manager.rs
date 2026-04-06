@@ -38,6 +38,7 @@ use crate::modules::ssh_key_monitor::SshKeyMonitorModule;
 use crate::modules::sudoers_monitor::SudoersMonitorModule;
 use crate::modules::suid_sgid_monitor::SuidSgidMonitorModule;
 use crate::modules::systemd_service::SystemdServiceModule;
+use crate::modules::tls_cert_monitor::TlsCertMonitorModule;
 use crate::modules::tmp_exec_monitor::TmpExecMonitorModule;
 use crate::modules::usb_monitor::UsbMonitorModule;
 use crate::modules::user_account::UserAccountModule;
@@ -682,6 +683,16 @@ impl ModuleManager {
             ProcessExecMonitorModule,
             "プロセス起動監視モジュール"
         );
+        start_module!(
+            modules,
+            config,
+            event_bus,
+            startup_scan_enabled,
+            scan_report,
+            tls_cert_monitor,
+            TlsCertMonitorModule,
+            "TLS 証明書有効期限監視モジュール"
+        );
 
         scan_report.total_duration = scan_start.elapsed();
 
@@ -1022,6 +1033,13 @@ impl ModuleManager {
             process_exec_monitor,
             ProcessExecMonitorModule,
             "プロセス起動監視モジュール"
+        );
+        scan_only_module!(
+            config,
+            scan_report,
+            tls_cert_monitor,
+            TlsCertMonitorModule,
+            "TLS 証明書有効期限監視モジュール"
         );
 
         scan_report.total_duration = scan_start.elapsed();

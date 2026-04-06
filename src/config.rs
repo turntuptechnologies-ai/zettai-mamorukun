@@ -289,6 +289,10 @@ pub struct ModulesConfig {
     /// プロセス起動監視モジュールの設定
     #[serde(default)]
     pub process_exec_monitor: ProcessExecMonitorConfig,
+
+    /// TLS 証明書有効期限監視モジュールの設定
+    #[serde(default)]
+    pub tls_cert_monitor: TlsCertMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -715,6 +719,72 @@ impl Default for SshKeyMonitorConfig {
             enabled: false,
             scan_interval_secs: Self::default_scan_interval_secs(),
             watch_paths: Self::default_watch_paths(),
+        }
+    }
+}
+
+/// TLS 証明書有効期限監視モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct TlsCertMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// チェック間隔（秒）
+    #[serde(default = "TlsCertMonitorConfig::default_check_interval_secs")]
+    pub check_interval_secs: u64,
+
+    /// 監視対象ディレクトリのリスト
+    #[serde(default = "TlsCertMonitorConfig::default_watch_dirs")]
+    pub watch_dirs: Vec<PathBuf>,
+
+    /// 警告を発行する残日数の閾値
+    #[serde(default = "TlsCertMonitorConfig::default_warning_days")]
+    pub warning_days: u32,
+
+    /// 重大アラートを発行する残日数の閾値
+    #[serde(default = "TlsCertMonitorConfig::default_critical_days")]
+    pub critical_days: u32,
+
+    /// 対象ファイル拡張子
+    #[serde(default = "TlsCertMonitorConfig::default_file_extensions")]
+    pub file_extensions: Vec<String>,
+}
+
+impl TlsCertMonitorConfig {
+    fn default_check_interval_secs() -> u64 {
+        3600
+    }
+
+    fn default_watch_dirs() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/etc/ssl/certs"),
+            PathBuf::from("/etc/pki/tls/certs"),
+        ]
+    }
+
+    fn default_warning_days() -> u32 {
+        30
+    }
+
+    fn default_critical_days() -> u32 {
+        7
+    }
+
+    fn default_file_extensions() -> Vec<String> {
+        vec![".pem".to_string(), ".crt".to_string(), ".cer".to_string()]
+    }
+}
+
+impl Default for TlsCertMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            check_interval_secs: Self::default_check_interval_secs(),
+            watch_dirs: Self::default_watch_dirs(),
+            warning_days: Self::default_warning_days(),
+            critical_days: Self::default_critical_days(),
+            file_extensions: Self::default_file_extensions(),
         }
     }
 }
