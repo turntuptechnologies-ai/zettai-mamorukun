@@ -1,6 +1,7 @@
 use crate::config::AppConfig;
 use crate::config::DigestConfig;
 use crate::core::action::{ActionEngine, ActionEngineConfig, DigestCollector, InFlightTracker};
+use crate::core::correlation::{CorrelationEngine, CorrelationRuntimeConfig};
 use crate::core::event::{self, EventBus, SecurityEvent, Severity};
 use crate::core::event_store::{EventStore, EventStoreRuntimeConfig};
 use crate::core::event_stream::{EventStreamRuntimeConfig, EventStreamServer};
@@ -57,6 +58,7 @@ impl Daemon {
         let mut event_store_config_sender: Option<watch::Sender<EventStoreRuntimeConfig>> = None;
         let mut event_stream_cancel_token: Option<CancellationToken> = None;
         let mut event_stream_config_sender: Option<watch::Sender<EventStreamRuntimeConfig>> = None;
+        let mut correlation_config_sender: Option<watch::Sender<CorrelationRuntimeConfig>> = None;
         let event_bus = if self.config.event_bus.enabled {
             let bus = EventBus::with_filters(
                 self.config.event_bus.channel_capacity,
@@ -142,6 +144,24 @@ impl Daemon {
                             error = %e,
                             "イベントストリームサーバーの起動に失敗しました"
                         );
+                    }
+                }
+            }
+
+            // 相関分析エンジンの起動
+            if self.config.correlation.enabled {
+                match CorrelationEngine::new(&self.config.correlation, &bus) {
+                    Ok((engine, sender)) => {
+                        correlation_config_sender = Some(sender);
+                        engine.spawn();
+                        tracing::info!(
+                            rules = self.config.correlation.rules.len(),
+                            window_secs = self.config.correlation.window_secs,
+                            "相関分析エンジンを起動しました"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "相関分析エンジンの初期化に失敗しました");
                     }
                 }
             }
@@ -458,6 +478,28 @@ impl Daemon {
                                 } else {
                                     tracing::warn!(
                                         "イベントストリームの設定リロードに失敗しました（受信側が閉じています）"
+                                    );
+                                }
+                            }
+
+                            // 相関分析エンジンのリロード
+                            if let Some(ref sender) = correlation_config_sender {
+                                let runtime_config = CorrelationRuntimeConfig {
+                                    window_secs: new_config.correlation.window_secs,
+                                    max_events: new_config.correlation.max_events,
+                                    cleanup_interval_secs: new_config
+                                        .correlation
+                                        .cleanup_interval_secs,
+                                    rules: new_config.correlation.rules.clone(),
+                                };
+                                if sender.send(runtime_config).is_ok() {
+                                    tracing::info!(
+                                        rules = new_config.correlation.rules.len(),
+                                        "相関分析エンジンの設定をリロードしました"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        "相関分析エンジンの設定リロードに失敗しました（受信側が閉じています）"
                                     );
                                 }
                             }

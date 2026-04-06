@@ -71,4 +71,8 @@ pub enum AppError {
     /// イベントストアエラー
     #[error("イベントストアエラー: {message}")]
     EventStore { message: String },
+
+    /// 相関分析エンジンエラー
+    #[error("相関分析エンジンエラー: {message}")]
+    CorrelationEngine { message: String },
 }

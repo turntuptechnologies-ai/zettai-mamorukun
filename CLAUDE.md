@@ -79,6 +79,7 @@ src/
     mod.rs             # コアモジュール
     daemon.rs          # デーモンライフサイクル管理
     action.rs          # アクションエンジン（ルールベースのアクション実行）
+    correlation.rs     # イベント相関分析エンジン（多段階攻撃パターン検知）
     event.rs           # イベントバス（SecurityEvent / EventBus / ログサブスクライバー）
     event_store.rs     # イベントストア（SQLite 永続化）
     health.rs          # ヘルスチェック（ハートビート・メモリ監視）
