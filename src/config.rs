@@ -317,6 +317,10 @@ pub struct ModulesConfig {
     /// ptrace 検知モジュールの設定
     #[serde(default)]
     pub ptrace_monitor: PtraceMonitorConfig,
+
+    /// カーネルシンボルテーブル監視モジュールの設定
+    #[serde(default)]
+    pub kallsyms_monitor: KallsymsMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -3649,6 +3653,33 @@ impl Default for PtraceMonitorConfig {
             enabled: false,
             scan_interval_secs: Self::default_scan_interval_secs(),
             whitelist_tracers: Vec::new(),
+        }
+    }
+}
+
+/// カーネルシンボルテーブル監視モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct KallsymsMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "KallsymsMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+}
+
+impl KallsymsMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        300
+    }
+}
+
+impl Default for KallsymsMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
         }
     }
 }
