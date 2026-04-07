@@ -14,6 +14,7 @@ use crate::modules::fd_monitor::FdMonitorModule;
 use crate::modules::file_integrity::FileIntegrityModule;
 use crate::modules::firewall_monitor::FirewallMonitorModule;
 use crate::modules::inotify_monitor::InotifyMonitorModule;
+use crate::modules::kallsyms_monitor::KallsymsMonitorModule;
 use crate::modules::kernel_module::KernelModuleMonitor;
 use crate::modules::kernel_params::KernelParamsModule;
 use crate::modules::ld_preload_monitor::LdPreloadMonitorModule;
@@ -104,6 +105,7 @@ macro_rules! for_each_module {
         $callback!($($prefix)* login_session_monitor, LoginSessionMonitorModule, "ログインセッション監視モジュール");
         $callback!($($prefix)* proc_maps_monitor, ProcMapsMonitorModule, "プロセスメモリマップ監視モジュール");
         $callback!($($prefix)* ptrace_monitor, PtraceMonitorModule, "ptrace 検知モジュール");
+        $callback!($($prefix)* kallsyms_monitor, KallsymsMonitorModule, "カーネルシンボルテーブル監視モジュール");
     };
 }
 

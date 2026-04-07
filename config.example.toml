@@ -782,3 +782,9 @@ event_type = "suid_sgid_new"
 enabled = true
 # ハートビートのインターバル（秒）
 heartbeat_interval_secs = 60
+
+[modules.kallsyms_monitor]
+# カーネルシンボルテーブル監視モジュール — /proc/kallsyms を監視しルートキットによるシンボル改ざんを検知
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 300
