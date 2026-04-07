@@ -3,6 +3,7 @@ pub mod auditd_monitor;
 pub mod capabilities_monitor;
 pub mod cgroup_monitor;
 pub mod container_namespace;
+pub mod coredump_monitor;
 pub mod cron_monitor;
 pub mod dns_monitor;
 pub mod env_injection_monitor;
