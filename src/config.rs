@@ -129,6 +129,10 @@ pub struct GeneralConfig {
     /// ログレベル（trace, debug, info, warn, error）
     #[serde(default = "GeneralConfig::default_log_level")]
     pub log_level: String,
+
+    /// journald への構造化ログ送信の有効/無効
+    #[serde(default = "GeneralConfig::default_journald_enabled")]
+    pub journald_enabled: bool,
 }
 
 /// モジュール設定
@@ -3153,12 +3157,17 @@ impl GeneralConfig {
     fn default_log_level() -> String {
         "info".to_string()
     }
+
+    fn default_journald_enabled() -> bool {
+        true
+    }
 }
 
 impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
             log_level: Self::default_log_level(),
+            journald_enabled: Self::default_journald_enabled(),
         }
     }
 }

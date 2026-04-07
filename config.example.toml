@@ -4,6 +4,11 @@
 [general]
 # ログレベル: trace, debug, info, warn, error
 log_level = "info"
+# systemd-journald への構造化ログ送信の有効/無効
+# 有効にすると journald にネイティブ構造化ログを送信し、
+# journalctl でのフィルタリング（PRIORITY 等）が容易になる
+# journald ソケットが利用できない環境では自動的に無効化される
+journald_enabled = true
 
 [daemon]
 # シャットダウンタイムアウト（秒）
