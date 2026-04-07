@@ -707,6 +707,12 @@ window_secs = 600
 max_events = 10000
 # クリーンアップ間隔（秒）
 cleanup_interval_secs = 30
+# プリセットルール（権限昇格・ラテラルムーブメント・ランサムウェア等 8 種）の有効/無効
+# true にすると組み込みプリセットが自動的に追加される
+enable_presets = true
+# 無効にするプリセットのリスト（プリセット名を指定、"preset:" プレフィックスは省略可）
+# 例: ["container_escape", "network_reconnaissance"]
+disabled_presets = []
 
 # 多段階攻撃パターン: SSH ブルートフォース → ユーザー追加 → cron 変更
 [[correlation.rules]]

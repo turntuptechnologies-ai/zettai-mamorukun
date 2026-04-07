@@ -2971,6 +2971,14 @@ pub struct CorrelationConfig {
     /// 相関ルールのリスト
     #[serde(default)]
     pub rules: Vec<CorrelationRuleConfig>,
+
+    /// プリセットルールの有効/無効（デフォルト: true）
+    #[serde(default = "CorrelationConfig::default_enable_presets")]
+    pub enable_presets: bool,
+
+    /// 無効にするプリセットのリスト
+    #[serde(default)]
+    pub disabled_presets: Vec<String>,
 }
 
 impl CorrelationConfig {
@@ -2985,6 +2993,10 @@ impl CorrelationConfig {
     fn default_cleanup_interval_secs() -> u64 {
         30
     }
+
+    fn default_enable_presets() -> bool {
+        true
+    }
 }
 
 impl Default for CorrelationConfig {
@@ -2995,6 +3007,8 @@ impl Default for CorrelationConfig {
             max_events: Self::default_max_events(),
             cleanup_interval_secs: Self::default_cleanup_interval_secs(),
             rules: Vec::new(),
+            enable_presets: Self::default_enable_presets(),
+            disabled_presets: Vec::new(),
         }
     }
 }
