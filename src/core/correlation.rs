@@ -45,8 +45,12 @@ pub struct CorrelationRuntimeConfig {
     pub max_events: usize,
     /// クリーンアップ間隔（秒）
     pub cleanup_interval_secs: u64,
-    /// ルール設定（受信側でコンパイルする）
+    /// ルール設定（マージ済み、受信側でコンパイルする）
     pub rules: Vec<crate::config::CorrelationRuleConfig>,
+    /// プリセットルールの有効/無効
+    pub enable_presets: bool,
+    /// 無効にするプリセットのリスト
+    pub disabled_presets: Vec<String>,
 }
 
 /// 相関マッチ結果
@@ -237,13 +241,22 @@ impl CorrelationEngine {
         config: &CorrelationConfig,
         event_bus: &EventBus,
     ) -> Result<(Self, watch::Sender<CorrelationRuntimeConfig>), AppError> {
-        let rules = Self::compile_rules(&config.rules, config.window_secs)?;
+        use crate::core::correlation_presets;
+
+        let effective_rules = correlation_presets::merge_rules(
+            &config.rules,
+            config.enable_presets,
+            &config.disabled_presets,
+        );
+        let rules = Self::compile_rules(&effective_rules, config.window_secs)?;
 
         let runtime_config = CorrelationRuntimeConfig {
             window_secs: config.window_secs,
             max_events: config.max_events,
             cleanup_interval_secs: config.cleanup_interval_secs,
-            rules: config.rules.clone(),
+            rules: effective_rules,
+            enable_presets: config.enable_presets,
+            disabled_presets: config.disabled_presets.clone(),
         };
 
         let (config_sender, config_receiver) = watch::channel(runtime_config);
@@ -762,6 +775,8 @@ mod tests {
             window_secs: 600,
             max_events: 100,
             cleanup_interval_secs: 30,
+            enable_presets: false,
+            disabled_presets: vec![],
             rules: vec![CorrelationRuleConfig {
                 name: "test_rule".to_string(),
                 description: "テストルール".to_string(),
@@ -842,6 +857,8 @@ mod tests {
             window_secs: 600,
             max_events: 100,
             cleanup_interval_secs: 30,
+            enable_presets: false,
+            disabled_presets: vec![],
             rules: vec![CorrelationRuleConfig {
                 name: "catch_all".to_string(),
                 description: "全イベントにマッチ".to_string(),
@@ -901,6 +918,8 @@ mod tests {
             window_secs: 600,
             max_events: 100,
             cleanup_interval_secs: 30,
+            enable_presets: false,
+            disabled_presets: vec![],
             rules: vec![CorrelationRuleConfig {
                 name: "simple_rule".to_string(),
                 description: "シンプルルール".to_string(),
@@ -1089,6 +1108,8 @@ mod tests {
             window_secs: 600,
             max_events: 100,
             cleanup_interval_secs: 30,
+            enable_presets: false,
+            disabled_presets: vec![],
             rules: vec![CorrelationRuleConfig {
                 name: "original_rule".to_string(),
                 description: "元のルール".to_string(),
@@ -1125,6 +1146,8 @@ mod tests {
                 max_events: 50,
                 cleanup_interval_secs: 15,
                 rules: new_rules,
+                enable_presets: false,
+                disabled_presets: vec![],
             })
             .unwrap();
 

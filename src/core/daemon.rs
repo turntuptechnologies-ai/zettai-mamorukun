@@ -153,9 +153,19 @@ impl Daemon {
                 match CorrelationEngine::new(&self.config.correlation, &bus) {
                     Ok((engine, sender)) => {
                         correlation_config_sender = Some(sender);
+                        let effective_rules = crate::core::correlation_presets::merge_rules(
+                            &self.config.correlation.rules,
+                            self.config.correlation.enable_presets,
+                            &self.config.correlation.disabled_presets,
+                        );
                         engine.spawn();
                         tracing::info!(
-                            rules = self.config.correlation.rules.len(),
+                            total_rules = effective_rules.len(),
+                            preset_rules = effective_rules
+                                .iter()
+                                .filter(|r| r.name.starts_with("preset:"))
+                                .count(),
+                            user_rules = self.config.correlation.rules.len(),
                             window_secs = self.config.correlation.window_secs,
                             "相関分析エンジンを起動しました"
                         );
@@ -484,17 +494,30 @@ impl Daemon {
 
                             // 相関分析エンジンのリロード
                             if let Some(ref sender) = correlation_config_sender {
+                                let effective_rules =
+                                    crate::core::correlation_presets::merge_rules(
+                                        &new_config.correlation.rules,
+                                        new_config.correlation.enable_presets,
+                                        &new_config.correlation.disabled_presets,
+                                    );
                                 let runtime_config = CorrelationRuntimeConfig {
                                     window_secs: new_config.correlation.window_secs,
                                     max_events: new_config.correlation.max_events,
                                     cleanup_interval_secs: new_config
                                         .correlation
                                         .cleanup_interval_secs,
-                                    rules: new_config.correlation.rules.clone(),
+                                    rules: effective_rules.clone(),
+                                    enable_presets: new_config.correlation.enable_presets,
+                                    disabled_presets: new_config
+                                        .correlation
+                                        .disabled_presets
+                                        .clone(),
                                 };
                                 if sender.send(runtime_config).is_ok() {
                                     tracing::info!(
-                                        rules = new_config.correlation.rules.len(),
+                                        total_rules = effective_rules.len(),
+                                        preset_rules = effective_rules.iter().filter(|r| r.name.starts_with("preset:")).count(),
+                                        user_rules = new_config.correlation.rules.len(),
                                         "相関分析エンジンの設定をリロードしました"
                                     );
                                 } else {
