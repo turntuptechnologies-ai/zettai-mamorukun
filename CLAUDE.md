@@ -94,6 +94,7 @@ src/
     capabilities_monitor.rs # Linux capabilities 監視モジュール
     cgroup_monitor.rs  # cgroup v2 リソース制限監視モジュール
     container_namespace.rs # コンテナ・名前空間検知モジュール
+    coredump_monitor.rs  # コアダンプ設定監視モジュール
     cron_monitor.rs    # Cron ジョブ改ざん検知モジュール
     dns_monitor.rs     # DNS設定改ざん検知モジュール
     env_injection_monitor.rs # 環境変数インジェクション検知モジュール

@@ -321,6 +321,10 @@ pub struct ModulesConfig {
     /// カーネルシンボルテーブル監視モジュールの設定
     #[serde(default)]
     pub kallsyms_monitor: KallsymsMonitorConfig,
+
+    /// コアダンプ設定監視モジュールの設定
+    #[serde(default)]
+    pub coredump_monitor: CoredumpMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -3680,6 +3684,42 @@ impl Default for KallsymsMonitorConfig {
         Self {
             enabled: false,
             scan_interval_secs: Self::default_scan_interval_secs(),
+        }
+    }
+}
+
+/// コアダンプ設定監視モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct CoredumpMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "CoredumpMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// /proc パス（テスト用にオーバーライド可能）
+    #[serde(default = "CoredumpMonitorConfig::default_proc_path")]
+    pub proc_path: String,
+}
+
+impl CoredumpMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_proc_path() -> String {
+        "/proc".to_string()
+    }
+}
+
+impl Default for CoredumpMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            proc_path: Self::default_proc_path(),
         }
     }
 }

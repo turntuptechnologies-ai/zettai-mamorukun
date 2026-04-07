@@ -788,3 +788,11 @@ heartbeat_interval_secs = 60
 enabled = false
 # スキャン間隔（秒）
 scan_interval_secs = 300
+
+[modules.coredump_monitor]
+# コアダンプ設定監視モジュール — core_pattern / suid_dumpable 等を監視し、コアダンプ悪用攻撃を検知
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 30
+# /proc パス（通常は変更不要）
+# proc_path = "/proc"
