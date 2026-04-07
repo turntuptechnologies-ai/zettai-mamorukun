@@ -606,6 +606,14 @@ pub struct LogTamperConfig {
     /// 監視対象パスのリスト
     #[serde(default = "LogTamperConfig::default_watch_paths")]
     pub watch_paths: Vec<PathBuf>,
+
+    /// logrotate によるファイル変更を誤検知しないようにする
+    #[serde(default = "LogTamperConfig::default_logrotate_aware")]
+    pub logrotate_aware: bool,
+
+    /// logrotate 検知後のイベント抑制時間（秒）
+    #[serde(default = "LogTamperConfig::default_logrotate_suppression_secs")]
+    pub logrotate_suppression_secs: u64,
 }
 
 impl LogTamperConfig {
@@ -621,6 +629,14 @@ impl LogTamperConfig {
             PathBuf::from("/var/log/messages"),
         ]
     }
+
+    fn default_logrotate_aware() -> bool {
+        true
+    }
+
+    fn default_logrotate_suppression_secs() -> u64 {
+        300
+    }
 }
 
 impl Default for LogTamperConfig {
@@ -629,6 +645,8 @@ impl Default for LogTamperConfig {
             enabled: false,
             scan_interval_secs: Self::default_scan_interval_secs(),
             watch_paths: Self::default_watch_paths(),
+            logrotate_aware: Self::default_logrotate_aware(),
+            logrotate_suppression_secs: Self::default_logrotate_suppression_secs(),
         }
     }
 }

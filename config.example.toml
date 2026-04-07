@@ -99,6 +99,10 @@ enabled = false
 scan_interval_secs = 30
 # 監視対象パスのリスト
 watch_paths = ["/var/log/syslog", "/var/log/auth.log", "/var/log/kern.log", "/var/log/messages"]
+# logrotate によるファイル変更を誤検知しないようにする（デフォルト: true）
+logrotate_aware = true
+# logrotate 検知後のイベント抑制時間（秒）（デフォルト: 300）
+logrotate_suppression_secs = 300
 
 [modules.systemd_service]
 # systemd サービス監視モジュールの有効/無効
