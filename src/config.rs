@@ -313,6 +313,10 @@ pub struct ModulesConfig {
     /// プロセスメモリマップ監視モジュールの設定
     #[serde(default)]
     pub proc_maps_monitor: ProcMapsMonitorConfig,
+
+    /// ptrace 検知モジュールの設定
+    #[serde(default)]
+    pub ptrace_monitor: PtraceMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -3614,6 +3618,38 @@ impl AppConfig {
             path: path.to_path_buf(),
             source: e,
         })
+    }
+}
+
+/// ptrace 検知モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct PtraceMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "PtraceMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 許可するトレーサーのプロセス名リスト（ホワイトリスト）
+    #[serde(default)]
+    pub whitelist_tracers: Vec<String>,
+}
+
+impl PtraceMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+}
+
+impl Default for PtraceMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            whitelist_tracers: Vec::new(),
+        }
     }
 }
 

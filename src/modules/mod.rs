@@ -28,6 +28,7 @@ pub mod proc_net_monitor;
 pub mod process_exec_monitor;
 pub mod process_monitor;
 pub mod process_tree_monitor;
+pub mod ptrace_monitor;
 pub mod seccomp_monitor;
 pub mod security_files_monitor;
 pub mod shell_config_monitor;
