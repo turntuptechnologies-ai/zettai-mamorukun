@@ -132,13 +132,39 @@ enum Commands {
     },
 }
 
-fn init_logging(log_level: &str) {
-    use tracing_subscriber::{EnvFilter, fmt};
+fn init_logging(log_level: &str, journald_enabled: bool) {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::{EnvFilter, Registry, fmt};
 
     // unwrap safety: "info" は有効なフィルタディレクティブであり、EnvFilter::new() はパニックしない
     let filter = EnvFilter::try_new(log_level).unwrap_or_else(|_| EnvFilter::new("info"));
 
-    fmt().with_env_filter(filter).with_target(true).init();
+    let fmt_layer = fmt::layer().with_target(true);
+
+    let journald_layer = if journald_enabled {
+        match tracing_journald::layer() {
+            Ok(layer) => {
+                eprintln!("journald レイヤーを有効化しました");
+                Some(layer)
+            }
+            Err(e) => {
+                eprintln!(
+                    "警告: journald ソケットに接続できません（{}）。stdout のみでログ出力します",
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    Registry::default()
+        .with(filter)
+        .with(fmt_layer)
+        .with(journald_layer)
+        .init();
 }
 
 /// 設定ファイルをチェックし、結果を表示する
@@ -891,7 +917,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // デーモンモード
     let config = AppConfig::load(&cli.config)?;
 
-    init_logging(&config.general.log_level);
+    init_logging(&config.general.log_level, config.general.journald_enabled);
 
     if !cli.config.exists() {
         tracing::warn!(
