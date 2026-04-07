@@ -94,6 +94,14 @@ exclude_processes = []
 # 除外するライブラリパスのリスト
 exclude_paths = []
 
+[modules.ptrace_monitor]
+# ptrace 検知モジュール — /proc/[pid]/status の TracerPid を監視し不正なデバッガ注入を検知
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 30
+# 許可するトレーサーのプロセス名リスト（開発環境で正規のデバッガを除外する用途）
+whitelist_tracers = []
+
 [modules.at_job_monitor]
 # at/batch ジョブ監視モジュールの有効/無効
 enabled = false

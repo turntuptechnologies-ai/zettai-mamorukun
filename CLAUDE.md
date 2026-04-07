@@ -115,6 +115,7 @@ src/
     pam_monitor.rs     # PAM 設定監視モジュール
     proc_maps_monitor.rs # プロセスメモリマップ監視モジュール
     proc_net_monitor.rs # /proc/net/ 監視モジュール（ルーティング・ARP）
+    ptrace_monitor.rs  # ptrace 検知モジュール
     pkg_repo_monitor.rs # パッケージリポジトリ改ざん検知モジュール
     security_files_monitor.rs # /etc/security/ 監視モジュール
     process_exec_monitor.rs # プロセス起動監視モジュール
