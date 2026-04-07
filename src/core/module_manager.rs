@@ -27,6 +27,7 @@ use crate::modules::network_monitor::NetworkMonitorModule;
 use crate::modules::network_traffic_monitor::NetworkTrafficMonitorModule;
 use crate::modules::pam_monitor::PamMonitorModule;
 use crate::modules::pkg_repo_monitor::PkgRepoMonitorModule;
+use crate::modules::proc_maps_monitor::ProcMapsMonitorModule;
 use crate::modules::proc_net_monitor::ProcNetMonitorModule;
 use crate::modules::process_exec_monitor::ProcessExecMonitorModule;
 use crate::modules::process_monitor::ProcessMonitorModule;
@@ -100,6 +101,7 @@ macro_rules! for_each_module {
         $callback!($($prefix)* process_exec_monitor, ProcessExecMonitorModule, "プロセス起動監視モジュール");
         $callback!($($prefix)* tls_cert_monitor, TlsCertMonitorModule, "TLS 証明書有効期限監視モジュール");
         $callback!($($prefix)* login_session_monitor, LoginSessionMonitorModule, "ログインセッション監視モジュール");
+        $callback!($($prefix)* proc_maps_monitor, ProcMapsMonitorModule, "プロセスメモリマップ監視モジュール");
     };
 }
 

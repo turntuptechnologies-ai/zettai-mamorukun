@@ -76,6 +76,24 @@ suspicious_hours_end = 6
 # 不審な時間帯のログイン検知を有効化
 alert_suspicious_hours = false
 
+[modules.proc_maps_monitor]
+# プロセスメモリマップ監視モジュール — /proc/[pid]/maps を解析し不審なライブラリインジェクションを検知
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 60
+# 不審なパスのリスト（これらのパスからのライブラリロードを検知）
+suspicious_paths = ["/tmp", "/dev/shm", "/var/tmp"]
+# 削除済みファイルからのマッピングを検知するか
+detect_deleted_mappings = true
+# RWX 権限を持つ匿名メモリ領域を検知するか
+detect_rwx_anonymous = true
+# 隠しファイルからのライブラリロードを検知するか
+detect_hidden_libraries = true
+# 除外するプロセス名のリスト
+exclude_processes = []
+# 除外するライブラリパスのリスト
+exclude_paths = []
+
 [modules.at_job_monitor]
 # at/batch ジョブ監視モジュールの有効/無効
 enabled = false

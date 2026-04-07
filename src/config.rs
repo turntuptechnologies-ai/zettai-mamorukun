@@ -309,6 +309,10 @@ pub struct ModulesConfig {
     /// ログインセッション監視モジュールの設定
     #[serde(default)]
     pub login_session_monitor: LoginSessionMonitorConfig,
+
+    /// プロセスメモリマップ監視モジュールの設定
+    #[serde(default)]
+    pub proc_maps_monitor: ProcMapsMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -1002,6 +1006,75 @@ impl Default for LoginSessionMonitorConfig {
             suspicious_hours_start: 0,
             suspicious_hours_end: Self::default_suspicious_hours_end(),
             alert_suspicious_hours: false,
+        }
+    }
+}
+
+/// プロセスメモリマップ監視モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct ProcMapsMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "ProcMapsMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 不審なパスのリスト（これらのパスからのライブラリロードを検知する）
+    #[serde(default = "ProcMapsMonitorConfig::default_suspicious_paths")]
+    pub suspicious_paths: Vec<String>,
+
+    /// 削除済みファイルからのマッピングを検知するか
+    #[serde(default = "ProcMapsMonitorConfig::default_true")]
+    pub detect_deleted_mappings: bool,
+
+    /// RWX 権限を持つ匿名メモリ領域を検知するか
+    #[serde(default = "ProcMapsMonitorConfig::default_true")]
+    pub detect_rwx_anonymous: bool,
+
+    /// 隠しファイルからのライブラリロードを検知するか
+    #[serde(default = "ProcMapsMonitorConfig::default_true")]
+    pub detect_hidden_libraries: bool,
+
+    /// 除外するプロセス名のリスト
+    #[serde(default)]
+    pub exclude_processes: Vec<String>,
+
+    /// 除外するライブラリパスのリスト
+    #[serde(default)]
+    pub exclude_paths: Vec<String>,
+}
+
+impl ProcMapsMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        60
+    }
+
+    fn default_suspicious_paths() -> Vec<String> {
+        vec![
+            "/tmp".to_string(),
+            "/dev/shm".to_string(),
+            "/var/tmp".to_string(),
+        ]
+    }
+
+    fn default_true() -> bool {
+        true
+    }
+}
+
+impl Default for ProcMapsMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            suspicious_paths: Self::default_suspicious_paths(),
+            detect_deleted_mappings: true,
+            detect_rwx_anonymous: true,
+            detect_hidden_libraries: true,
+            exclude_processes: Vec::new(),
+            exclude_paths: Vec::new(),
         }
     }
 }
