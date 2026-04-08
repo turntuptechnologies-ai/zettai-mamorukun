@@ -50,6 +50,7 @@ use crate::modules::systemd_service::SystemdServiceModule;
 use crate::modules::systemd_timer_monitor::SystemdTimerMonitorModule;
 use crate::modules::tls_cert_monitor::TlsCertMonitorModule;
 use crate::modules::tmp_exec_monitor::TmpExecMonitorModule;
+use crate::modules::unix_socket_monitor::UnixSocketMonitorModule;
 use crate::modules::usb_monitor::UsbMonitorModule;
 use crate::modules::user_account::UserAccountModule;
 use crate::modules::xattr_monitor::XattrMonitorModule;
@@ -114,6 +115,7 @@ macro_rules! for_each_module {
         $callback!($($prefix)* ptrace_monitor, PtraceMonitorModule, "ptrace 検知モジュール");
         $callback!($($prefix)* kallsyms_monitor, KallsymsMonitorModule, "カーネルシンボルテーブル監視モジュール");
         $callback!($($prefix)* swap_tmpfs_monitor, SwapTmpfsMonitorModule, "スワップ / tmpfs 監視モジュール");
+        $callback!($($prefix)* unix_socket_monitor, UnixSocketMonitorModule, "UNIX ソケット監視モジュール");
     };
 }
 
