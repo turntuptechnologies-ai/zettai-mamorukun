@@ -836,3 +836,16 @@ scan_executables = true
 exclude_paths = ["/dev/shm"]
 # /proc パス（通常は変更不要）
 # proc_path = "/proc"
+
+[modules.unix_socket_monitor]
+# UNIX ソケット監視モジュール — /proc/net/unix を解析し、
+# UNIX ドメインソケットの出現・消失・不審なパスを検知
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 30
+# 監視対象ディレクトリ — これらのディレクトリ配下のソケットのみ監視
+watch_dirs = ["/run", "/tmp", "/var/run", "/var/tmp"]
+# 既知の正常なソケット — これらが消失した場合は警告レベルを上げる
+known_sockets = ["/run/dbus/system_bus_socket", "/run/systemd/private"]
+# /proc パス（通常は変更不要）
+# proc_path = "/proc"

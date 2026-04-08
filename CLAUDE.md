@@ -138,6 +138,7 @@ src/
     systemd_timer_monitor.rs # systemd タイマーユニット監視モジュール
     tls_cert_monitor.rs # TLS 証明書有効期限監視モジュール
     tmp_exec_monitor.rs # 一時ディレクトリ実行ファイル検知モジュール
+    unix_socket_monitor.rs # UNIX ソケット監視モジュール
     user_account.rs    # ユーザーアカウント監視モジュール
     xattr_monitor.rs   # ファイルシステム xattr（拡張属性）監視モジュール
 tests/

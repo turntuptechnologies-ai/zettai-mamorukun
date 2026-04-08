@@ -341,6 +341,10 @@ pub struct ModulesConfig {
     /// スワップ / tmpfs 監視モジュールの設定
     #[serde(default)]
     pub swap_tmpfs_monitor: SwapTmpfsMonitorConfig,
+
+    /// UNIX ソケット監視モジュールの設定
+    #[serde(default)]
+    pub unix_socket_monitor: UnixSocketMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -3894,6 +3898,68 @@ impl Default for SwapTmpfsMonitorConfig {
             tmpfs_usage_threshold_percent: Self::default_tmpfs_usage_threshold_percent(),
             scan_executables: Self::default_scan_executables(),
             exclude_paths: Self::default_exclude_paths(),
+            proc_path: Self::default_proc_path(),
+        }
+    }
+}
+
+/// UNIX ソケット監視モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct UnixSocketMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "UnixSocketMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象ディレクトリ
+    #[serde(default = "UnixSocketMonitorConfig::default_watch_dirs")]
+    pub watch_dirs: Vec<String>,
+
+    /// 既知の正常なソケットパス（ベースライン）
+    #[serde(default = "UnixSocketMonitorConfig::default_known_sockets")]
+    pub known_sockets: Vec<String>,
+
+    /// /proc パス（テスト用に変更可能）
+    #[serde(default = "UnixSocketMonitorConfig::default_proc_path")]
+    pub proc_path: String,
+}
+
+impl UnixSocketMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_watch_dirs() -> Vec<String> {
+        vec![
+            "/run".to_string(),
+            "/tmp".to_string(),
+            "/var/run".to_string(),
+            "/var/tmp".to_string(),
+        ]
+    }
+
+    fn default_known_sockets() -> Vec<String> {
+        vec![
+            "/run/dbus/system_bus_socket".to_string(),
+            "/run/systemd/private".to_string(),
+        ]
+    }
+
+    fn default_proc_path() -> String {
+        "/proc".to_string()
+    }
+}
+
+impl Default for UnixSocketMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            watch_dirs: Self::default_watch_dirs(),
+            known_sockets: Self::default_known_sockets(),
             proc_path: Self::default_proc_path(),
         }
     }

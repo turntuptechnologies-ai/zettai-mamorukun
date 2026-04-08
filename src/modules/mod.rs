@@ -46,6 +46,7 @@ pub mod systemd_service;
 pub mod systemd_timer_monitor;
 pub mod tls_cert_monitor;
 pub mod tmp_exec_monitor;
+pub mod unix_socket_monitor;
 pub mod usb_monitor;
 pub mod user_account;
 pub mod xattr_monitor;
