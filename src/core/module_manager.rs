@@ -33,6 +33,7 @@ use crate::modules::pam_monitor::PamMonitorModule;
 use crate::modules::pkg_repo_monitor::PkgRepoMonitorModule;
 use crate::modules::proc_maps_monitor::ProcMapsMonitorModule;
 use crate::modules::proc_net_monitor::ProcNetMonitorModule;
+use crate::modules::process_cgroup_monitor::ProcessCgroupMonitorModule;
 use crate::modules::process_exec_monitor::ProcessExecMonitorModule;
 use crate::modules::process_monitor::ProcessMonitorModule;
 use crate::modules::process_tree_monitor::ProcessTreeMonitorModule;
@@ -116,6 +117,7 @@ macro_rules! for_each_module {
         $callback!($($prefix)* kallsyms_monitor, KallsymsMonitorModule, "カーネルシンボルテーブル監視モジュール");
         $callback!($($prefix)* swap_tmpfs_monitor, SwapTmpfsMonitorModule, "スワップ / tmpfs 監視モジュール");
         $callback!($($prefix)* unix_socket_monitor, UnixSocketMonitorModule, "UNIX ソケット監視モジュール");
+        $callback!($($prefix)* process_cgroup_monitor, ProcessCgroupMonitorModule, "プロセス cgroup 逸脱検知モジュール");
     };
 }
 

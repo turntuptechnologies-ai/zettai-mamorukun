@@ -345,6 +345,10 @@ pub struct ModulesConfig {
     /// UNIX ソケット監視モジュールの設定
     #[serde(default)]
     pub unix_socket_monitor: UnixSocketMonitorConfig,
+
+    /// プロセス cgroup 逸脱検知モジュールの設定
+    #[serde(default)]
+    pub process_cgroup_monitor: ProcessCgroupMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -3961,6 +3965,52 @@ impl Default for UnixSocketMonitorConfig {
             watch_dirs: Self::default_watch_dirs(),
             known_sockets: Self::default_known_sockets(),
             proc_path: Self::default_proc_path(),
+        }
+    }
+}
+
+/// プロセス cgroup 逸脱検知モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct ProcessCgroupMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "ProcessCgroupMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象プロセス名のフィルタ（空の場合は全プロセス）
+    #[serde(default)]
+    pub watch_process_names: Vec<String>,
+
+    /// ホワイトリスト cgroup パターン（正規表現）
+    #[serde(default)]
+    pub whitelist_patterns: Vec<String>,
+
+    /// ルート cgroup（"/"）への移動検知
+    #[serde(default = "ProcessCgroupMonitorConfig::default_detect_root_cgroup_escape")]
+    pub detect_root_cgroup_escape: bool,
+}
+
+impl ProcessCgroupMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_detect_root_cgroup_escape() -> bool {
+        true
+    }
+}
+
+impl Default for ProcessCgroupMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            watch_process_names: Vec::new(),
+            whitelist_patterns: Vec::new(),
+            detect_root_cgroup_escape: Self::default_detect_root_cgroup_escape(),
         }
     }
 }

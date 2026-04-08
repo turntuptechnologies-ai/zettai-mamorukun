@@ -849,3 +849,16 @@ watch_dirs = ["/run", "/tmp", "/var/run", "/var/tmp"]
 known_sockets = ["/run/dbus/system_bus_socket", "/run/systemd/private"]
 # /proc パス（通常は変更不要）
 # proc_path = "/proc"
+
+[modules.process_cgroup_monitor]
+# プロセス cgroup 逸脱検知
+# プロセスが本来所属すべき cgroup から逸脱していないかを監視し、
+# コンテナブレイクアウトの兆候を検知する
+enabled = false
+scan_interval_secs = 30
+# 監視対象プロセス名のフィルタ（空=全プロセス）
+watch_process_names = []
+# ホワイトリスト cgroup パターン（正規表現）
+whitelist_patterns = []
+# ルート cgroup（"/"）への移動検知
+detect_root_cgroup_escape = true
