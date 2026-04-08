@@ -10,6 +10,7 @@ use crate::modules::container_namespace::ContainerNamespaceModule;
 use crate::modules::coredump_monitor::CoredumpMonitorModule;
 use crate::modules::cron_monitor::CronMonitorModule;
 use crate::modules::dns_monitor::DnsMonitorModule;
+use crate::modules::ebpf_monitor::EbpfMonitorModule;
 use crate::modules::env_injection_monitor::EnvInjectionMonitorModule;
 use crate::modules::fd_monitor::FdMonitorModule;
 use crate::modules::file_integrity::FileIntegrityModule;
@@ -88,6 +89,7 @@ macro_rules! for_each_module {
         $callback!($($prefix)* capabilities_monitor, CapabilitiesMonitorModule, "capabilities 監視モジュール");
         $callback!($($prefix)* container_namespace, ContainerNamespaceModule, "コンテナ・名前空間検知モジュール");
         $callback!($($prefix)* coredump_monitor, CoredumpMonitorModule, "コアダンプ設定監視モジュール");
+        $callback!($($prefix)* ebpf_monitor, EbpfMonitorModule, "eBPF プログラム監視モジュール");
         $callback!($($prefix)* cgroup_monitor, CgroupMonitorModule, "cgroup 監視モジュール");
         $callback!($($prefix)* kernel_params, KernelParamsModule, "カーネルパラメータ監視モジュール");
         $callback!($($prefix)* proc_net_monitor, ProcNetMonitorModule, "/proc/net/ 監視モジュール");

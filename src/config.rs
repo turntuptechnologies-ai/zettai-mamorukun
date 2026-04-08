@@ -329,6 +329,10 @@ pub struct ModulesConfig {
     /// コアダンプ設定監視モジュールの設定
     #[serde(default)]
     pub coredump_monitor: CoredumpMonitorConfig,
+
+    /// eBPF プログラム監視モジュールの設定
+    #[serde(default)]
+    pub ebpf_monitor: EbpfMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -3390,6 +3394,11 @@ impl AppConfig {
             "modules.ld_preload_monitor.scan_interval_secs",
             &mut errors,
         );
+        Self::validate_interval(
+            self.modules.ebpf_monitor.scan_interval_secs,
+            "modules.ebpf_monitor.scan_interval_secs",
+            &mut errors,
+        );
 
         // network_monitor 固有の検証
         if self.modules.network_monitor.max_connections == 0 {
@@ -3729,6 +3738,47 @@ impl Default for CoredumpMonitorConfig {
             enabled: false,
             scan_interval_secs: Self::default_scan_interval_secs(),
             proc_path: Self::default_proc_path(),
+        }
+    }
+}
+
+/// eBPF プログラム監視モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct EbpfMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "EbpfMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// /proc パス（テスト用にオーバーライド可能）
+    #[serde(default = "EbpfMonitorConfig::default_proc_path")]
+    pub proc_path: String,
+
+    /// 許可するプログラム名のリスト
+    #[serde(default)]
+    pub allowed_programs: Vec<String>,
+}
+
+impl EbpfMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_proc_path() -> String {
+        "/proc".to_string()
+    }
+}
+
+impl Default for EbpfMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            proc_path: Self::default_proc_path(),
+            allowed_programs: vec![],
         }
     }
 }
