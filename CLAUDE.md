@@ -105,6 +105,7 @@ src/
     file_integrity.rs  # ファイル整合性監視モジュール
     firewall_monitor.rs # ファイアウォールルール監視モジュール
     inotify_monitor.rs # inotify ベースのリアルタイムファイル変更検知モジュール
+    ipc_monitor.rs     # System V IPC 監視モジュール
     kallsyms_monitor.rs # カーネルシンボルテーブル監視モジュール
     kernel_module.rs   # カーネルモジュール監視モジュール
     kernel_params.rs   # /proc/sys/ カーネルパラメータ監視モジュール
