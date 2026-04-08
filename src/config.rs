@@ -333,6 +333,10 @@ pub struct ModulesConfig {
     /// eBPF プログラム監視モジュールの設定
     #[serde(default)]
     pub ebpf_monitor: EbpfMonitorConfig,
+
+    /// D-Bus シグナル監視モジュールの設定
+    #[serde(default)]
+    pub dbus_monitor: DbusMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -3779,6 +3783,51 @@ impl Default for EbpfMonitorConfig {
             scan_interval_secs: Self::default_scan_interval_secs(),
             proc_path: Self::default_proc_path(),
             allowed_programs: vec![],
+        }
+    }
+}
+
+/// D-Bus シグナル監視モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct DbusMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "DbusMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// systemd ユニット状態変更を監視する
+    #[serde(default = "DbusMonitorConfig::default_watch_systemd")]
+    pub watch_systemd: bool,
+
+    /// D-Bus バス名の出現・消失を監視する
+    #[serde(default = "DbusMonitorConfig::default_watch_bus_names")]
+    pub watch_bus_names: bool,
+}
+
+impl DbusMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_watch_systemd() -> bool {
+        true
+    }
+
+    fn default_watch_bus_names() -> bool {
+        true
+    }
+}
+
+impl Default for DbusMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            watch_systemd: Self::default_watch_systemd(),
+            watch_bus_names: Self::default_watch_bus_names(),
         }
     }
 }

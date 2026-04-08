@@ -96,6 +96,7 @@ src/
     container_namespace.rs # コンテナ・名前空間検知モジュール
     coredump_monitor.rs  # コアダンプ設定監視モジュール
     cron_monitor.rs    # Cron ジョブ改ざん検知モジュール
+    dbus_monitor.rs    # D-Bus シグナル監視モジュール
     dns_monitor.rs     # DNS設定改ざん検知モジュール
     ebpf_monitor.rs    # eBPF プログラム監視モジュール
     env_injection_monitor.rs # 環境変数インジェクション検知モジュール
