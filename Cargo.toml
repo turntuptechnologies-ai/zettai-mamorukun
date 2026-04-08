@@ -1,6 +1,6 @@
 [package]
 name = "zettai-mamorukun"
-version = "0.83.0"
+version = "0.84.0"
 edition = "2024"
 description = "Linux サーバ向けサイバー攻撃防御デーモン"
 license = "MIT"
@@ -26,9 +26,9 @@ csv = "1"
 x509-parser = "0.16"
 pem = "3"
 tracing-journald = "0.3"
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process"] }
-libc = "0.2"
 wiremock = "0.6"

@@ -45,6 +45,7 @@ use crate::modules::ssh_brute_force::SshBruteForceModule;
 use crate::modules::ssh_key_monitor::SshKeyMonitorModule;
 use crate::modules::sudoers_monitor::SudoersMonitorModule;
 use crate::modules::suid_sgid_monitor::SuidSgidMonitorModule;
+use crate::modules::swap_tmpfs_monitor::SwapTmpfsMonitorModule;
 use crate::modules::systemd_service::SystemdServiceModule;
 use crate::modules::systemd_timer_monitor::SystemdTimerMonitorModule;
 use crate::modules::tls_cert_monitor::TlsCertMonitorModule;
@@ -112,6 +113,7 @@ macro_rules! for_each_module {
         $callback!($($prefix)* proc_maps_monitor, ProcMapsMonitorModule, "プロセスメモリマップ監視モジュール");
         $callback!($($prefix)* ptrace_monitor, PtraceMonitorModule, "ptrace 検知モジュール");
         $callback!($($prefix)* kallsyms_monitor, KallsymsMonitorModule, "カーネルシンボルテーブル監視モジュール");
+        $callback!($($prefix)* swap_tmpfs_monitor, SwapTmpfsMonitorModule, "スワップ / tmpfs 監視モジュール");
     };
 }
 
