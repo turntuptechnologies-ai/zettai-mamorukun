@@ -89,6 +89,7 @@ src/
     status.rs          # ステータスサーバー（Unix ソケット経由の CLI ステータス問い合わせ）
   modules/
     mod.rs             # モジュールトレイト・レジストリ
+    abstract_socket_monitor.rs # 抽象ソケット名前空間監視モジュール
     at_job_monitor.rs  # at/batch ジョブ監視モジュール
     auditd_monitor.rs  # auditd ログ統合モジュール
     capabilities_monitor.rs # Linux capabilities 監視モジュール

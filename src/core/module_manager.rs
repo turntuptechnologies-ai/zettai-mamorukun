@@ -2,6 +2,7 @@
 
 use crate::config::ModulesConfig;
 use crate::core::event::EventBus;
+use crate::modules::abstract_socket_monitor::AbstractSocketMonitorModule;
 use crate::modules::at_job_monitor::AtJobMonitorModule;
 use crate::modules::auditd_monitor::AuditdMonitorModule;
 use crate::modules::capabilities_monitor::CapabilitiesMonitorModule;
@@ -118,6 +119,7 @@ macro_rules! for_each_module {
         $callback!($($prefix)* swap_tmpfs_monitor, SwapTmpfsMonitorModule, "スワップ / tmpfs 監視モジュール");
         $callback!($($prefix)* unix_socket_monitor, UnixSocketMonitorModule, "UNIX ソケット監視モジュール");
         $callback!($($prefix)* process_cgroup_monitor, ProcessCgroupMonitorModule, "プロセス cgroup 逸脱検知モジュール");
+        $callback!($($prefix)* abstract_socket_monitor, AbstractSocketMonitorModule, "抽象ソケット名前空間監視モジュール");
     };
 }
 

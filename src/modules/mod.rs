@@ -1,3 +1,4 @@
+pub mod abstract_socket_monitor;
 pub mod at_job_monitor;
 pub mod auditd_monitor;
 pub mod capabilities_monitor;
