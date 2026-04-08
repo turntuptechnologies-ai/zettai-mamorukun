@@ -337,6 +337,10 @@ pub struct ModulesConfig {
     /// D-Bus シグナル監視モジュールの設定
     #[serde(default)]
     pub dbus_monitor: DbusMonitorConfig,
+
+    /// スワップ / tmpfs 監視モジュールの設定
+    #[serde(default)]
+    pub swap_tmpfs_monitor: SwapTmpfsMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -3828,6 +3832,69 @@ impl Default for DbusMonitorConfig {
             scan_interval_secs: Self::default_scan_interval_secs(),
             watch_systemd: Self::default_watch_systemd(),
             watch_bus_names: Self::default_watch_bus_names(),
+        }
+    }
+}
+
+/// スワップ / tmpfs 監視モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct SwapTmpfsMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "SwapTmpfsMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// tmpfs 使用量の閾値（%）
+    #[serde(default = "SwapTmpfsMonitorConfig::default_tmpfs_usage_threshold_percent")]
+    pub tmpfs_usage_threshold_percent: u64,
+
+    /// tmpfs 上の実行ファイルをスキャンするか
+    #[serde(default = "SwapTmpfsMonitorConfig::default_scan_executables")]
+    pub scan_executables: bool,
+
+    /// 除外する tmpfs マウントポイント（他モジュールとの棲み分け用）
+    #[serde(default = "SwapTmpfsMonitorConfig::default_exclude_paths")]
+    pub exclude_paths: Vec<String>,
+
+    /// /proc パス（通常は変更不要）
+    #[serde(default = "SwapTmpfsMonitorConfig::default_proc_path")]
+    pub proc_path: String,
+}
+
+impl SwapTmpfsMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_tmpfs_usage_threshold_percent() -> u64 {
+        80
+    }
+
+    fn default_scan_executables() -> bool {
+        true
+    }
+
+    fn default_exclude_paths() -> Vec<String> {
+        vec!["/dev/shm".to_string()]
+    }
+
+    fn default_proc_path() -> String {
+        "/proc".to_string()
+    }
+}
+
+impl Default for SwapTmpfsMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            tmpfs_usage_threshold_percent: Self::default_tmpfs_usage_threshold_percent(),
+            scan_executables: Self::default_scan_executables(),
+            exclude_paths: Self::default_exclude_paths(),
+            proc_path: Self::default_proc_path(),
         }
     }
 }

@@ -821,3 +821,18 @@ scan_interval_secs = 30
 watch_systemd = true
 # D-Bus バス名の出現・消失を監視する
 watch_bus_names = true
+
+[modules.swap_tmpfs_monitor]
+# スワップ / tmpfs 監視モジュール — スワップデバイスの追加・削除、swappiness 変更、
+# tmpfs マウントの追加・削除、tmpfs 上の実行ファイル、tmpfs 使用量超過を検知
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 30
+# tmpfs 使用量の閾値（%）— この値を超えるとアラート
+tmpfs_usage_threshold_percent = 80
+# tmpfs 上の実行ファイルをスキャンするか
+scan_executables = true
+# 除外する tmpfs マウントポイント（/dev/shm は shm_monitor が担当）
+exclude_paths = ["/dev/shm"]
+# /proc パス（通常は変更不要）
+# proc_path = "/proc"
