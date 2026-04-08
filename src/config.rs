@@ -349,6 +349,10 @@ pub struct ModulesConfig {
     /// プロセス cgroup 逸脱検知モジュールの設定
     #[serde(default)]
     pub process_cgroup_monitor: ProcessCgroupMonitorConfig,
+
+    /// 抽象ソケット名前空間監視モジュールの設定
+    #[serde(default)]
+    pub abstract_socket_monitor: AbstractSocketMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -4011,6 +4015,67 @@ impl Default for ProcessCgroupMonitorConfig {
             watch_process_names: Vec::new(),
             whitelist_patterns: Vec::new(),
             detect_root_cgroup_escape: Self::default_detect_root_cgroup_escape(),
+        }
+    }
+}
+
+/// 抽象ソケット名前空間監視モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct AbstractSocketMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "AbstractSocketMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 許可パターン — これらにマッチしない抽象ソケットを検知
+    #[serde(default = "AbstractSocketMonitorConfig::default_allowed_patterns")]
+    pub allowed_patterns: Vec<String>,
+
+    /// バースト検知閾値（1スキャンサイクル内で新規出現がこの数を超えたら警告）
+    #[serde(default = "AbstractSocketMonitorConfig::default_burst_threshold")]
+    pub burst_threshold: usize,
+
+    /// /proc パス（テスト用に変更可能）
+    #[serde(default = "AbstractSocketMonitorConfig::default_proc_path")]
+    pub proc_path: String,
+}
+
+impl AbstractSocketMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_allowed_patterns() -> Vec<String> {
+        vec![
+            "@/tmp/.X11-unix/*".to_string(),
+            "@/tmp/.ICE-unix/*".to_string(),
+            "@/run/dbus-*".to_string(),
+            "@/run/systemd/*".to_string(),
+            "@/run/user/*/bus".to_string(),
+            "@/run/user/*/at-spi*".to_string(),
+        ]
+    }
+
+    fn default_burst_threshold() -> usize {
+        10
+    }
+
+    fn default_proc_path() -> String {
+        "/proc".to_string()
+    }
+}
+
+impl Default for AbstractSocketMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            allowed_patterns: Self::default_allowed_patterns(),
+            burst_threshold: Self::default_burst_threshold(),
+            proc_path: Self::default_proc_path(),
         }
     }
 }
