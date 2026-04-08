@@ -801,3 +801,13 @@ enabled = false
 scan_interval_secs = 30
 # /proc パス（通常は変更不要）
 # proc_path = "/proc"
+
+[modules.ebpf_monitor]
+# eBPF プログラム監視モジュール — /proc/[pid]/fdinfo を走査し、不正な eBPF プログラムのロードを検知
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 30
+# /proc パス（通常は変更不要）
+# proc_path = "/proc"
+# 許可するプログラム名のリスト（これらのプロセスによる eBPF ロードは Info レベルで記録）
+# allowed_programs = ["systemd", "bpftrace"]

@@ -6,6 +6,7 @@ pub mod container_namespace;
 pub mod coredump_monitor;
 pub mod cron_monitor;
 pub mod dns_monitor;
+pub mod ebpf_monitor;
 pub mod env_injection_monitor;
 pub mod fd_monitor;
 pub mod file_integrity;

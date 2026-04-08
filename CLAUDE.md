@@ -97,6 +97,7 @@ src/
     coredump_monitor.rs  # コアダンプ設定監視モジュール
     cron_monitor.rs    # Cron ジョブ改ざん検知モジュール
     dns_monitor.rs     # DNS設定改ざん検知モジュール
+    ebpf_monitor.rs    # eBPF プログラム監視モジュール
     env_injection_monitor.rs # 環境変数インジェクション検知モジュール
     fd_monitor.rs      # ファイルディスクリプタ監視モジュール
     file_integrity.rs  # ファイル整合性監視モジュール
