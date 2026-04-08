@@ -122,6 +122,7 @@ src/
     ptrace_monitor.rs  # ptrace 検知モジュール
     pkg_repo_monitor.rs # パッケージリポジトリ改ざん検知モジュール
     security_files_monitor.rs # /etc/security/ 監視モジュール
+    process_cgroup_monitor.rs # プロセス cgroup 逸脱検知モジュール
     process_exec_monitor.rs # プロセス起動監視モジュール
     process_monitor.rs # プロセス異常検知モジュール
     process_tree_monitor.rs # プロセスツリー監視モジュール
