@@ -18,6 +18,7 @@ use crate::modules::fd_monitor::FdMonitorModule;
 use crate::modules::file_integrity::FileIntegrityModule;
 use crate::modules::firewall_monitor::FirewallMonitorModule;
 use crate::modules::inotify_monitor::InotifyMonitorModule;
+use crate::modules::ipc_monitor::IpcMonitorModule;
 use crate::modules::kallsyms_monitor::KallsymsMonitorModule;
 use crate::modules::kernel_module::KernelModuleMonitor;
 use crate::modules::kernel_params::KernelParamsModule;
@@ -120,6 +121,7 @@ macro_rules! for_each_module {
         $callback!($($prefix)* unix_socket_monitor, UnixSocketMonitorModule, "UNIX ソケット監視モジュール");
         $callback!($($prefix)* process_cgroup_monitor, ProcessCgroupMonitorModule, "プロセス cgroup 逸脱検知モジュール");
         $callback!($($prefix)* abstract_socket_monitor, AbstractSocketMonitorModule, "抽象ソケット名前空間監視モジュール");
+        $callback!($($prefix)* ipc_monitor, IpcMonitorModule, "IPC 監視モジュール");
     };
 }
 

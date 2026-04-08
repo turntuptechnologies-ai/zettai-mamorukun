@@ -353,6 +353,10 @@ pub struct ModulesConfig {
     /// 抽象ソケット名前空間監視モジュールの設定
     #[serde(default)]
     pub abstract_socket_monitor: AbstractSocketMonitorConfig,
+
+    /// IPC 監視モジュールの設定
+    #[serde(default)]
+    pub ipc_monitor: IpcMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -4099,6 +4103,80 @@ impl Default for AbstractSocketMonitorConfig {
             allowed_patterns: Self::default_allowed_patterns(),
             burst_threshold: Self::default_burst_threshold(),
             proc_path: Self::default_proc_path(),
+        }
+    }
+}
+
+/// IPC 監視モジュールの設定
+///
+/// System V IPC（共有メモリ、セマフォ、メッセージキュー）を監視する。
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct IpcMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "IpcMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 過度に緩いパーミッション（0o666 等）を検知するか
+    #[serde(default = "IpcMonitorConfig::default_alert_on_world_accessible")]
+    pub alert_on_world_accessible: bool,
+
+    /// 大容量共有メモリセグメントの閾値（バイト）
+    #[serde(default = "IpcMonitorConfig::default_alert_on_large_shm_bytes")]
+    pub alert_on_large_shm_bytes: u64,
+
+    /// セマフォセット数の警告閾値
+    #[serde(default = "IpcMonitorConfig::default_alert_on_high_semaphore_count")]
+    pub alert_on_high_semaphore_count: u64,
+
+    /// メッセージキュー数の警告閾値
+    #[serde(default = "IpcMonitorConfig::default_alert_on_high_msg_queue_count")]
+    pub alert_on_high_msg_queue_count: u64,
+
+    /// /proc/sysvipc パス（テスト用に変更可能）
+    #[serde(default = "IpcMonitorConfig::default_proc_sysvipc_path")]
+    pub proc_sysvipc_path: PathBuf,
+}
+
+impl IpcMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        60
+    }
+
+    fn default_alert_on_world_accessible() -> bool {
+        true
+    }
+
+    fn default_alert_on_large_shm_bytes() -> u64 {
+        104_857_600 // 100MB
+    }
+
+    fn default_alert_on_high_semaphore_count() -> u64 {
+        100
+    }
+
+    fn default_alert_on_high_msg_queue_count() -> u64 {
+        50
+    }
+
+    fn default_proc_sysvipc_path() -> PathBuf {
+        PathBuf::from("/proc/sysvipc")
+    }
+}
+
+impl Default for IpcMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            alert_on_world_accessible: Self::default_alert_on_world_accessible(),
+            alert_on_large_shm_bytes: Self::default_alert_on_large_shm_bytes(),
+            alert_on_high_semaphore_count: Self::default_alert_on_high_semaphore_count(),
+            alert_on_high_msg_queue_count: Self::default_alert_on_high_msg_queue_count(),
+            proc_sysvipc_path: Self::default_proc_sysvipc_path(),
         }
     }
 }

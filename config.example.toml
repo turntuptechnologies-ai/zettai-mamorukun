@@ -890,3 +890,20 @@ watch_process_names = []
 whitelist_patterns = []
 # ルート cgroup（"/"）への移動検知
 detect_root_cgroup_escape = true
+
+[modules.ipc_monitor]
+# System V IPC 監視
+# 共有メモリ、セマフォ、メッセージキューの不正利用を検知する
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 60
+# 過度に緩いパーミッション（0o666 等）を検知するか
+alert_on_world_accessible = true
+# 大容量共有メモリセグメントの閾値（バイト、デフォルト 100MB）
+alert_on_large_shm_bytes = 104857600
+# セマフォセット数の警告閾値
+alert_on_high_semaphore_count = 100
+# メッセージキュー数の警告閾値
+alert_on_high_msg_queue_count = 50
+# /proc/sysvipc パス（通常は変更不要）
+# proc_sysvipc_path = "/proc/sysvipc"
