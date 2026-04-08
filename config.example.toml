@@ -811,3 +811,13 @@ scan_interval_secs = 30
 # proc_path = "/proc"
 # 許可するプログラム名のリスト（これらのプロセスによる eBPF ロードは Info レベルで記録）
 # allowed_programs = ["systemd", "bpftrace"]
+
+[modules.dbus_monitor]
+# D-Bus シグナル監視モジュール — D-Bus システムバス上のサービス状態変更を検知
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 30
+# systemd ユニット状態変更を監視する
+watch_systemd = true
+# D-Bus バス名の出現・消失を監視する
+watch_bus_names = true
