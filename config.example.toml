@@ -713,6 +713,14 @@ batch_size = 100
 batch_interval_secs = 5
 # クリーンアップ実行間隔（時間）— 古いイベントの削除を実行する間隔
 cleanup_interval_hours = 24
+# CRITICAL イベントの保持期間（日数）
+# retention_days より長い期間を設定することで、重要イベントをより長く保持する
+# 0 の場合は retention_days と同じ（Severity 別保持なし）
+retention_days_critical = 365
+# ストレージ上限（MB）
+# DB ファイルサイズがこの値を超えた場合、古い INFO → WARNING → CRITICAL の順で削除する
+# 0 の場合は上限なし（無制限）
+max_storage_mb = 0
 
 [event_stream]
 # イベントストリーム（Unix ソケット経由リアルタイムイベント配信）の有効/無効

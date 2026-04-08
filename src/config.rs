@@ -2980,6 +2980,17 @@ pub struct EventStoreConfig {
     /// クリーンアップ実行間隔（時間）
     #[serde(default = "EventStoreConfig::default_cleanup_interval_hours")]
     pub cleanup_interval_hours: u64,
+
+    /// CRITICAL イベントの保持期間（日数）
+    /// 0 の場合は retention_days と同じ値を使用する
+    #[serde(default = "EventStoreConfig::default_retention_days_critical")]
+    pub retention_days_critical: u64,
+
+    /// ストレージ上限（MB）
+    /// DB ファイルサイズがこの値を超えた場合、古い INFO → WARNING → CRITICAL の順で削除する
+    /// 0 の場合は上限なし
+    #[serde(default)]
+    pub max_storage_mb: u64,
 }
 
 impl EventStoreConfig {
@@ -2998,6 +3009,9 @@ impl EventStoreConfig {
     fn default_cleanup_interval_hours() -> u64 {
         24
     }
+    fn default_retention_days_critical() -> u64 {
+        365
+    }
 }
 
 impl Default for EventStoreConfig {
@@ -3009,6 +3023,8 @@ impl Default for EventStoreConfig {
             batch_size: Self::default_batch_size(),
             batch_interval_secs: Self::default_batch_interval_secs(),
             cleanup_interval_hours: Self::default_cleanup_interval_hours(),
+            retention_days_critical: Self::default_retention_days_critical(),
+            max_storage_mb: 0,
         }
     }
 }
@@ -3241,6 +3257,13 @@ impl AppConfig {
             if self.event_store.batch_interval_secs == 0 {
                 errors.push(
                     "event_store.batch_interval_secs: 0 より大きい値を指定してください".to_string(),
+                );
+            }
+            if self.event_store.retention_days_critical != 0
+                && self.event_store.retention_days_critical < self.event_store.retention_days
+            {
+                errors.push(
+                    "event_store.retention_days_critical: retention_days 以上の値を指定してください（0 で無効化）".to_string(),
                 );
             }
         }
