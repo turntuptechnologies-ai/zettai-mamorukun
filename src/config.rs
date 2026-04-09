@@ -133,6 +133,14 @@ pub struct GeneralConfig {
     /// journald への構造化ログ送信の有効/無効
     #[serde(default = "GeneralConfig::default_journald_enabled")]
     pub journald_enabled: bool,
+
+    /// journald カスタムフィールドのプレフィックス
+    ///
+    /// SecurityEvent の各フィールドが `{PREFIX}_EVENT_TYPE`, `{PREFIX}_SEVERITY` 等の
+    /// 名前で journald に送信される。`journalctl {PREFIX}_SEVERITY=CRITICAL` のように
+    /// フィルタリングに使用できる。
+    #[serde(default = "GeneralConfig::default_journald_field_prefix")]
+    pub journald_field_prefix: String,
 }
 
 /// モジュール設定
@@ -3213,6 +3221,10 @@ impl GeneralConfig {
     fn default_journald_enabled() -> bool {
         true
     }
+
+    fn default_journald_field_prefix() -> String {
+        "ZETTAI".to_string()
+    }
 }
 
 impl Default for GeneralConfig {
@@ -3220,6 +3232,7 @@ impl Default for GeneralConfig {
         Self {
             log_level: Self::default_log_level(),
             journald_enabled: Self::default_journald_enabled(),
+            journald_field_prefix: Self::default_journald_field_prefix(),
         }
     }
 }
@@ -3236,6 +3249,21 @@ impl AppConfig {
                 "general.log_level: 無効な値 '{}' (有効値: {})",
                 self.general.log_level,
                 valid_log_levels.join(", ")
+            ));
+        }
+
+        // general.journald_field_prefix の検証
+        if self.general.journald_field_prefix.is_empty() {
+            errors.push("general.journald_field_prefix: 空文字列は指定できません".to_string());
+        } else if !self
+            .general
+            .journald_field_prefix
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        {
+            errors.push(format!(
+                "general.journald_field_prefix: 大文字英数字とアンダースコアのみ使用できます (現在値: '{}')",
+                self.general.journald_field_prefix
             ));
         }
 
@@ -4792,6 +4820,50 @@ max_connections = 500
             assert!(errors[0].contains("general.log_level"));
             assert!(errors[0].contains("verbose"));
         }
+    }
+
+    #[test]
+    fn test_validate_journald_field_prefix_default_is_valid() {
+        let config = AppConfig::default();
+        assert_eq!(config.general.journald_field_prefix, "ZETTAI");
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_journald_field_prefix_custom_valid() {
+        let mut config = AppConfig::default();
+        config.general.journald_field_prefix = "MY_APP".to_string();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_journald_field_prefix_empty() {
+        let mut config = AppConfig::default();
+        config.general.journald_field_prefix = "".to_string();
+        let result = config.validate();
+        assert!(result.is_err());
+        if let Err(AppError::ConfigValidation { errors, .. }) = result {
+            assert!(errors.iter().any(|e| e.contains("journald_field_prefix")));
+        }
+    }
+
+    #[test]
+    fn test_validate_journald_field_prefix_lowercase_invalid() {
+        let mut config = AppConfig::default();
+        config.general.journald_field_prefix = "zettai".to_string();
+        let result = config.validate();
+        assert!(result.is_err());
+        if let Err(AppError::ConfigValidation { errors, .. }) = result {
+            assert!(errors.iter().any(|e| e.contains("journald_field_prefix")));
+        }
+    }
+
+    #[test]
+    fn test_validate_journald_field_prefix_with_special_chars_invalid() {
+        let mut config = AppConfig::default();
+        config.general.journald_field_prefix = "ZETTAI-APP".to_string();
+        let result = config.validate();
+        assert!(result.is_err());
     }
 
     #[test]

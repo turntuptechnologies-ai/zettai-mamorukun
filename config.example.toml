@@ -9,6 +9,14 @@ log_level = "info"
 # journalctl でのフィルタリング（PRIORITY 等）が容易になる
 # journald ソケットが利用できない環境では自動的に無効化される
 journald_enabled = true
+# journald カスタムフィールドのプレフィックス
+# SecurityEvent の各フィールドが {PREFIX}_EVENT_TYPE, {PREFIX}_SEVERITY 等の
+# 名前で journald に送信される
+# 使用例: journalctl ZETTAI_SEVERITY=CRITICAL
+#         journalctl ZETTAI_MODULE=file_integrity
+#         journalctl ZETTAI_EVENT_TYPE=file_modified
+# 大文字英数字とアンダースコアのみ使用可能
+journald_field_prefix = "ZETTAI"
 
 [daemon]
 # シャットダウンタイムアウト（秒）
