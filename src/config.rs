@@ -377,6 +377,10 @@ pub struct ModulesConfig {
     /// TLS 証明書チェーン検証モジュールの設定
     #[serde(default)]
     pub cert_chain_monitor: CertChainMonitorConfig,
+
+    /// namespaces 詳細監視モジュールの設定
+    #[serde(default)]
+    pub namespace_monitor: NamespaceMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -4411,6 +4415,72 @@ impl Default for CertChainMonitorConfig {
             watch_dirs: Self::default_watch_dirs(),
             file_extensions: Self::default_file_extensions(),
             trusted_ca_dirs: Self::default_trusted_ca_dirs(),
+        }
+    }
+}
+
+/// namespaces 詳細監視モジュール設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct NamespaceMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "NamespaceMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象の名前空間リスト
+    #[serde(default = "NamespaceMonitorConfig::default_watch_namespaces")]
+    pub watch_namespaces: Vec<String>,
+
+    /// 除外プロセス名リスト
+    #[serde(default = "NamespaceMonitorConfig::default_exclude_processes")]
+    pub exclude_processes: Vec<String>,
+
+    /// init namespace と異なる namespace を持つ新規プロセスをアラートするか
+    #[serde(default = "NamespaceMonitorConfig::default_alert_on_new_ns")]
+    pub alert_on_new_ns: bool,
+}
+
+impl NamespaceMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_watch_namespaces() -> Vec<String> {
+        vec![
+            "pid".to_string(),
+            "net".to_string(),
+            "mnt".to_string(),
+            "uts".to_string(),
+            "ipc".to_string(),
+            "user".to_string(),
+        ]
+    }
+
+    fn default_exclude_processes() -> Vec<String> {
+        vec![
+            "containerd".to_string(),
+            "dockerd".to_string(),
+            "podman".to_string(),
+            "lxc-start".to_string(),
+        ]
+    }
+
+    fn default_alert_on_new_ns() -> bool {
+        true
+    }
+}
+
+impl Default for NamespaceMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            watch_namespaces: Self::default_watch_namespaces(),
+            exclude_processes: Self::default_exclude_processes(),
+            alert_on_new_ns: Self::default_alert_on_new_ns(),
         }
     }
 }
