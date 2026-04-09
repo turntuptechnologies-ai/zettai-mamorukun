@@ -385,6 +385,10 @@ pub struct ModulesConfig {
     /// プロセス環境変数スナップショット監視モジュールの設定
     #[serde(default)]
     pub proc_environ_monitor: ProcEnvironMonitorConfig,
+
+    /// グループポリシー監視モジュールの設定
+    #[serde(default)]
+    pub group_monitor: GroupMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -3637,6 +3641,7 @@ impl AppConfig {
             m.pkg_repo_monitor.enabled,
             m.ld_preload_monitor.enabled,
             m.network_monitor.enabled,
+            m.group_monitor.enabled,
         ]
         .iter()
         .filter(|&&e| e)
@@ -4593,6 +4598,68 @@ impl Default for ProcEnvironMonitorConfig {
             proxy_vars: Self::default_proxy_vars(),
             whitelist_patterns: Vec::new(),
             skip_kernel_threads: Self::default_skip_kernel_threads(),
+        }
+    }
+}
+
+/// グループポリシー監視モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct GroupMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "GroupMonitorConfig::default_interval_secs")]
+    pub interval_secs: u64,
+
+    /// /etc/group ファイルのパス
+    #[serde(default = "GroupMonitorConfig::default_group_path")]
+    pub group_path: PathBuf,
+
+    /// /etc/gshadow ファイルのパス
+    #[serde(default = "GroupMonitorConfig::default_gshadow_path")]
+    pub gshadow_path: PathBuf,
+
+    /// 特権グループ名リスト（これらへのメンバー追加は Critical severity）
+    #[serde(default = "GroupMonitorConfig::default_privileged_groups")]
+    pub privileged_groups: Vec<String>,
+}
+
+impl GroupMonitorConfig {
+    fn default_interval_secs() -> u64 {
+        60
+    }
+
+    fn default_group_path() -> PathBuf {
+        PathBuf::from("/etc/group")
+    }
+
+    fn default_gshadow_path() -> PathBuf {
+        PathBuf::from("/etc/gshadow")
+    }
+
+    fn default_privileged_groups() -> Vec<String> {
+        vec![
+            "sudo".to_string(),
+            "wheel".to_string(),
+            "docker".to_string(),
+            "adm".to_string(),
+            "root".to_string(),
+            "shadow".to_string(),
+            "disk".to_string(),
+        ]
+    }
+}
+
+impl Default for GroupMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: Self::default_interval_secs(),
+            group_path: Self::default_group_path(),
+            gshadow_path: Self::default_gshadow_path(),
+            privileged_groups: Self::default_privileged_groups(),
         }
     }
 }

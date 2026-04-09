@@ -973,6 +973,19 @@ file_extensions = [".pem", ".crt", ".cer"]
 # 信頼済み CA 証明書の格納ディレクトリ
 trusted_ca_dirs = ["/etc/ssl/certs", "/etc/pki/ca-trust/extracted/pem"]
 
+[modules.group_monitor]
+# グループポリシー監視モジュール — /etc/group と /etc/gshadow を定期スキャンし、
+# 不正なグループメンバーシップ変更や特権グループへの追加を検知する
+enabled = false
+# スキャン間隔（秒）
+interval_secs = 60
+# 特権グループ名リスト（これらへのメンバー追加は Critical severity）
+privileged_groups = ["sudo", "wheel", "docker", "adm", "root", "shadow", "disk"]
+# /etc/group パス（通常は変更不要）
+# group_path = "/etc/group"
+# /etc/gshadow パス（通常は変更不要）
+# gshadow_path = "/etc/gshadow"
+
 [modules.proc_environ_monitor]
 # プロセス環境変数スナップショット監視モジュール — 実行中プロセスの /proc/[pid]/environ を
 # 定期スキャンし、不審な環境変数の注入をリアルタイムで検知する
