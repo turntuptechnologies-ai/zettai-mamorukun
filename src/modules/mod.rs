@@ -1,6 +1,7 @@
 pub mod abstract_socket_monitor;
 pub mod at_job_monitor;
 pub mod auditd_monitor;
+pub mod backdoor_detector;
 pub mod capabilities_monitor;
 pub mod cgroup_monitor;
 pub mod container_namespace;

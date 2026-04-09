@@ -361,6 +361,10 @@ pub struct ModulesConfig {
     /// プロセス権限昇格検知モジュールの設定
     #[serde(default)]
     pub privilege_escalation_monitor: PrivilegeEscalationMonitorConfig,
+
+    /// バックドア検知モジュールの設定
+    #[serde(default)]
+    pub backdoor_detector: BackdoorDetectorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -4235,6 +4239,85 @@ impl Default for PrivilegeEscalationMonitorConfig {
             enabled: false,
             scan_interval_secs: Self::default_scan_interval_secs(),
             whitelist_processes: Self::default_whitelist_processes(),
+            proc_path: Self::default_proc_path(),
+        }
+    }
+}
+
+/// バックドア検知モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct BackdoorDetectorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "BackdoorDetectorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 許可ポート番号リスト
+    ///
+    /// このリストに含まれるポートでリッスンしているソケットはアラート対象外
+    #[serde(default)]
+    pub allowed_ports: Vec<u16>,
+
+    /// 許可プロセス名リスト
+    ///
+    /// このリストに含まれるプロセス名でリッスンしているソケットはアラート対象外
+    #[serde(default)]
+    pub allowed_processes: Vec<String>,
+
+    /// ループバックアドレスのリッスンもアラートするか
+    ///
+    /// false の場合、127.0.0.1 / ::1 のみでリッスンしているソケットはアラート対象外
+    #[serde(default = "BackdoorDetectorConfig::default_alert_on_loopback")]
+    pub alert_on_loopback: bool,
+
+    /// /proc/net/tcp のパス（テスト用に変更可能）
+    #[serde(default = "BackdoorDetectorConfig::default_tcp_path")]
+    pub tcp_path: String,
+
+    /// /proc/net/tcp6 のパス（テスト用に変更可能）
+    #[serde(default = "BackdoorDetectorConfig::default_tcp6_path")]
+    pub tcp6_path: String,
+
+    /// /proc パス（テスト用に変更可能）
+    #[serde(default = "BackdoorDetectorConfig::default_proc_path")]
+    pub proc_path: String,
+}
+
+impl BackdoorDetectorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_alert_on_loopback() -> bool {
+        false
+    }
+
+    fn default_tcp_path() -> String {
+        "/proc/net/tcp".to_string()
+    }
+
+    fn default_tcp6_path() -> String {
+        "/proc/net/tcp6".to_string()
+    }
+
+    fn default_proc_path() -> String {
+        "/proc".to_string()
+    }
+}
+
+impl Default for BackdoorDetectorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            allowed_ports: Vec::new(),
+            allowed_processes: Vec::new(),
+            alert_on_loopback: Self::default_alert_on_loopback(),
+            tcp_path: Self::default_tcp_path(),
+            tcp6_path: Self::default_tcp6_path(),
             proc_path: Self::default_proc_path(),
         }
     }
