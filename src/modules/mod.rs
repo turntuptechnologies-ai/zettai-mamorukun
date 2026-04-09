@@ -26,6 +26,7 @@ pub mod log_tamper;
 pub mod login_session_monitor;
 pub mod mac_monitor;
 pub mod mount_monitor;
+pub mod namespace_monitor;
 pub mod network_interface_monitor;
 pub mod network_monitor;
 pub mod network_traffic_monitor;

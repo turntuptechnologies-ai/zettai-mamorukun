@@ -30,6 +30,7 @@ use crate::modules::log_tamper::LogTamperModule;
 use crate::modules::login_session_monitor::LoginSessionMonitorModule;
 use crate::modules::mac_monitor::MacMonitorModule;
 use crate::modules::mount_monitor::MountMonitorModule;
+use crate::modules::namespace_monitor::NamespaceMonitorModule;
 use crate::modules::network_interface_monitor::NetworkInterfaceMonitorModule;
 use crate::modules::network_monitor::NetworkMonitorModule;
 use crate::modules::network_traffic_monitor::NetworkTrafficMonitorModule;
@@ -128,6 +129,7 @@ macro_rules! for_each_module {
         $callback!($($prefix)* privilege_escalation_monitor, PrivilegeEscalationMonitorModule, "プロセス権限昇格検知モジュール");
         $callback!($($prefix)* backdoor_detector, BackdoorDetectorModule, "バックドア検知モジュール");
         $callback!($($prefix)* cert_chain_monitor, CertChainMonitorModule, "証明書チェーン検証モジュール");
+        $callback!($($prefix)* namespace_monitor, NamespaceMonitorModule, "namespaces 詳細監視モジュール");
     };
 }
 

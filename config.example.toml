@@ -948,6 +948,19 @@ alert_on_loopback = false
 # /proc パス（通常は変更不要）
 # proc_path = "/proc"
 
+[modules.namespace_monitor]
+# namespaces 詳細監視モジュール — 全プロセスの /proc/[pid]/ns/ を定期スキャンし、
+# namespace 変更やコンテナ脱出・サンドボックス回避の兆候を検知する
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 30
+# 監視対象の namespace リスト
+watch_namespaces = ["pid", "net", "mnt", "uts", "ipc", "user"]
+# 除外プロセス名リスト（コンテナランタイム等は除外）
+exclude_processes = ["containerd", "dockerd", "podman", "lxc-start"]
+# init namespace と異なる namespace を持つ新規プロセスをアラートするか
+alert_on_new_ns = true
+
 [modules.cert_chain_monitor]
 # TLS 証明書チェーン検証モジュールの有効/無効
 enabled = false
