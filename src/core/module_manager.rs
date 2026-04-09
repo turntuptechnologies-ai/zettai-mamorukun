@@ -19,6 +19,7 @@ use crate::modules::env_injection_monitor::EnvInjectionMonitorModule;
 use crate::modules::fd_monitor::FdMonitorModule;
 use crate::modules::file_integrity::FileIntegrityModule;
 use crate::modules::firewall_monitor::FirewallMonitorModule;
+use crate::modules::group_monitor::GroupMonitorModule;
 use crate::modules::inotify_monitor::InotifyMonitorModule;
 use crate::modules::ipc_monitor::IpcMonitorModule;
 use crate::modules::kallsyms_monitor::KallsymsMonitorModule;
@@ -132,6 +133,7 @@ macro_rules! for_each_module {
         $callback!($($prefix)* cert_chain_monitor, CertChainMonitorModule, "証明書チェーン検証モジュール");
         $callback!($($prefix)* namespace_monitor, NamespaceMonitorModule, "namespaces 詳細監視モジュール");
         $callback!($($prefix)* proc_environ_monitor, ProcEnvironMonitorModule, "プロセス環境変数スナップショット監視モジュール");
+        $callback!($($prefix)* group_monitor, GroupMonitorModule, "グループポリシー監視モジュール");
     };
 }
 

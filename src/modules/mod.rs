@@ -15,6 +15,7 @@ pub mod env_injection_monitor;
 pub mod fd_monitor;
 pub mod file_integrity;
 pub mod firewall_monitor;
+pub mod group_monitor;
 pub mod inotify_monitor;
 pub mod ipc_monitor;
 pub mod kallsyms_monitor;
