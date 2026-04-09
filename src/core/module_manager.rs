@@ -5,6 +5,7 @@ use crate::core::event::EventBus;
 use crate::modules::abstract_socket_monitor::AbstractSocketMonitorModule;
 use crate::modules::at_job_monitor::AtJobMonitorModule;
 use crate::modules::auditd_monitor::AuditdMonitorModule;
+use crate::modules::backdoor_detector::BackdoorDetectorModule;
 use crate::modules::capabilities_monitor::CapabilitiesMonitorModule;
 use crate::modules::cgroup_monitor::CgroupMonitorModule;
 use crate::modules::container_namespace::ContainerNamespaceModule;
@@ -124,6 +125,7 @@ macro_rules! for_each_module {
         $callback!($($prefix)* abstract_socket_monitor, AbstractSocketMonitorModule, "抽象ソケット名前空間監視モジュール");
         $callback!($($prefix)* ipc_monitor, IpcMonitorModule, "IPC 監視モジュール");
         $callback!($($prefix)* privilege_escalation_monitor, PrivilegeEscalationMonitorModule, "プロセス権限昇格検知モジュール");
+        $callback!($($prefix)* backdoor_detector, BackdoorDetectorModule, "バックドア検知モジュール");
     };
 }
 

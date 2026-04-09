@@ -918,3 +918,24 @@ scan_interval_secs = 5
 whitelist_processes = ["su", "sudo", "polkitd", "pkexec", "login", "sshd", "cron", "crond", "systemd"]
 # /proc パス（通常は変更不要）
 # proc_path = "/proc"
+
+[modules.backdoor_detector]
+# ソケットベースのバックドア検知
+# /proc/net/tcp{,6} を定期スキャンし、ホワイトリスト外の
+# リスニングソケットを検知してバックドアの存在を警告する
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 30
+# 許可ポート番号リスト（このポートでリッスンしているソケットはアラート対象外）
+allowed_ports = [22, 80, 443, 5432]
+# 許可プロセス名リスト（このプロセスがリッスンしているソケットはアラート対象外）
+allowed_processes = ["sshd", "nginx", "postgres", "systemd-resolve"]
+# ループバックアドレス（127.0.0.1/::1）のリッスンもアラートするか
+# false の場合、ループバックアドレスのみでリッスンしているソケットは無視する
+alert_on_loopback = false
+# /proc/net/tcp パス（通常は変更不要）
+# tcp_path = "/proc/net/tcp"
+# /proc/net/tcp6 パス（通常は変更不要）
+# tcp6_path = "/proc/net/tcp6"
+# /proc パス（通常は変更不要）
+# proc_path = "/proc"

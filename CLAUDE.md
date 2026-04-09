@@ -92,6 +92,7 @@ src/
     abstract_socket_monitor.rs # 抽象ソケット名前空間監視モジュール
     at_job_monitor.rs  # at/batch ジョブ監視モジュール
     auditd_monitor.rs  # auditd ログ統合モジュール
+    backdoor_detector.rs # ソケットベースのバックドア検知モジュール
     capabilities_monitor.rs # Linux capabilities 監視モジュール
     cgroup_monitor.rs  # cgroup v2 リソース制限監視モジュール
     container_namespace.rs # コンテナ・名前空間検知モジュール
