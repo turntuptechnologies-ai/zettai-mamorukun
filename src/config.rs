@@ -357,6 +357,10 @@ pub struct ModulesConfig {
     /// IPC 監視モジュールの設定
     #[serde(default)]
     pub ipc_monitor: IpcMonitorConfig,
+
+    /// プロセス権限昇格検知モジュールの設定
+    #[serde(default)]
+    pub privilege_escalation_monitor: PrivilegeEscalationMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -4177,6 +4181,61 @@ impl Default for IpcMonitorConfig {
             alert_on_high_semaphore_count: Self::default_alert_on_high_semaphore_count(),
             alert_on_high_msg_queue_count: Self::default_alert_on_high_msg_queue_count(),
             proc_sysvipc_path: Self::default_proc_sysvipc_path(),
+        }
+    }
+}
+
+/// プロセス権限昇格検知モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct PrivilegeEscalationMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "PrivilegeEscalationMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視除外プロセス名
+    #[serde(default = "PrivilegeEscalationMonitorConfig::default_whitelist_processes")]
+    pub whitelist_processes: Vec<String>,
+
+    /// /proc パス（テスト用に変更可能）
+    #[serde(default = "PrivilegeEscalationMonitorConfig::default_proc_path")]
+    pub proc_path: PathBuf,
+}
+
+impl PrivilegeEscalationMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        5
+    }
+
+    fn default_whitelist_processes() -> Vec<String> {
+        vec![
+            "su".to_string(),
+            "sudo".to_string(),
+            "polkitd".to_string(),
+            "pkexec".to_string(),
+            "login".to_string(),
+            "sshd".to_string(),
+            "cron".to_string(),
+            "crond".to_string(),
+            "systemd".to_string(),
+        ]
+    }
+
+    fn default_proc_path() -> PathBuf {
+        PathBuf::from("/proc")
+    }
+}
+
+impl Default for PrivilegeEscalationMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            whitelist_processes: Self::default_whitelist_processes(),
+            proc_path: Self::default_proc_path(),
         }
     }
 }

@@ -33,6 +33,7 @@ use crate::modules::network_monitor::NetworkMonitorModule;
 use crate::modules::network_traffic_monitor::NetworkTrafficMonitorModule;
 use crate::modules::pam_monitor::PamMonitorModule;
 use crate::modules::pkg_repo_monitor::PkgRepoMonitorModule;
+use crate::modules::privilege_escalation_monitor::PrivilegeEscalationMonitorModule;
 use crate::modules::proc_maps_monitor::ProcMapsMonitorModule;
 use crate::modules::proc_net_monitor::ProcNetMonitorModule;
 use crate::modules::process_cgroup_monitor::ProcessCgroupMonitorModule;
@@ -122,6 +123,7 @@ macro_rules! for_each_module {
         $callback!($($prefix)* process_cgroup_monitor, ProcessCgroupMonitorModule, "プロセス cgroup 逸脱検知モジュール");
         $callback!($($prefix)* abstract_socket_monitor, AbstractSocketMonitorModule, "抽象ソケット名前空間監視モジュール");
         $callback!($($prefix)* ipc_monitor, IpcMonitorModule, "IPC 監視モジュール");
+        $callback!($($prefix)* privilege_escalation_monitor, PrivilegeEscalationMonitorModule, "プロセス権限昇格検知モジュール");
     };
 }
 
