@@ -42,6 +42,7 @@ use crate::modules::proc_environ_monitor::ProcEnvironMonitorModule;
 use crate::modules::proc_maps_monitor::ProcMapsMonitorModule;
 use crate::modules::proc_net_monitor::ProcNetMonitorModule;
 use crate::modules::process_cgroup_monitor::ProcessCgroupMonitorModule;
+use crate::modules::process_cmdline_monitor::ProcessCmdlineMonitorModule;
 use crate::modules::process_exec_monitor::ProcessExecMonitorModule;
 use crate::modules::process_monitor::ProcessMonitorModule;
 use crate::modules::process_tree_monitor::ProcessTreeMonitorModule;
@@ -134,6 +135,7 @@ macro_rules! for_each_module {
         $callback!($($prefix)* namespace_monitor, NamespaceMonitorModule, "namespaces 詳細監視モジュール");
         $callback!($($prefix)* proc_environ_monitor, ProcEnvironMonitorModule, "プロセス環境変数スナップショット監視モジュール");
         $callback!($($prefix)* group_monitor, GroupMonitorModule, "グループポリシー監視モジュール");
+        $callback!($($prefix)* process_cmdline_monitor, ProcessCmdlineMonitorModule, "プロセス起動コマンドライン監視モジュール");
     };
 }
 

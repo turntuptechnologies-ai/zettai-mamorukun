@@ -1006,3 +1006,14 @@ proxy_vars = ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"]
 whitelist_patterns = []
 # カーネルスレッドをスキップするか
 skip_kernel_threads = true
+
+[modules.process_cmdline_monitor]
+# プロセス起動コマンドライン監視モジュール — /proc/[pid]/cmdline を定期スキャンし、
+# リバースシェル・暗号通貨マイナー・パイプ経由 RCE 等の不審なコマンドラインを検知する
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 30
+# ユーザー定義の追加検知パターン（正規表現）
+extra_patterns = []
+# 除外パターン（正規表現、マッチしたコマンドラインを検知対象から除外）
+exclude_patterns = []
