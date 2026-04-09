@@ -907,3 +907,14 @@ alert_on_high_semaphore_count = 100
 alert_on_high_msg_queue_count = 50
 # /proc/sysvipc パス（通常は変更不要）
 # proc_sysvipc_path = "/proc/sysvipc"
+
+[modules.privilege_escalation_monitor]
+# プロセス権限昇格検知
+# プロセスの UID/GID 変化を追跡し、不正な権限昇格を検知する
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 5
+# 監視除外プロセス名
+whitelist_processes = ["su", "sudo", "polkitd", "pkexec", "login", "sshd", "cron", "crond", "systemd"]
+# /proc パス（通常は変更不要）
+# proc_path = "/proc"
