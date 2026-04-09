@@ -38,6 +38,7 @@ pub mod proc_environ_monitor;
 pub mod proc_maps_monitor;
 pub mod proc_net_monitor;
 pub mod process_cgroup_monitor;
+pub mod process_cmdline_monitor;
 pub mod process_exec_monitor;
 pub mod process_monitor;
 pub mod process_tree_monitor;

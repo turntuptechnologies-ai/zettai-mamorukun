@@ -389,6 +389,10 @@ pub struct ModulesConfig {
     /// グループポリシー監視モジュールの設定
     #[serde(default)]
     pub group_monitor: GroupMonitorConfig,
+
+    /// プロセス起動コマンドライン監視モジュールの設定
+    #[serde(default)]
+    pub process_cmdline_monitor: ProcessCmdlineMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -3642,6 +3646,7 @@ impl AppConfig {
             m.ld_preload_monitor.enabled,
             m.network_monitor.enabled,
             m.group_monitor.enabled,
+            m.process_cmdline_monitor.enabled,
         ]
         .iter()
         .filter(|&&e| e)
@@ -4660,6 +4665,43 @@ impl Default for GroupMonitorConfig {
             group_path: Self::default_group_path(),
             gshadow_path: Self::default_gshadow_path(),
             privileged_groups: Self::default_privileged_groups(),
+        }
+    }
+}
+
+/// プロセス起動コマンドライン監視モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct ProcessCmdlineMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "ProcessCmdlineMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// ユーザー定義の追加検知パターン（正規表現）
+    #[serde(default)]
+    pub extra_patterns: Vec<String>,
+
+    /// 除外パターン（正規表現、マッチしたコマンドラインを検知対象から除外）
+    #[serde(default)]
+    pub exclude_patterns: Vec<String>,
+}
+
+impl ProcessCmdlineMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+}
+
+impl Default for ProcessCmdlineMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            extra_patterns: Vec::new(),
+            exclude_patterns: Vec::new(),
         }
     }
 }
