@@ -972,3 +972,24 @@ watch_dirs = ["/etc/ssl/certs", "/etc/pki/tls/certs"]
 file_extensions = [".pem", ".crt", ".cer"]
 # 信頼済み CA 証明書の格納ディレクトリ
 trusted_ca_dirs = ["/etc/ssl/certs", "/etc/pki/ca-trust/extracted/pem"]
+
+[modules.proc_environ_monitor]
+# プロセス環境変数スナップショット監視モジュール — 実行中プロセスの /proc/[pid]/environ を
+# 定期スキャンし、不審な環境変数の注入をリアルタイムで検知する
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 60
+# 存在自体が危険な環境変数名リスト
+suspicious_vars = ["LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "LD_DEBUG", "LD_PROFILE"]
+# PATH 内の不審ディレクトリリスト
+suspicious_path_dirs = ["/tmp", "/dev/shm", "/var/tmp", "/run/shm"]
+# リバースシェルパターンを検査するコマンド変数リスト
+suspicious_commands = ["PROMPT_COMMAND"]
+# 不審パスを検査するライブラリパス変数リスト
+library_path_vars = ["PYTHONPATH", "RUBYLIB", "PERL5LIB", "NODE_PATH", "CLASSPATH"]
+# 監視対象のプロキシ変数リスト
+proxy_vars = ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"]
+# ホワイトリスト（正規表現パターン、"PID:変数名=値" に対してマッチ）
+whitelist_patterns = []
+# カーネルスレッドをスキップするか
+skip_kernel_threads = true
