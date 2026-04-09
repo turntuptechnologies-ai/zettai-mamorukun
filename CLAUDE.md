@@ -123,6 +123,7 @@ src/
     network_traffic_monitor.rs # ネットワークトラフィック異常検知モジュール
     pam_monitor.rs     # PAM 設定監視モジュール
     privilege_escalation_monitor.rs # プロセス権限昇格検知モジュール
+    proc_environ_monitor.rs # プロセス環境変数スナップショット監視モジュール
     proc_maps_monitor.rs # プロセスメモリマップ監視モジュール
     proc_net_monitor.rs # /proc/net/ 監視モジュール（ルーティング・ARP）
     ptrace_monitor.rs  # ptrace 検知モジュール

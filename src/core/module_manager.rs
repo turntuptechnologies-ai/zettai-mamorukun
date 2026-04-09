@@ -37,6 +37,7 @@ use crate::modules::network_traffic_monitor::NetworkTrafficMonitorModule;
 use crate::modules::pam_monitor::PamMonitorModule;
 use crate::modules::pkg_repo_monitor::PkgRepoMonitorModule;
 use crate::modules::privilege_escalation_monitor::PrivilegeEscalationMonitorModule;
+use crate::modules::proc_environ_monitor::ProcEnvironMonitorModule;
 use crate::modules::proc_maps_monitor::ProcMapsMonitorModule;
 use crate::modules::proc_net_monitor::ProcNetMonitorModule;
 use crate::modules::process_cgroup_monitor::ProcessCgroupMonitorModule;
@@ -130,6 +131,7 @@ macro_rules! for_each_module {
         $callback!($($prefix)* backdoor_detector, BackdoorDetectorModule, "バックドア検知モジュール");
         $callback!($($prefix)* cert_chain_monitor, CertChainMonitorModule, "証明書チェーン検証モジュール");
         $callback!($($prefix)* namespace_monitor, NamespaceMonitorModule, "namespaces 詳細監視モジュール");
+        $callback!($($prefix)* proc_environ_monitor, ProcEnvironMonitorModule, "プロセス環境変数スナップショット監視モジュール");
     };
 }
 

@@ -381,6 +381,10 @@ pub struct ModulesConfig {
     /// namespaces 詳細監視モジュールの設定
     #[serde(default)]
     pub namespace_monitor: NamespaceMonitorConfig,
+
+    /// プロセス環境変数スナップショット監視モジュールの設定
+    #[serde(default)]
+    pub proc_environ_monitor: ProcEnvironMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -4481,6 +4485,114 @@ impl Default for NamespaceMonitorConfig {
             watch_namespaces: Self::default_watch_namespaces(),
             exclude_processes: Self::default_exclude_processes(),
             alert_on_new_ns: Self::default_alert_on_new_ns(),
+        }
+    }
+}
+
+/// プロセス環境変数スナップショット監視モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct ProcEnvironMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "ProcEnvironMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 存在自体が危険な環境変数名リスト
+    #[serde(default = "ProcEnvironMonitorConfig::default_suspicious_vars")]
+    pub suspicious_vars: Vec<String>,
+
+    /// PATH 内の不審ディレクトリリスト
+    #[serde(default = "ProcEnvironMonitorConfig::default_suspicious_path_dirs")]
+    pub suspicious_path_dirs: Vec<String>,
+
+    /// リバースシェルパターンを検査するコマンド変数リスト
+    #[serde(default = "ProcEnvironMonitorConfig::default_suspicious_commands")]
+    pub suspicious_commands: Vec<String>,
+
+    /// 不審パスを検査するライブラリパス変数リスト
+    #[serde(default = "ProcEnvironMonitorConfig::default_library_path_vars")]
+    pub library_path_vars: Vec<String>,
+
+    /// 監視対象のプロキシ変数リスト
+    #[serde(default = "ProcEnvironMonitorConfig::default_proxy_vars")]
+    pub proxy_vars: Vec<String>,
+
+    /// ホワイトリスト（正規表現パターン、"PID:変数名=値" に対してマッチ）
+    #[serde(default)]
+    pub whitelist_patterns: Vec<String>,
+
+    /// カーネルスレッドをスキップするか
+    #[serde(default = "ProcEnvironMonitorConfig::default_skip_kernel_threads")]
+    pub skip_kernel_threads: bool,
+}
+
+impl ProcEnvironMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        60
+    }
+
+    fn default_suspicious_vars() -> Vec<String> {
+        vec![
+            "LD_PRELOAD".to_string(),
+            "LD_LIBRARY_PATH".to_string(),
+            "LD_AUDIT".to_string(),
+            "LD_DEBUG".to_string(),
+            "LD_PROFILE".to_string(),
+        ]
+    }
+
+    fn default_suspicious_path_dirs() -> Vec<String> {
+        vec![
+            "/tmp".to_string(),
+            "/dev/shm".to_string(),
+            "/var/tmp".to_string(),
+            "/run/shm".to_string(),
+        ]
+    }
+
+    fn default_suspicious_commands() -> Vec<String> {
+        vec!["PROMPT_COMMAND".to_string()]
+    }
+
+    fn default_library_path_vars() -> Vec<String> {
+        vec![
+            "PYTHONPATH".to_string(),
+            "RUBYLIB".to_string(),
+            "PERL5LIB".to_string(),
+            "NODE_PATH".to_string(),
+            "CLASSPATH".to_string(),
+        ]
+    }
+
+    fn default_proxy_vars() -> Vec<String> {
+        vec![
+            "http_proxy".to_string(),
+            "https_proxy".to_string(),
+            "HTTP_PROXY".to_string(),
+            "HTTPS_PROXY".to_string(),
+        ]
+    }
+
+    fn default_skip_kernel_threads() -> bool {
+        true
+    }
+}
+
+impl Default for ProcEnvironMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            suspicious_vars: Self::default_suspicious_vars(),
+            suspicious_path_dirs: Self::default_suspicious_path_dirs(),
+            suspicious_commands: Self::default_suspicious_commands(),
+            library_path_vars: Self::default_library_path_vars(),
+            proxy_vars: Self::default_proxy_vars(),
+            whitelist_patterns: Vec::new(),
+            skip_kernel_threads: Self::default_skip_kernel_threads(),
         }
     }
 }
