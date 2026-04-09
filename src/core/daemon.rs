@@ -65,7 +65,7 @@ impl Daemon {
                 self.config.event_bus.debounce_secs,
                 &self.config.event_bus.filters,
             )?;
-            event::spawn_log_subscriber(&bus);
+            event::spawn_log_subscriber(&bus, &self.config.general.journald_field_prefix);
             event::spawn_debounce_cleanup(&bus);
             // アクションエンジンの起動
             if self.config.actions.enabled {

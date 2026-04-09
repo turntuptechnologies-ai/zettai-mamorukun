@@ -473,46 +473,62 @@ impl EventBus {
     }
 }
 
+/// SecurityEvent のタイムスタンプを ISO 8601 形式の文字列に変換する
+fn format_timestamp_iso8601(timestamp: SystemTime) -> String {
+    match timestamp.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(d) => {
+            let secs = d.as_secs();
+            let nanos = d.subsec_nanos();
+            // UTC での年月日時分秒を計算
+            let days = secs / 86400;
+            let time_secs = secs % 86400;
+            let hours = time_secs / 3600;
+            let minutes = (time_secs % 3600) / 60;
+            let seconds = time_secs % 60;
+
+            // 日付計算（Civil date from day count, based on Howard Hinnant's algorithm）
+            let z = days as i64 + 719468;
+            let era = z / 146097;
+            let doe = z - era * 146097;
+            let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+            let y = yoe + era * 400;
+            let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+            let mp = (5 * doy + 2) / 153;
+            let d = doy - (153 * mp + 2) / 5 + 1;
+            let m = if mp < 10 { mp + 3 } else { mp - 9 };
+            let y = if m <= 2 { y + 1 } else { y };
+
+            format!(
+                "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+                y,
+                m,
+                d,
+                hours,
+                minutes,
+                seconds,
+                nanos / 1_000_000
+            )
+        }
+        Err(_) => "1970-01-01T00:00:00.000Z".to_string(),
+    }
+}
+
 /// デフォルトのログサブスクライバーを起動する
 ///
-/// 全てのイベントを Severity に応じた tracing レベルで構造化ログに記録する
-pub fn spawn_log_subscriber(event_bus: &EventBus) {
+/// 全てのイベントを Severity に応じた tracing レベルで構造化ログに記録する。
+/// journald が有効な場合、`ZETTAI_` プレフィックス付きのカスタムフィールドが
+/// journald に送信され、`journalctl ZETTAI_SEVERITY=CRITICAL` 等でフィルタリング可能になる。
+pub fn spawn_log_subscriber(event_bus: &EventBus, journald_field_prefix: &str) {
     let mut receiver = event_bus.subscribe();
+    let prefix = journald_field_prefix.to_string();
     tokio::spawn(async move {
         loop {
             match receiver.recv().await {
-                Ok(event) => match event.severity {
-                    Severity::Info => {
-                        info!(
-                            event_type = %event.event_type,
-                            source_module = %event.source_module,
-                            severity = "INFO",
-                            details = ?event.details,
-                            "[SecurityEvent] {}",
-                            event.message
-                        );
-                    }
-                    Severity::Warning => {
-                        warn!(
-                            event_type = %event.event_type,
-                            source_module = %event.source_module,
-                            severity = "WARNING",
-                            details = ?event.details,
-                            "[SecurityEvent] {}",
-                            event.message
-                        );
-                    }
-                    Severity::Critical => {
-                        error!(
-                            event_type = %event.event_type,
-                            source_module = %event.source_module,
-                            severity = "CRITICAL",
-                            details = ?event.details,
-                            "[SecurityEvent] {}",
-                            event.message
-                        );
-                    }
-                },
+                Ok(event) => {
+                    let timestamp_iso = format_timestamp_iso8601(event.timestamp);
+                    let details_str = event.details.as_deref().unwrap_or("");
+                    log_security_event(&prefix, &event, &timestamp_iso, details_str);
+                }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!("ログサブスクライバー: {} 件のイベントをスキップ（遅延）", n);
                 }
@@ -523,6 +539,132 @@ pub fn spawn_log_subscriber(event_bus: &EventBus) {
             }
         }
     });
+}
+
+/// SecurityEvent をプレフィックス付きカスタムフィールドでログ出力する
+///
+/// journald カスタムフィールドとして以下が送信される:
+/// - `{PREFIX}_EVENT_TYPE` — イベント種別
+/// - `{PREFIX}_SEVERITY` — 重要度（INFO/WARNING/CRITICAL）
+/// - `{PREFIX}_MODULE` — 発生元モジュール名
+/// - `{PREFIX}_DETAILS` — 追加情報
+/// - `{PREFIX}_TIMESTAMP` — ISO 8601 タイムスタンプ
+fn log_security_event(prefix: &str, event: &SecurityEvent, timestamp_iso: &str, details_str: &str) {
+    // tracing マクロのフィールド名は静的文字列が必要なため、
+    // デフォルトプレフィックス（ZETTAI）の場合は専用フィールド名を使用し、
+    // カスタムプレフィックスの場合はメッセージ内にフィールド情報を含める
+    if prefix == "ZETTAI" {
+        log_security_event_zettai(event, timestamp_iso, details_str);
+    } else {
+        log_security_event_custom_prefix(prefix, event, timestamp_iso, details_str);
+    }
+}
+
+/// ZETTAI プレフィックスでの SecurityEvent ログ出力（最適化パス）
+fn log_security_event_zettai(event: &SecurityEvent, timestamp_iso: &str, details_str: &str) {
+    match event.severity {
+        Severity::Info => {
+            info!(
+                event_type = %event.event_type,
+                source_module = %event.source_module,
+                severity = "INFO",
+                details = ?event.details,
+                ZETTAI_EVENT_TYPE = %event.event_type,
+                ZETTAI_SEVERITY = "INFO",
+                ZETTAI_MODULE = %event.source_module,
+                ZETTAI_DETAILS = %details_str,
+                ZETTAI_TIMESTAMP = %timestamp_iso,
+                "[SecurityEvent] {}",
+                event.message
+            );
+        }
+        Severity::Warning => {
+            warn!(
+                event_type = %event.event_type,
+                source_module = %event.source_module,
+                severity = "WARNING",
+                details = ?event.details,
+                ZETTAI_EVENT_TYPE = %event.event_type,
+                ZETTAI_SEVERITY = "WARNING",
+                ZETTAI_MODULE = %event.source_module,
+                ZETTAI_DETAILS = %details_str,
+                ZETTAI_TIMESTAMP = %timestamp_iso,
+                "[SecurityEvent] {}",
+                event.message
+            );
+        }
+        Severity::Critical => {
+            error!(
+                event_type = %event.event_type,
+                source_module = %event.source_module,
+                severity = "CRITICAL",
+                details = ?event.details,
+                ZETTAI_EVENT_TYPE = %event.event_type,
+                ZETTAI_SEVERITY = "CRITICAL",
+                ZETTAI_MODULE = %event.source_module,
+                ZETTAI_DETAILS = %details_str,
+                ZETTAI_TIMESTAMP = %timestamp_iso,
+                "[SecurityEvent] {}",
+                event.message
+            );
+        }
+    }
+}
+
+/// カスタムプレフィックスでの SecurityEvent ログ出力
+///
+/// tracing マクロは静的フィールド名のみサポートするため、
+/// カスタムプレフィックスの場合はフィールド情報をメッセージ内に含める
+fn log_security_event_custom_prefix(
+    prefix: &str,
+    event: &SecurityEvent,
+    timestamp_iso: &str,
+    details_str: &str,
+) {
+    let custom_fields = format!(
+        "{pf}_EVENT_TYPE={et} {pf}_SEVERITY={sev} {pf}_MODULE={mod_name} {pf}_DETAILS={det} {pf}_TIMESTAMP={ts}",
+        pf = prefix,
+        et = event.event_type,
+        sev = event.severity,
+        mod_name = event.source_module,
+        det = details_str,
+        ts = timestamp_iso,
+    );
+    match event.severity {
+        Severity::Info => {
+            info!(
+                event_type = %event.event_type,
+                source_module = %event.source_module,
+                severity = "INFO",
+                details = ?event.details,
+                custom_journald_fields = %custom_fields,
+                "[SecurityEvent] {}",
+                event.message
+            );
+        }
+        Severity::Warning => {
+            warn!(
+                event_type = %event.event_type,
+                source_module = %event.source_module,
+                severity = "WARNING",
+                details = ?event.details,
+                custom_journald_fields = %custom_fields,
+                "[SecurityEvent] {}",
+                event.message
+            );
+        }
+        Severity::Critical => {
+            error!(
+                event_type = %event.event_type,
+                source_module = %event.source_module,
+                severity = "CRITICAL",
+                details = ?event.details,
+                custom_journald_fields = %custom_fields,
+                "[SecurityEvent] {}",
+                event.message
+            );
+        }
+    }
 }
 
 /// デバウンスフィルターの定期クリーンアップを起動する
@@ -1009,6 +1151,97 @@ mod tests {
         };
         let result = EventFilter::from_config(&config);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_format_timestamp_iso8601_epoch() {
+        let ts = SystemTime::UNIX_EPOCH;
+        let result = format_timestamp_iso8601(ts);
+        assert_eq!(result, "1970-01-01T00:00:00.000Z");
+    }
+
+    #[test]
+    fn test_format_timestamp_iso8601_known_date() {
+        // 2024-01-15T11:30:45Z = 1705318245 seconds since epoch
+        let ts = SystemTime::UNIX_EPOCH + Duration::from_secs(1705318245);
+        let result = format_timestamp_iso8601(ts);
+        assert_eq!(result, "2024-01-15T11:30:45.000Z");
+    }
+
+    #[test]
+    fn test_format_timestamp_iso8601_with_millis() {
+        let ts =
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1705318245) + Duration::from_millis(123);
+        let result = format_timestamp_iso8601(ts);
+        assert_eq!(result, "2024-01-15T11:30:45.123Z");
+    }
+
+    #[test]
+    fn test_format_timestamp_iso8601_current_time() {
+        let ts = SystemTime::now();
+        let result = format_timestamp_iso8601(ts);
+        // ISO 8601 形式であることを確認
+        assert!(result.ends_with('Z'));
+        assert_eq!(result.len(), 24); // "YYYY-MM-DDTHH:MM:SS.mmmZ"
+        assert_eq!(&result[4..5], "-");
+        assert_eq!(&result[7..8], "-");
+        assert_eq!(&result[10..11], "T");
+        assert_eq!(&result[13..14], ":");
+        assert_eq!(&result[16..17], ":");
+    }
+
+    #[test]
+    fn test_log_security_event_zettai_prefix_does_not_panic() {
+        // tracing subscriber なしでもパニックしないことを確認
+        let event = SecurityEvent::new(
+            "file_modified",
+            Severity::Warning,
+            "file_integrity",
+            "テストイベント",
+        )
+        .with_details("/etc/passwd");
+        let timestamp = format_timestamp_iso8601(event.timestamp);
+        let details_str = event.details.as_deref().unwrap_or("");
+        log_security_event("ZETTAI", &event, &timestamp, details_str);
+    }
+
+    #[test]
+    fn test_log_security_event_custom_prefix_does_not_panic() {
+        let event = SecurityEvent::new(
+            "process_anomaly",
+            Severity::Critical,
+            "process_monitor",
+            "不審なプロセス",
+        );
+        let timestamp = format_timestamp_iso8601(event.timestamp);
+        let details_str = event.details.as_deref().unwrap_or("");
+        log_security_event("MYAPP", &event, &timestamp, details_str);
+    }
+
+    #[test]
+    fn test_log_security_event_all_severities() {
+        for severity in [Severity::Info, Severity::Warning, Severity::Critical] {
+            let event = SecurityEvent::new("test_event", severity, "test_module", "テスト");
+            let timestamp = format_timestamp_iso8601(event.timestamp);
+            log_security_event("ZETTAI", &event, &timestamp, "");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_spawn_log_subscriber_with_prefix() {
+        let bus = EventBus::new(16);
+        spawn_log_subscriber(&bus, "ZETTAI");
+
+        let event = SecurityEvent::new(
+            "test_event",
+            Severity::Info,
+            "test_module",
+            "ログサブスクライバーテスト",
+        );
+        bus.publish(event);
+
+        // ログサブスクライバーがイベントを処理する時間を確保
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
     #[tokio::test]
