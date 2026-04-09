@@ -373,6 +373,10 @@ pub struct ModulesConfig {
     /// バックドア検知モジュールの設定
     #[serde(default)]
     pub backdoor_detector: BackdoorDetectorConfig,
+
+    /// TLS 証明書チェーン検証モジュールの設定
+    #[serde(default)]
+    pub cert_chain_monitor: CertChainMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -4347,6 +4351,66 @@ impl Default for BackdoorDetectorConfig {
             tcp_path: Self::default_tcp_path(),
             tcp6_path: Self::default_tcp6_path(),
             proc_path: Self::default_proc_path(),
+        }
+    }
+}
+
+/// TLS 証明書チェーン検証モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct CertChainMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// チェック間隔（秒）
+    #[serde(default = "CertChainMonitorConfig::default_check_interval_secs")]
+    pub check_interval_secs: u64,
+
+    /// 監視対象ディレクトリのリスト
+    #[serde(default = "CertChainMonitorConfig::default_watch_dirs")]
+    pub watch_dirs: Vec<PathBuf>,
+
+    /// 対象ファイル拡張子
+    #[serde(default = "CertChainMonitorConfig::default_file_extensions")]
+    pub file_extensions: Vec<String>,
+
+    /// 信頼済み CA 証明書の格納ディレクトリ
+    #[serde(default = "CertChainMonitorConfig::default_trusted_ca_dirs")]
+    pub trusted_ca_dirs: Vec<PathBuf>,
+}
+
+impl CertChainMonitorConfig {
+    fn default_check_interval_secs() -> u64 {
+        3600
+    }
+
+    fn default_watch_dirs() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/etc/ssl/certs"),
+            PathBuf::from("/etc/pki/tls/certs"),
+        ]
+    }
+
+    fn default_file_extensions() -> Vec<String> {
+        vec![".pem".to_string(), ".crt".to_string(), ".cer".to_string()]
+    }
+
+    fn default_trusted_ca_dirs() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/etc/ssl/certs"),
+            PathBuf::from("/etc/pki/ca-trust/extracted/pem"),
+        ]
+    }
+}
+
+impl Default for CertChainMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            check_interval_secs: Self::default_check_interval_secs(),
+            watch_dirs: Self::default_watch_dirs(),
+            file_extensions: Self::default_file_extensions(),
+            trusted_ca_dirs: Self::default_trusted_ca_dirs(),
         }
     }
 }
