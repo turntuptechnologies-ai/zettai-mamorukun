@@ -94,6 +94,7 @@ src/
     auditd_monitor.rs  # auditd ログ統合モジュール
     backdoor_detector.rs # ソケットベースのバックドア検知モジュール
     capabilities_monitor.rs # Linux capabilities 監視モジュール
+    cert_chain_monitor.rs # TLS 証明書チェーン検証モジュール
     cgroup_monitor.rs  # cgroup v2 リソース制限監視モジュール
     container_namespace.rs # コンテナ・名前空間検知モジュール
     coredump_monitor.rs  # コアダンプ設定監視モジュール

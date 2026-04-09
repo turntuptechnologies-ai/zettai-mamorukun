@@ -3,6 +3,7 @@ pub mod at_job_monitor;
 pub mod auditd_monitor;
 pub mod backdoor_detector;
 pub mod capabilities_monitor;
+pub mod cert_chain_monitor;
 pub mod cgroup_monitor;
 pub mod container_namespace;
 pub mod coredump_monitor;

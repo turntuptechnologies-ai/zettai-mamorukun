@@ -947,3 +947,15 @@ alert_on_loopback = false
 # tcp6_path = "/proc/net/tcp6"
 # /proc パス（通常は変更不要）
 # proc_path = "/proc"
+
+[modules.cert_chain_monitor]
+# TLS 証明書チェーン検証モジュールの有効/無効
+enabled = false
+# チェック間隔（秒）
+check_interval_secs = 3600
+# 監視対象ディレクトリのリスト
+watch_dirs = ["/etc/ssl/certs", "/etc/pki/tls/certs"]
+# 対象ファイル拡張子
+file_extensions = [".pem", ".crt", ".cer"]
+# 信頼済み CA 証明書の格納ディレクトリ
+trusted_ca_dirs = ["/etc/ssl/certs", "/etc/pki/ca-trust/extracted/pem"]
