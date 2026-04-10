@@ -810,6 +810,13 @@ enabled = false
 # スキャン間隔（秒）
 scan_interval_secs = 300
 
+[modules.livepatch_monitor]
+# カーネルライブパッチ監視モジュール — kpatch/livepatch のロード状態を監視し不正パッチを検知
+enabled = false
+scan_interval_secs = 60
+# sys_path = "/sys/kernel/livepatch"
+# proc_path = "/proc"
+
 [modules.coredump_monitor]
 # コアダンプ設定監視モジュール — core_pattern / suid_dumpable 等を監視し、コアダンプ悪用攻撃を検知
 enabled = false

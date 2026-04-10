@@ -28,6 +28,7 @@ pub mod kernel_module;
 pub mod kernel_params;
 pub mod ld_preload_monitor;
 pub mod listening_port_monitor;
+pub mod livepatch_monitor;
 pub mod log_tamper;
 pub mod login_session_monitor;
 pub mod mac_monitor;

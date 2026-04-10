@@ -32,6 +32,7 @@ use crate::modules::kernel_module::KernelModuleMonitor;
 use crate::modules::kernel_params::KernelParamsModule;
 use crate::modules::ld_preload_monitor::LdPreloadMonitorModule;
 use crate::modules::listening_port_monitor::ListeningPortMonitorModule;
+use crate::modules::livepatch_monitor::LivepatchMonitorModule;
 use crate::modules::log_tamper::LogTamperModule;
 use crate::modules::login_session_monitor::LoginSessionMonitorModule;
 use crate::modules::mac_monitor::MacMonitorModule;
@@ -146,6 +147,7 @@ macro_rules! for_each_module {
         $callback!($($prefix)* initramfs_monitor, InitramfsMonitorModule, "initramfs 整合性監視モジュール");
         $callback!($($prefix)* kernel_cmdline_monitor, KernelCmdlineMonitorModule, "カーネルコマンドライン実行時監視モジュール");
         $callback!($($prefix)* fileless_exec_monitor, FilelessExecMonitorModule, "ファイルレス実行検知モジュール");
+        $callback!($($prefix)* livepatch_monitor, LivepatchMonitorModule, "カーネルライブパッチ監視モジュール");
     };
 }
 
