@@ -113,6 +113,7 @@ src/
     inotify_monitor.rs # inotify ベースのリアルタイムファイル変更検知モジュール
     ipc_monitor.rs     # System V IPC 監視モジュール
     kallsyms_monitor.rs # カーネルシンボルテーブル監視モジュール
+    kernel_cmdline_monitor.rs # カーネルコマンドライン実行時監視モジュール
     kernel_module.rs   # カーネルモジュール監視モジュール
     kernel_params.rs   # /proc/sys/ カーネルパラメータ監視モジュール
     ld_preload_monitor.rs # 環境変数・LD_PRELOAD 監視モジュール

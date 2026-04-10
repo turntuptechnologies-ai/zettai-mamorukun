@@ -1041,6 +1041,28 @@ scan_interval_secs = 300
 # 監視対象のファイルパスパターン（glob）
 paths = ["/boot/initrd.img-*", "/boot/initramfs-*"]
 
+[modules.kernel_cmdline_monitor]
+# カーネルコマンドライン実行時監視モジュール — /proc/cmdline を定期チェックし、
+# カーネルパラメータの実行時変更（kexec 等）を検知する
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 30
+# kexec_loaded のチェックを行うか
+check_kexec_loaded = true
+# 不審パラメータのリスト
+suspicious_params = [
+  "selinux=0",
+  "apparmor=0",
+  "security=none",
+  "ima_appraise=off",
+  "module.sig_enforce=0",
+  "init=/bin/sh",
+  "init=/bin/bash",
+  "single",
+  "debug",
+  "earlyprintk",
+]
+
 [modules.hidden_process_monitor]
 # プロセス隠蔽検知モジュール — /proc/ の readdir 列挙と PID ブルートフォーススキャンの
 # 差分を比較し、ルートキットによるプロセス隠蔽を検知する
