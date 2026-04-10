@@ -393,6 +393,10 @@ pub struct ModulesConfig {
     /// プロセス起動コマンドライン監視モジュールの設定
     #[serde(default)]
     pub process_cmdline_monitor: ProcessCmdlineMonitorConfig,
+
+    /// ブートローダー整合性監視モジュールの設定
+    #[serde(default)]
+    pub bootloader_monitor: BootloaderMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -4702,6 +4706,65 @@ impl Default for ProcessCmdlineMonitorConfig {
             scan_interval_secs: Self::default_scan_interval_secs(),
             extra_patterns: Vec::new(),
             exclude_patterns: Vec::new(),
+        }
+    }
+}
+
+/// ブートローダー整合性監視モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct BootloaderMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "BootloaderMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象の GRUB 設定ファイルパス
+    #[serde(default = "BootloaderMonitorConfig::default_grub_paths")]
+    pub grub_paths: Vec<PathBuf>,
+
+    /// EFI パーティション上の GRUB 設定を探索するディレクトリ
+    #[serde(default = "BootloaderMonitorConfig::default_efi_grub_dirs")]
+    pub efi_grub_dirs: Vec<PathBuf>,
+
+    /// カーネルコマンドライン変更のアラート有効/無効
+    #[serde(default = "BootloaderMonitorConfig::default_alert_on_cmdline_changes")]
+    pub alert_on_cmdline_changes: bool,
+}
+
+impl BootloaderMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        300
+    }
+
+    fn default_grub_paths() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/boot/grub/grub.cfg"),
+            PathBuf::from("/boot/grub2/grub.cfg"),
+            PathBuf::from("/etc/default/grub"),
+            PathBuf::from("/boot/grub/custom.cfg"),
+        ]
+    }
+
+    fn default_efi_grub_dirs() -> Vec<PathBuf> {
+        vec![PathBuf::from("/boot/efi/EFI")]
+    }
+
+    fn default_alert_on_cmdline_changes() -> bool {
+        true
+    }
+}
+
+impl Default for BootloaderMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            grub_paths: Self::default_grub_paths(),
+            efi_grub_dirs: Self::default_efi_grub_dirs(),
+            alert_on_cmdline_changes: Self::default_alert_on_cmdline_changes(),
         }
     }
 }
