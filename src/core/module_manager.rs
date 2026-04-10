@@ -31,6 +31,7 @@ use crate::modules::kallsyms_monitor::KallsymsMonitorModule;
 use crate::modules::kernel_cmdline_monitor::KernelCmdlineMonitorModule;
 use crate::modules::kernel_module::KernelModuleMonitor;
 use crate::modules::kernel_params::KernelParamsModule;
+use crate::modules::keylogger_detector::KeyloggerDetectorModule;
 use crate::modules::ld_preload_monitor::LdPreloadMonitorModule;
 use crate::modules::listening_port_monitor::ListeningPortMonitorModule;
 use crate::modules::livepatch_monitor::LivepatchMonitorModule;
@@ -150,6 +151,7 @@ macro_rules! for_each_module {
         $callback!($($prefix)* fileless_exec_monitor, FilelessExecMonitorModule, "ファイルレス実行検知モジュール");
         $callback!($($prefix)* livepatch_monitor, LivepatchMonitorModule, "カーネルライブパッチ監視モジュール");
         $callback!($($prefix)* journal_pattern_monitor, JournalPatternMonitorModule, "systemd ジャーナルパターン監視モジュール");
+        $callback!($($prefix)* keylogger_detector, KeyloggerDetectorModule, "キーロガー検知モジュール");
     };
 }
 

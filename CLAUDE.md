@@ -115,6 +115,7 @@ src/
     ipc_monitor.rs     # System V IPC 監視モジュール
     journal_pattern_monitor.rs # systemd ジャーナルパターン監視モジュール
     kallsyms_monitor.rs # カーネルシンボルテーブル監視モジュール
+    keylogger_detector.rs # キーロガー検知モジュール
     kernel_cmdline_monitor.rs # カーネルコマンドライン実行時監視モジュール
     kernel_module.rs   # カーネルモジュール監視モジュール
     kernel_params.rs   # /proc/sys/ カーネルパラメータ監視モジュール
