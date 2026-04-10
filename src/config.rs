@@ -405,6 +405,10 @@ pub struct ModulesConfig {
     /// initramfs 整合性監視モジュールの設定
     #[serde(default)]
     pub initramfs_monitor: InitramfsMonitorConfig,
+
+    /// カーネルコマンドライン実行時監視モジュールの設定
+    #[serde(default)]
+    pub kernel_cmdline_monitor: KernelCmdlineMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -4812,6 +4816,80 @@ impl Default for InitramfsMonitorConfig {
             enabled: false,
             scan_interval_secs: Self::default_scan_interval_secs(),
             paths: Self::default_paths(),
+        }
+    }
+}
+
+/// カーネルコマンドライン実行時監視モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct KernelCmdlineMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "KernelCmdlineMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// kexec_loaded のチェックを行うか
+    #[serde(default = "KernelCmdlineMonitorConfig::default_check_kexec_loaded")]
+    pub check_kexec_loaded: bool,
+
+    /// 不審パラメータのリスト
+    #[serde(default = "KernelCmdlineMonitorConfig::default_suspicious_params")]
+    pub suspicious_params: Vec<String>,
+
+    /// /proc/cmdline のパス（テスト用にカスタマイズ可能）
+    #[serde(default = "KernelCmdlineMonitorConfig::default_proc_cmdline_path")]
+    pub proc_cmdline_path: String,
+
+    /// /sys/kernel/kexec_loaded のパス（テスト用にカスタマイズ可能）
+    #[serde(default = "KernelCmdlineMonitorConfig::default_kexec_loaded_path")]
+    pub kexec_loaded_path: String,
+}
+
+impl KernelCmdlineMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_check_kexec_loaded() -> bool {
+        true
+    }
+
+    fn default_suspicious_params() -> Vec<String> {
+        vec![
+            "selinux=0".to_string(),
+            "apparmor=0".to_string(),
+            "security=none".to_string(),
+            "ima_appraise=off".to_string(),
+            "module.sig_enforce=0".to_string(),
+            "init=/bin/sh".to_string(),
+            "init=/bin/bash".to_string(),
+            "single".to_string(),
+            "debug".to_string(),
+            "earlyprintk".to_string(),
+        ]
+    }
+
+    fn default_proc_cmdline_path() -> String {
+        "/proc/cmdline".to_string()
+    }
+
+    fn default_kexec_loaded_path() -> String {
+        "/sys/kernel/kexec_loaded".to_string()
+    }
+}
+
+impl Default for KernelCmdlineMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            check_kexec_loaded: Self::default_check_kexec_loaded(),
+            suspicious_params: Self::default_suspicious_params(),
+            proc_cmdline_path: Self::default_proc_cmdline_path(),
+            kexec_loaded_path: Self::default_kexec_loaded_path(),
         }
     }
 }

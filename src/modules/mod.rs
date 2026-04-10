@@ -22,6 +22,7 @@ pub mod initramfs_monitor;
 pub mod inotify_monitor;
 pub mod ipc_monitor;
 pub mod kallsyms_monitor;
+pub mod kernel_cmdline_monitor;
 pub mod kernel_module;
 pub mod kernel_params;
 pub mod ld_preload_monitor;
