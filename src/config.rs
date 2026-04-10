@@ -401,6 +401,10 @@ pub struct ModulesConfig {
     /// プロセス隠蔽検知モジュールの設定
     #[serde(default)]
     pub hidden_process_monitor: HiddenProcessMonitorConfig,
+
+    /// initramfs 整合性監視モジュールの設定
+    #[serde(default)]
+    pub initramfs_monitor: InitramfsMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -4769,6 +4773,45 @@ impl Default for BootloaderMonitorConfig {
             grub_paths: Self::default_grub_paths(),
             efi_grub_dirs: Self::default_efi_grub_dirs(),
             alert_on_cmdline_changes: Self::default_alert_on_cmdline_changes(),
+        }
+    }
+}
+
+/// initramfs 整合性監視モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct InitramfsMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "InitramfsMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象のファイルパスパターン（glob）
+    #[serde(default = "InitramfsMonitorConfig::default_paths")]
+    pub paths: Vec<String>,
+}
+
+impl InitramfsMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        300
+    }
+
+    fn default_paths() -> Vec<String> {
+        vec![
+            "/boot/initrd.img-*".to_string(),
+            "/boot/initramfs-*".to_string(),
+        ]
+    }
+}
+
+impl Default for InitramfsMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            paths: Self::default_paths(),
         }
     }
 }
