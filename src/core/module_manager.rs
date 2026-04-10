@@ -26,6 +26,7 @@ use crate::modules::hidden_process_monitor::HiddenProcessMonitorModule;
 use crate::modules::initramfs_monitor::InitramfsMonitorModule;
 use crate::modules::inotify_monitor::InotifyMonitorModule;
 use crate::modules::ipc_monitor::IpcMonitorModule;
+use crate::modules::journal_pattern_monitor::JournalPatternMonitorModule;
 use crate::modules::kallsyms_monitor::KallsymsMonitorModule;
 use crate::modules::kernel_cmdline_monitor::KernelCmdlineMonitorModule;
 use crate::modules::kernel_module::KernelModuleMonitor;
@@ -148,6 +149,7 @@ macro_rules! for_each_module {
         $callback!($($prefix)* kernel_cmdline_monitor, KernelCmdlineMonitorModule, "カーネルコマンドライン実行時監視モジュール");
         $callback!($($prefix)* fileless_exec_monitor, FilelessExecMonitorModule, "ファイルレス実行検知モジュール");
         $callback!($($prefix)* livepatch_monitor, LivepatchMonitorModule, "カーネルライブパッチ監視モジュール");
+        $callback!($($prefix)* journal_pattern_monitor, JournalPatternMonitorModule, "systemd ジャーナルパターン監視モジュール");
     };
 }
 

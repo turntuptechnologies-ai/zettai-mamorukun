@@ -817,6 +817,22 @@ scan_interval_secs = 60
 # sys_path = "/sys/kernel/livepatch"
 # proc_path = "/proc"
 
+[modules.journal_pattern_monitor]
+# systemd ジャーナルパターン監視モジュール — journalctl でログを定期取得し、
+# 認証失敗・権限昇格・クラッシュ・OOM 等のパターンを検知
+enabled = false
+scan_interval_secs = 30
+max_entries_per_scan = 1000
+# journalctl_path = "/usr/bin/journalctl"
+# プリセットパターン（auth_failure, privilege_escalation, service_crash, kernel_warning, oom_killer）を使用
+use_preset_patterns = true
+# カスタムパターン例:
+# [[modules.journal_pattern_monitor.custom_patterns]]
+# name = "disk_error"
+# pattern = "(?i)(I/O error|read error|write error)"
+# severity = "critical"
+# unit_filter = "systemd-journald.service"
+
 [modules.coredump_monitor]
 # コアダンプ設定監視モジュール — core_pattern / suid_dumpable 等を監視し、コアダンプ悪用攻撃を検知
 enabled = false

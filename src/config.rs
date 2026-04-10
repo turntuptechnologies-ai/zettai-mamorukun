@@ -417,6 +417,10 @@ pub struct ModulesConfig {
     /// カーネルライブパッチ監視モジュールの設定
     #[serde(default)]
     pub livepatch_monitor: LivepatchMonitorConfig,
+
+    /// systemd ジャーナルパターン監視モジュールの設定
+    #[serde(default)]
+    pub journal_pattern_monitor: JournalPatternMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -5040,6 +5044,88 @@ impl Default for HiddenProcessMonitorConfig {
             skip_pids: Vec::new(),
             scan_batch_size: Self::default_scan_batch_size(),
             recheck_count: Self::default_recheck_count(),
+        }
+    }
+}
+
+/// ジャーナルパターン定義
+///
+/// マッチングに使用する正規表現パターンと重要度を定義する。
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct JournalPattern {
+    /// パターン名
+    pub name: String,
+    /// 正規表現パターン
+    pub pattern: String,
+    /// 重要度（info / warning / critical）
+    #[serde(default = "JournalPattern::default_severity")]
+    pub severity: String,
+    /// ユニットフィルター（指定時はそのユニットのエントリのみ対象）
+    #[serde(default)]
+    pub unit_filter: Option<String>,
+}
+
+impl JournalPattern {
+    fn default_severity() -> String {
+        "warning".to_string()
+    }
+}
+
+/// systemd ジャーナルパターン監視モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct JournalPatternMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "JournalPatternMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 1回のスキャンで処理する最大エントリ数
+    #[serde(default = "JournalPatternMonitorConfig::default_max_entries_per_scan")]
+    pub max_entries_per_scan: usize,
+
+    /// journalctl コマンドのパス
+    #[serde(default = "JournalPatternMonitorConfig::default_journalctl_path")]
+    pub journalctl_path: String,
+
+    /// プリセットパターンを使用するかどうか
+    #[serde(default = "JournalPatternMonitorConfig::default_use_preset_patterns")]
+    pub use_preset_patterns: bool,
+
+    /// カスタムパターン
+    #[serde(default)]
+    pub custom_patterns: Vec<JournalPattern>,
+}
+
+impl JournalPatternMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_max_entries_per_scan() -> usize {
+        1000
+    }
+
+    fn default_journalctl_path() -> String {
+        "/usr/bin/journalctl".to_string()
+    }
+
+    fn default_use_preset_patterns() -> bool {
+        true
+    }
+}
+
+impl Default for JournalPatternMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            max_entries_per_scan: Self::default_max_entries_per_scan(),
+            journalctl_path: Self::default_journalctl_path(),
+            use_preset_patterns: Self::default_use_preset_patterns(),
+            custom_patterns: Vec::new(),
         }
     }
 }

@@ -22,6 +22,7 @@ pub mod hidden_process_monitor;
 pub mod initramfs_monitor;
 pub mod inotify_monitor;
 pub mod ipc_monitor;
+pub mod journal_pattern_monitor;
 pub mod kallsyms_monitor;
 pub mod kernel_cmdline_monitor;
 pub mod kernel_module;

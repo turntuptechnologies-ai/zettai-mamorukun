@@ -113,6 +113,7 @@ src/
     initramfs_monitor.rs # initramfs 整合性監視モジュール
     inotify_monitor.rs # inotify ベースのリアルタイムファイル変更検知モジュール
     ipc_monitor.rs     # System V IPC 監視モジュール
+    journal_pattern_monitor.rs # systemd ジャーナルパターン監視モジュール
     kallsyms_monitor.rs # カーネルシンボルテーブル監視モジュール
     kernel_cmdline_monitor.rs # カーネルコマンドライン実行時監視モジュール
     kernel_module.rs   # カーネルモジュール監視モジュール
