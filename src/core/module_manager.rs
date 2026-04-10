@@ -19,6 +19,7 @@ use crate::modules::ebpf_monitor::EbpfMonitorModule;
 use crate::modules::env_injection_monitor::EnvInjectionMonitorModule;
 use crate::modules::fd_monitor::FdMonitorModule;
 use crate::modules::file_integrity::FileIntegrityModule;
+use crate::modules::fileless_exec_monitor::FilelessExecMonitorModule;
 use crate::modules::firewall_monitor::FirewallMonitorModule;
 use crate::modules::group_monitor::GroupMonitorModule;
 use crate::modules::hidden_process_monitor::HiddenProcessMonitorModule;
@@ -144,6 +145,7 @@ macro_rules! for_each_module {
         $callback!($($prefix)* hidden_process_monitor, HiddenProcessMonitorModule, "プロセス隠蔽検知モジュール");
         $callback!($($prefix)* initramfs_monitor, InitramfsMonitorModule, "initramfs 整合性監視モジュール");
         $callback!($($prefix)* kernel_cmdline_monitor, KernelCmdlineMonitorModule, "カーネルコマンドライン実行時監視モジュール");
+        $callback!($($prefix)* fileless_exec_monitor, FilelessExecMonitorModule, "ファイルレス実行検知モジュール");
     };
 }
 

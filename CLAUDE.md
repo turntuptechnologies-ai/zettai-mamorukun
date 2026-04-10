@@ -105,6 +105,7 @@ src/
     ebpf_monitor.rs    # eBPF プログラム監視モジュール
     env_injection_monitor.rs # 環境変数インジェクション検知モジュール
     fd_monitor.rs      # ファイルディスクリプタ監視モジュール
+    fileless_exec_monitor.rs # メモリ内実行（fileless malware）検知モジュール
     file_integrity.rs  # ファイル整合性監視モジュール
     firewall_monitor.rs # ファイアウォールルール監視モジュール
     group_monitor.rs   # グループポリシー監視モジュール

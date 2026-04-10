@@ -1063,6 +1063,17 @@ suspicious_params = [
   "earlyprintk",
 ]
 
+[modules.fileless_exec_monitor]
+# ファイルレス実行検知モジュール — /proc/*/exe のシンボリックリンクを監視し、
+# メモリ内実行（fileless malware）の兆候を検知する
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 30
+# 検知除外パス（exe パスの前方一致）
+exclude_paths = []
+# 検知除外 UID
+exclude_uids = []
+
 [modules.hidden_process_monitor]
 # プロセス隠蔽検知モジュール — /proc/ の readdir 列挙と PID ブルートフォーススキャンの
 # 差分を比較し、ルートキットによるプロセス隠蔽を検知する

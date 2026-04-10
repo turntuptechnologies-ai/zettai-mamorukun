@@ -409,6 +409,10 @@ pub struct ModulesConfig {
     /// カーネルコマンドライン実行時監視モジュールの設定
     #[serde(default)]
     pub kernel_cmdline_monitor: KernelCmdlineMonitorConfig,
+
+    /// ファイルレス実行検知モジュールの設定
+    #[serde(default)]
+    pub fileless_exec_monitor: FilelessExecMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -3518,6 +3522,11 @@ impl AppConfig {
             "modules.ebpf_monitor.scan_interval_secs",
             &mut errors,
         );
+        Self::validate_interval(
+            self.modules.fileless_exec_monitor.scan_interval_secs,
+            "modules.fileless_exec_monitor.scan_interval_secs",
+            &mut errors,
+        );
 
         // network_monitor 固有の検証
         if self.modules.network_monitor.max_connections == 0 {
@@ -4890,6 +4899,43 @@ impl Default for KernelCmdlineMonitorConfig {
             suspicious_params: Self::default_suspicious_params(),
             proc_cmdline_path: Self::default_proc_cmdline_path(),
             kexec_loaded_path: Self::default_kexec_loaded_path(),
+        }
+    }
+}
+
+/// ファイルレス実行検知モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct FilelessExecMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "FilelessExecMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 検知除外パス（exe パスの前方一致）
+    #[serde(default)]
+    pub exclude_paths: Vec<String>,
+
+    /// 検知除外 UID
+    #[serde(default)]
+    pub exclude_uids: Vec<u32>,
+}
+
+impl FilelessExecMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+}
+
+impl Default for FilelessExecMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            exclude_paths: Vec::new(),
+            exclude_uids: Vec::new(),
         }
     }
 }
