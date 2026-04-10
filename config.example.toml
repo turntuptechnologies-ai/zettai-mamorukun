@@ -1111,3 +1111,12 @@ skip_pids = []
 scan_batch_size = 1000
 # 再確認回数（false positive 対策、短命プロセスのフィルタリング）
 recheck_count = 3
+
+[modules.keylogger_detector]
+# キーロガー検知モジュール — /dev/input/ デバイスファイルへの不審なアクセスを監視し、
+# キーロガーの兆候を検知する
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 30
+# 許可プロセスリスト（ホワイトリスト）— これらのプロセスは正規のデスクトップ環境として除外
+allowed_processes = ["Xorg", "gnome-shell", "kwin_wayland", "sway", "systemd-logind", "libinput", "mutter", "weston", "Hyprland"]

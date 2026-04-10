@@ -421,6 +421,10 @@ pub struct ModulesConfig {
     /// systemd ジャーナルパターン監視モジュールの設定
     #[serde(default)]
     pub journal_pattern_monitor: JournalPatternMonitorConfig,
+
+    /// キーロガー検知モジュールの設定
+    #[serde(default)]
+    pub keylogger_detector: KeyloggerDetectorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -5126,6 +5130,52 @@ impl Default for JournalPatternMonitorConfig {
             journalctl_path: Self::default_journalctl_path(),
             use_preset_patterns: Self::default_use_preset_patterns(),
             custom_patterns: Vec::new(),
+        }
+    }
+}
+
+/// キーロガー検知モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct KeyloggerDetectorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "KeyloggerDetectorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 許可プロセスリスト（ホワイトリスト）
+    #[serde(default = "KeyloggerDetectorConfig::default_allowed_processes")]
+    pub allowed_processes: Vec<String>,
+}
+
+impl KeyloggerDetectorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_allowed_processes() -> Vec<String> {
+        vec![
+            "Xorg".to_string(),
+            "gnome-shell".to_string(),
+            "kwin_wayland".to_string(),
+            "sway".to_string(),
+            "systemd-logind".to_string(),
+            "libinput".to_string(),
+            "mutter".to_string(),
+            "weston".to_string(),
+            "Hyprland".to_string(),
+        ]
+    }
+}
+
+impl Default for KeyloggerDetectorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            allowed_processes: Self::default_allowed_processes(),
         }
     }
 }
