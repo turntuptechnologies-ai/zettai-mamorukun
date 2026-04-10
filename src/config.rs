@@ -413,6 +413,10 @@ pub struct ModulesConfig {
     /// ファイルレス実行検知モジュールの設定
     #[serde(default)]
     pub fileless_exec_monitor: FilelessExecMonitorConfig,
+
+    /// カーネルライブパッチ監視モジュールの設定
+    #[serde(default)]
+    pub livepatch_monitor: LivepatchMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -3832,6 +3836,51 @@ impl Default for KallsymsMonitorConfig {
         Self {
             enabled: false,
             scan_interval_secs: Self::default_scan_interval_secs(),
+        }
+    }
+}
+
+/// カーネルライブパッチ監視モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct LivepatchMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "LivepatchMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// /sys/kernel/livepatch パス（テスト用にオーバーライド可能）
+    #[serde(default = "LivepatchMonitorConfig::default_sys_path")]
+    pub sys_path: String,
+
+    /// /proc パス（テスト用にオーバーライド可能）
+    #[serde(default = "LivepatchMonitorConfig::default_proc_path")]
+    pub proc_path: String,
+}
+
+impl LivepatchMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        60
+    }
+
+    fn default_sys_path() -> String {
+        "/sys/kernel/livepatch".to_string()
+    }
+
+    fn default_proc_path() -> String {
+        "/proc".to_string()
+    }
+}
+
+impl Default for LivepatchMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            sys_path: Self::default_sys_path(),
+            proc_path: Self::default_proc_path(),
         }
     }
 }
