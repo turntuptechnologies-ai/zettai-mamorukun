@@ -1031,3 +1031,18 @@ grub_paths = ["/boot/grub/grub.cfg", "/boot/grub2/grub.cfg", "/etc/default/grub"
 efi_grub_dirs = ["/boot/efi/EFI"]
 # カーネルコマンドライン変更のアラート（selinux=0, nokaslr 等の検知）
 alert_on_cmdline_changes = true
+
+[modules.hidden_process_monitor]
+# プロセス隠蔽検知モジュール — /proc/ の readdir 列挙と PID ブルートフォーススキャンの
+# 差分を比較し、ルートキットによるプロセス隠蔽を検知する
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 300
+# スキャン対象の最大 PID（未設定時は /proc/sys/kernel/pid_max から自動取得）
+# scan_max_pid = 32768
+# スキャン対象外の PID リスト
+skip_pids = []
+# バッチサイズ（CPU 負荷軽減のためバッチ処理）
+scan_batch_size = 1000
+# 再確認回数（false positive 対策、短命プロセスのフィルタリング）
+recheck_count = 3

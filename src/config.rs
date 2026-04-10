@@ -397,6 +397,10 @@ pub struct ModulesConfig {
     /// ブートローダー整合性監視モジュールの設定
     #[serde(default)]
     pub bootloader_monitor: BootloaderMonitorConfig,
+
+    /// プロセス隠蔽検知モジュールの設定
+    #[serde(default)]
+    pub hidden_process_monitor: HiddenProcessMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -4765,6 +4769,61 @@ impl Default for BootloaderMonitorConfig {
             grub_paths: Self::default_grub_paths(),
             efi_grub_dirs: Self::default_efi_grub_dirs(),
             alert_on_cmdline_changes: Self::default_alert_on_cmdline_changes(),
+        }
+    }
+}
+
+/// プロセス隠蔽検知モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct HiddenProcessMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "HiddenProcessMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// スキャン対象の最大 PID（None の場合は /proc/sys/kernel/pid_max から取得）
+    #[serde(default)]
+    pub scan_max_pid: Option<u32>,
+
+    /// スキャン対象外の PID リスト
+    #[serde(default)]
+    pub skip_pids: Vec<u32>,
+
+    /// バッチサイズ（CPU 負荷軽減のためバッチ処理）
+    #[serde(default = "HiddenProcessMonitorConfig::default_scan_batch_size")]
+    pub scan_batch_size: u32,
+
+    /// 再確認回数（false positive 対策）
+    #[serde(default = "HiddenProcessMonitorConfig::default_recheck_count")]
+    pub recheck_count: u32,
+}
+
+impl HiddenProcessMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        300
+    }
+
+    fn default_scan_batch_size() -> u32 {
+        1000
+    }
+
+    fn default_recheck_count() -> u32 {
+        3
+    }
+}
+
+impl Default for HiddenProcessMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            scan_max_pid: None,
+            skip_pids: Vec::new(),
+            scan_batch_size: Self::default_scan_batch_size(),
+            recheck_count: Self::default_recheck_count(),
         }
     }
 }
