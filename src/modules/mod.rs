@@ -15,6 +15,7 @@ pub mod ebpf_monitor;
 pub mod env_injection_monitor;
 pub mod fd_monitor;
 pub mod file_integrity;
+pub mod fileless_exec_monitor;
 pub mod firewall_monitor;
 pub mod group_monitor;
 pub mod hidden_process_monitor;
