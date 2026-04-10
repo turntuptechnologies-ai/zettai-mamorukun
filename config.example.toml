@@ -1015,5 +1015,19 @@ enabled = false
 scan_interval_secs = 30
 # ユーザー定義の追加検知パターン（正規表現）
 extra_patterns = []
-# 除外パターン（正規表現、マッチしたコマンドラインを検知対象から除外）
+# 除外パ���ーン（正規表現、マッチしたコマンドラインを検���対象から除外）
 exclude_patterns = []
+
+[modules.bootloader_monitor]
+# ブートロ��ダー整合性監視モジュール — GRUB 設定ファイルの SHA-256 ハッシュ・
+# パーミッション・オーナーを定期スキャンし、改ざんやブートキット攻撃の兆候を検知する
+# カー���ルコマンドライン（GRUB_CMDLINE_LINUX）の不審なパラメータも検出する
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 300
+# 監視対象の GRUB 設定ファイルパス
+grub_paths = ["/boot/grub/grub.cfg", "/boot/grub2/grub.cfg", "/etc/default/grub", "/boot/grub/custom.cfg"]
+# EFI パーティション上の GRUB 設定を探索するディレクトリ
+efi_grub_dirs = ["/boot/efi/EFI"]
+# カーネルコマンドライン変更のアラート（selinux=0, nokaslr 等の検知）
+alert_on_cmdline_changes = true

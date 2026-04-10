@@ -6,6 +6,7 @@ use crate::modules::abstract_socket_monitor::AbstractSocketMonitorModule;
 use crate::modules::at_job_monitor::AtJobMonitorModule;
 use crate::modules::auditd_monitor::AuditdMonitorModule;
 use crate::modules::backdoor_detector::BackdoorDetectorModule;
+use crate::modules::bootloader_monitor::BootloaderMonitorModule;
 use crate::modules::capabilities_monitor::CapabilitiesMonitorModule;
 use crate::modules::cert_chain_monitor::CertChainMonitorModule;
 use crate::modules::cgroup_monitor::CgroupMonitorModule;
@@ -136,6 +137,7 @@ macro_rules! for_each_module {
         $callback!($($prefix)* proc_environ_monitor, ProcEnvironMonitorModule, "プロセス環境変数スナップショット監視モジュール");
         $callback!($($prefix)* group_monitor, GroupMonitorModule, "グループポリシー監視モジュール");
         $callback!($($prefix)* process_cmdline_monitor, ProcessCmdlineMonitorModule, "プロセス起動コマンドライン監視モジュール");
+        $callback!($($prefix)* bootloader_monitor, BootloaderMonitorModule, "ブートローダー整合性監視モジュール");
     };
 }
 

@@ -93,6 +93,7 @@ src/
     at_job_monitor.rs  # at/batch ジョブ監視モジュール
     auditd_monitor.rs  # auditd ログ統合モジュール
     backdoor_detector.rs # ソケットベースのバックドア検知モジュール
+    bootloader_monitor.rs # ブートローダー整合性監視モジュール
     capabilities_monitor.rs # Linux capabilities 監視モジュール
     cert_chain_monitor.rs # TLS 証明書チェーン検証モジュール
     cgroup_monitor.rs  # cgroup v2 リソース制限監視モジュール
