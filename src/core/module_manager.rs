@@ -22,6 +22,7 @@ use crate::modules::file_integrity::FileIntegrityModule;
 use crate::modules::firewall_monitor::FirewallMonitorModule;
 use crate::modules::group_monitor::GroupMonitorModule;
 use crate::modules::hidden_process_monitor::HiddenProcessMonitorModule;
+use crate::modules::initramfs_monitor::InitramfsMonitorModule;
 use crate::modules::inotify_monitor::InotifyMonitorModule;
 use crate::modules::ipc_monitor::IpcMonitorModule;
 use crate::modules::kallsyms_monitor::KallsymsMonitorModule;
@@ -140,6 +141,7 @@ macro_rules! for_each_module {
         $callback!($($prefix)* process_cmdline_monitor, ProcessCmdlineMonitorModule, "プロセス起動コマンドライン監視モジュール");
         $callback!($($prefix)* bootloader_monitor, BootloaderMonitorModule, "ブートローダー整合性監視モジュール");
         $callback!($($prefix)* hidden_process_monitor, HiddenProcessMonitorModule, "プロセス隠蔽検知モジュール");
+        $callback!($($prefix)* initramfs_monitor, InitramfsMonitorModule, "initramfs 整合性監視モジュール");
     };
 }
 

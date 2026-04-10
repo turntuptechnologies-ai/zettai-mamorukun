@@ -1,6 +1,6 @@
 [package]
 name = "zettai-mamorukun"
-version = "0.99.0"
+version = "1.0.0"
 edition = "2024"
 description = "Linux サーバ向けサイバー攻撃防御デーモン"
 license = "MIT"
@@ -27,6 +27,7 @@ x509-parser = "0.16"
 pem = "3"
 tracing-journald = "0.3"
 libc = "0.2"
+glob = "0.3"
 
 [dev-dependencies]
 tempfile = "3"

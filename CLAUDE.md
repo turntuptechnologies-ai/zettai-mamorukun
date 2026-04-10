@@ -109,6 +109,7 @@ src/
     firewall_monitor.rs # ファイアウォールルール監視モジュール
     group_monitor.rs   # グループポリシー監視モジュール
     hidden_process_monitor.rs # プロセス隠蔽検知モジュール
+    initramfs_monitor.rs # initramfs 整合性監視モジュール
     inotify_monitor.rs # inotify ベースのリアルタイムファイル変更検知モジュール
     ipc_monitor.rs     # System V IPC 監視モジュール
     kallsyms_monitor.rs # カーネルシンボルテーブル監視モジュール
