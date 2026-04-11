@@ -1,6 +1,7 @@
 use crate::config::AppConfig;
 use crate::config::DigestConfig;
 use crate::core::action::{ActionEngine, ActionEngineConfig, DigestCollector, InFlightTracker};
+use crate::core::alert_rule::{AlertRuleEngine, AlertRuleEngineConfig};
 use crate::core::correlation::{CorrelationEngine, CorrelationRuntimeConfig};
 use crate::core::event::{self, EventBus, SecurityEvent, Severity};
 use crate::core::event_store::{EventStore, EventStoreRuntimeConfig};
@@ -61,6 +62,7 @@ impl Daemon {
         let mut event_stream_config_sender: Option<watch::Sender<EventStreamRuntimeConfig>> = None;
         let mut correlation_config_sender: Option<watch::Sender<CorrelationRuntimeConfig>> = None;
         let mut syslog_config_sender: Option<watch::Sender<SyslogRuntimeConfig>> = None;
+        let mut alert_rule_config_sender: Option<watch::Sender<AlertRuleEngineConfig>> = None;
         let event_bus = if self.config.event_bus.enabled {
             let bus = EventBus::with_filters(
                 self.config.event_bus.channel_capacity,
@@ -192,6 +194,23 @@ impl Daemon {
                 );
             }
 
+            // アラートルールエンジンの起動
+            if self.config.alert_rules.enabled {
+                match AlertRuleEngine::new(&self.config.alert_rules, &bus) {
+                    Ok((engine, sender)) => {
+                        alert_rule_config_sender = Some(sender);
+                        engine.spawn();
+                        tracing::info!(
+                            rule_count = self.config.alert_rules.rules.len(),
+                            "アラートルールエンジンを起動しました"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "アラートルールエンジンの初期化に失敗しました");
+                    }
+                }
+            }
+
             tracing::info!(
                 channel_capacity = self.config.event_bus.channel_capacity,
                 "イベントバスを起動しました"
@@ -211,6 +230,10 @@ impl Daemon {
 
         if event_bus.is_none() && self.config.syslog.enabled {
             tracing::warn!("Syslog フォワーダーはイベントバスが無効のため起動できません");
+        }
+
+        if event_bus.is_none() && self.config.alert_rules.enabled {
+            tracing::warn!("アラートルールエンジンはイベントバスが無効のため起動できません");
         }
 
         // 前回のスキャン状態を読み込み
@@ -582,6 +605,23 @@ impl Daemon {
                                 } else {
                                     tracing::warn!(
                                         "Syslog フォワーダーの設定リロードに失敗しました（受信側が閉じています）"
+                                    );
+                                }
+                            }
+
+                            // アラートルールエンジンのリロード
+                            if let Some(ref sender) = alert_rule_config_sender {
+                                let new_runtime = AlertRuleEngineConfig {
+                                    rules: new_config.alert_rules.rules.clone(),
+                                };
+                                if sender.send(new_runtime).is_ok() {
+                                    tracing::info!(
+                                        rule_count = new_config.alert_rules.rules.len(),
+                                        "アラートルールエンジンの設定をリロードしました"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        "アラートルールエンジンの設定リロードに失敗しました（受信側が閉じています）"
                                     );
                                 }
                             }
