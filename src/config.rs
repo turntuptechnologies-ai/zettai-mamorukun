@@ -61,6 +61,10 @@ pub struct AppConfig {
     /// Syslog 転送設定
     #[serde(default)]
     pub syslog: SyslogConfig,
+
+    /// アラートルール DSL 設定
+    #[serde(default)]
+    pub alert_rules: AlertRulesConfig,
 }
 
 /// デーモン動作設定
@@ -3830,6 +3834,109 @@ impl AppConfig {
             }
         }
 
+        // alert_rules の検証
+        if self.alert_rules.enabled {
+            let valid_condition_types = ["threshold", "field_match", "compound"];
+            let valid_alert_actions = ["log", "command", "webhook"];
+            let valid_alert_fields = [
+                "event_type",
+                "source_module",
+                "message",
+                "details",
+                "severity",
+            ];
+            for (i, rule) in self.alert_rules.rules.iter().enumerate() {
+                let prefix = format!("alert_rules.rules[{}] ({})", i, rule.name);
+                if !valid_condition_types.contains(&rule.condition_type.as_str()) {
+                    errors.push(format!(
+                        "{}: 無効な condition_type '{}' (有効値: {})",
+                        prefix,
+                        rule.condition_type,
+                        valid_condition_types.join(", ")
+                    ));
+                }
+                if !valid_alert_actions.contains(&rule.action.as_str()) {
+                    errors.push(format!(
+                        "{}: 無効な action '{}' (有効値: {})",
+                        prefix,
+                        rule.action,
+                        valid_alert_actions.join(", ")
+                    ));
+                }
+                if rule.condition_type == "threshold" {
+                    if rule.threshold_count.is_none() {
+                        errors.push(format!(
+                            "{}: condition_type が 'threshold' の場合、threshold_count は必須です",
+                            prefix
+                        ));
+                    }
+                    if rule.window_secs.is_none() {
+                        errors.push(format!(
+                            "{}: condition_type が 'threshold' の場合、window_secs は必須です",
+                            prefix
+                        ));
+                    }
+                }
+                if rule.condition_type == "field_match" {
+                    if rule.field.is_none() {
+                        errors.push(format!(
+                            "{}: condition_type が 'field_match' の場合、field は必須です",
+                            prefix
+                        ));
+                    } else if let Some(ref f) = rule.field
+                        && !valid_alert_fields.contains(&f.as_str())
+                    {
+                        errors.push(format!(
+                            "{}: 無効な field '{}' (有効値: {})",
+                            prefix,
+                            f,
+                            valid_alert_fields.join(", ")
+                        ));
+                    }
+                    if rule.pattern.is_none() {
+                        errors.push(format!(
+                            "{}: condition_type が 'field_match' の場合、pattern は必須です",
+                            prefix
+                        ));
+                    }
+                }
+                if rule.condition_type == "compound" {
+                    if rule.operator.is_none() {
+                        errors.push(format!(
+                            "{}: condition_type が 'compound' の場合、operator は必須です",
+                            prefix
+                        ));
+                    } else if let Some(ref op) = rule.operator
+                        && op != "and"
+                        && op != "or"
+                    {
+                        errors.push(format!(
+                            "{}: 無効な operator '{}' (有効値: and, or)",
+                            prefix, op
+                        ));
+                    }
+                    if rule.conditions.is_empty() {
+                        errors.push(format!(
+                            "{}: condition_type が 'compound' の場合、conditions は必須です",
+                            prefix
+                        ));
+                    }
+                }
+                if rule.action == "command" && rule.command.is_none() {
+                    errors.push(format!(
+                        "{}: action が 'command' の場合、command フィールドは必須です",
+                        prefix
+                    ));
+                }
+                if rule.action == "webhook" && rule.url.is_none() {
+                    errors.push(format!(
+                        "{}: action が 'webhook' の場合、url フィールドは必須です",
+                        prefix
+                    ));
+                }
+            }
+        }
+
         // rate_limit の検証
         if let Some(ref rate_limit) = self.actions.rate_limit {
             if let Some(ref cmd) = rate_limit.command {
@@ -4041,6 +4148,91 @@ impl Default for PtraceMonitorConfig {
             whitelist_tracers: Vec::new(),
         }
     }
+}
+
+/// アラートルール DSL 設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
+pub struct AlertRulesConfig {
+    /// 有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+    /// ルールリスト
+    #[serde(default)]
+    pub rules: Vec<AlertRuleConfig>,
+}
+
+/// アラートルール設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct AlertRuleConfig {
+    /// ルール名
+    pub name: String,
+    /// ルールの説明
+    #[serde(default)]
+    pub description: Option<String>,
+    /// 条件タイプ（"threshold" | "field_match" | "compound"）
+    pub condition_type: String,
+    /// threshold: 閾値件数
+    pub threshold_count: Option<u64>,
+    /// threshold: 時間窓（秒）
+    pub window_secs: Option<u64>,
+    /// イベント種別フィルタ
+    pub event_type: Option<String>,
+    /// Severity フィルタ
+    pub severity_filter: Option<String>,
+    /// モジュール名フィルタ
+    pub module_filter: Option<String>,
+    /// field_match: 対象フィールド
+    pub field: Option<String>,
+    /// field_match: 正規表現パターン
+    pub pattern: Option<String>,
+    /// compound: 論理演算子（"and" | "or"）
+    pub operator: Option<String>,
+    /// compound: サブ条件リスト
+    #[serde(default)]
+    pub conditions: Vec<AlertSubConditionConfig>,
+    /// アクション種別（"log" | "command" | "webhook"）
+    pub action: String,
+    /// 実行コマンド（action が "command" の場合）
+    pub command: Option<String>,
+    /// タイムアウト（秒）
+    #[serde(default = "default_alert_timeout")]
+    pub timeout_secs: u64,
+    /// Webhook URL
+    pub url: Option<String>,
+    /// HTTP メソッド
+    pub method: Option<String>,
+    /// HTTP ヘッダー
+    #[serde(default)]
+    pub headers: Option<std::collections::HashMap<String, String>>,
+    /// ボディテンプレート
+    pub body_template: Option<String>,
+    /// リトライ回数
+    pub max_retries: Option<u32>,
+}
+
+/// アラートサブ条件設定（compound 用）
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct AlertSubConditionConfig {
+    /// 条件タイプ
+    pub condition_type: String,
+    /// threshold: 閾値件数
+    pub threshold_count: Option<u64>,
+    /// threshold: 時間窓（秒）
+    pub window_secs: Option<u64>,
+    /// イベント種別フィルタ
+    pub event_type: Option<String>,
+    /// Severity フィルタ
+    pub severity_filter: Option<String>,
+    /// モジュール名フィルタ
+    pub module_filter: Option<String>,
+    /// field_match: 対象フィールド
+    pub field: Option<String>,
+    /// field_match: 正規表現パターン
+    pub pattern: Option<String>,
+}
+
+fn default_alert_timeout() -> u64 {
+    30
 }
 
 /// カーネルシンボルテーブル監視モジュールの設定

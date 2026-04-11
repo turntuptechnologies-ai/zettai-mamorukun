@@ -79,4 +79,8 @@ pub enum AppError {
     /// Syslog 転送エラー
     #[error("Syslog 転送エラー: {message}")]
     SyslogForward { message: String },
+
+    /// アラートルールエラー
+    #[error("アラートルールエラー: {0}")]
+    AlertRule(String),
 }

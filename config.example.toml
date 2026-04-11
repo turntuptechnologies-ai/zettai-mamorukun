@@ -1171,3 +1171,53 @@ enabled = false
 scan_interval_secs = 30
 # 許可プロセスリスト（ホワイトリスト）— これらのプロセスは正規のデスクトップ環境として除外
 allowed_processes = ["Xorg", "gnome-shell", "kwin_wayland", "sway", "systemd-logind", "libinput", "mutter", "weston", "Hyprland"]
+
+# アラートルール DSL
+# カスタム条件でセキュリティイベントを監視し、アクションを実行する
+[alert_rules]
+enabled = false
+
+# 例1: threshold — 短時間に大量のイベントが発生した場合にアラート
+# [[alert_rules.rules]]
+# name = "brute_force_alert"
+# description = "5分以内にSSHブルートフォースが10件以上発生"
+# condition_type = "threshold"
+# threshold_count = 10
+# window_secs = 300
+# module_filter = "ssh_brute_force"
+# severity_filter = "Warning"
+# action = "log"
+
+# 例2: field_match — フィールドの正規表現マッチでアラート
+# [[alert_rules.rules]]
+# name = "critical_file_change"
+# description = "重要ファイルの変更を検知"
+# condition_type = "field_match"
+# field = "details"
+# pattern = "/etc/(passwd|shadow|sudoers)"
+# action = "webhook"
+# url = "https://hooks.slack.com/services/xxx"
+# method = "POST"
+# timeout_secs = 10
+# [alert_rules.rules.headers]
+# Content-Type = "application/json"
+# body_template = '{"text": "[{{severity}}] {{source}}: {{message}}"}'
+
+# 例3: compound — 複合条件（AND/OR）
+# [[alert_rules.rules]]
+# name = "coordinated_attack"
+# description = "ブルートフォースとファイル改ざんの同時発生"
+# condition_type = "compound"
+# operator = "and"
+# action = "command"
+# command = "/usr/local/bin/alert.sh '{{message}}'"
+# timeout_secs = 60
+# [[alert_rules.rules.conditions]]
+# condition_type = "threshold"
+# threshold_count = 5
+# window_secs = 120
+# module_filter = "ssh_brute_force"
+# [[alert_rules.rules.conditions]]
+# condition_type = "field_match"
+# field = "source_module"
+# pattern = "file_integrity"
