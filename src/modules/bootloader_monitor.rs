@@ -419,7 +419,7 @@ impl Module for BootloaderMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         let grub_paths = self.config.grub_paths.clone();
         let efi_dirs = self.config.efi_grub_dirs.clone();
         let interval_secs = self.config.scan_interval_secs;
@@ -441,7 +441,7 @@ impl Module for BootloaderMonitorModule {
             );
         }
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
             // 最初の tick は即座に発火するのでスキップ
             interval.tick().await;
@@ -474,7 +474,7 @@ impl Module for BootloaderMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {

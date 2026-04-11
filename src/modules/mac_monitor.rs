@@ -420,7 +420,7 @@ impl Module for MacMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         // 初回スキャンでベースライン作成
         let baseline = Self::scan(&self.config);
         tracing::info!(
@@ -434,7 +434,7 @@ impl Module for MacMonitorModule {
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut baseline = baseline;
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(config.scan_interval_secs));
@@ -457,7 +457,7 @@ impl Module for MacMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {

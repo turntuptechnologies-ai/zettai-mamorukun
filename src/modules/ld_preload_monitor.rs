@@ -301,7 +301,7 @@ impl Module for LdPreloadMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         // 初回チェック
         Self::check_ld_so_preload(&self.config.watch_paths, &self.event_bus);
         Self::check_dangerous_env_vars(&self.config.watch_paths, &self.event_bus);
@@ -317,7 +317,7 @@ impl Module for LdPreloadMonitorModule {
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(scan_interval_secs));
             interval.tick().await;
@@ -350,7 +350,7 @@ impl Module for LdPreloadMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn stop(&mut self) -> Result<(), AppError> {

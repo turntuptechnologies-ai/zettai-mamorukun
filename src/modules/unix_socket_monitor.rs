@@ -289,7 +289,7 @@ impl Module for UnixSocketMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         let baseline = Self::scan_sockets(&self.config.proc_path, &self.config.watch_dirs);
         tracing::info!(
             socket_count = baseline.sockets.len(),
@@ -303,7 +303,7 @@ impl Module for UnixSocketMonitorModule {
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(scan_interval_secs));
             interval.tick().await;
@@ -335,7 +335,7 @@ impl Module for UnixSocketMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn stop(&mut self) -> Result<(), AppError> {

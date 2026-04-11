@@ -53,6 +53,10 @@ pub struct AppConfig {
     /// 相関分析エンジン設定
     #[serde(default)]
     pub correlation: CorrelationConfig,
+
+    /// モジュールウォッチドッグ設定
+    #[serde(default)]
+    pub module_watchdog: ModuleWatchdogConfig,
 }
 
 /// デーモン動作設定
@@ -2941,6 +2945,60 @@ impl Default for HealthConfig {
     }
 }
 
+/// モジュールウォッチドッグ設定
+#[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
+pub struct ModuleWatchdogConfig {
+    /// ウォッチドッグを有効にするか
+    #[serde(default = "ModuleWatchdogConfig::default_enabled")]
+    pub enabled: bool,
+    /// ヘルスチェックインターバル（秒）
+    #[serde(default = "ModuleWatchdogConfig::default_check_interval_secs")]
+    pub check_interval_secs: u64,
+    /// 異常停止時の自動再起動
+    #[serde(default = "ModuleWatchdogConfig::default_auto_restart")]
+    pub auto_restart: bool,
+    /// 最大再起動回数
+    #[serde(default = "ModuleWatchdogConfig::default_max_restarts")]
+    pub max_restarts: u32,
+    /// 再起動クールダウン（秒）
+    #[serde(default = "ModuleWatchdogConfig::default_restart_cooldown_secs")]
+    pub restart_cooldown_secs: u64,
+}
+
+impl ModuleWatchdogConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+
+    fn default_check_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_auto_restart() -> bool {
+        true
+    }
+
+    fn default_max_restarts() -> u32 {
+        3
+    }
+
+    fn default_restart_cooldown_secs() -> u64 {
+        60
+    }
+}
+
+impl Default for ModuleWatchdogConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            check_interval_secs: Self::default_check_interval_secs(),
+            auto_restart: Self::default_auto_restart(),
+            max_restarts: Self::default_max_restarts(),
+            restart_cooldown_secs: Self::default_restart_cooldown_secs(),
+        }
+    }
+}
+
 /// イベントフィルタリング設定
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
 pub struct EventFilterConfig {
@@ -3601,6 +3659,19 @@ impl AppConfig {
                     prefix
                 ));
             }
+        }
+
+        // module_watchdog 設定の検証
+        if self.module_watchdog.check_interval_secs == 0 {
+            errors.push(
+                "module_watchdog.check_interval_secs: 0 より大きい値を指定してください".to_string(),
+            );
+        }
+        if self.module_watchdog.restart_cooldown_secs == 0 {
+            errors.push(
+                "module_watchdog.restart_cooldown_secs: 0 より大きい値を指定してください"
+                    .to_string(),
+            );
         }
 
         // status 設定の検証
@@ -6071,5 +6142,92 @@ socket_path = "/tmp/custom.sock"
         let value: toml::Value = toml::Value::try_from(&config).unwrap();
         let roundtrip: AppConfig = value.try_into().unwrap();
         assert_eq!(config, roundtrip);
+    }
+
+    #[test]
+    fn test_module_watchdog_config_defaults() {
+        let config = ModuleWatchdogConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.check_interval_secs, 30);
+        assert!(config.auto_restart);
+        assert_eq!(config.max_restarts, 3);
+        assert_eq!(config.restart_cooldown_secs, 60);
+    }
+
+    #[test]
+    fn test_module_watchdog_config_parse_toml() {
+        let toml_str = r#"
+[module_watchdog]
+enabled = false
+check_interval_secs = 10
+auto_restart = false
+max_restarts = 5
+restart_cooldown_secs = 120
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.module_watchdog.enabled);
+        assert_eq!(config.module_watchdog.check_interval_secs, 10);
+        assert!(!config.module_watchdog.auto_restart);
+        assert_eq!(config.module_watchdog.max_restarts, 5);
+        assert_eq!(config.module_watchdog.restart_cooldown_secs, 120);
+    }
+
+    #[test]
+    fn test_module_watchdog_config_parse_toml_defaults() {
+        let toml_str = "";
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.module_watchdog.enabled);
+        assert_eq!(config.module_watchdog.check_interval_secs, 30);
+        assert!(config.module_watchdog.auto_restart);
+        assert_eq!(config.module_watchdog.max_restarts, 3);
+        assert_eq!(config.module_watchdog.restart_cooldown_secs, 60);
+    }
+
+    #[test]
+    fn test_validate_module_watchdog_zero_check_interval() {
+        let mut config = AppConfig::default();
+        config.module_watchdog.check_interval_secs = 0;
+        let result = config.validate();
+        assert!(result.is_err());
+        if let Err(AppError::ConfigValidation { errors, .. }) = result {
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains("module_watchdog.check_interval_secs"))
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_module_watchdog_zero_restart_cooldown() {
+        let mut config = AppConfig::default();
+        config.module_watchdog.restart_cooldown_secs = 0;
+        let result = config.validate();
+        assert!(result.is_err());
+        if let Err(AppError::ConfigValidation { errors, .. }) = result {
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains("module_watchdog.restart_cooldown_secs"))
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_module_watchdog_valid_config() {
+        let config = AppConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_diff_from_default_module_watchdog_changed() {
+        let mut config = AppConfig::default();
+        config.module_watchdog.check_interval_secs = 10;
+        let diffs = config.diff_from_default();
+        assert!(
+            diffs
+                .iter()
+                .any(|d| d.0 == "module_watchdog.check_interval_secs")
+        );
     }
 }

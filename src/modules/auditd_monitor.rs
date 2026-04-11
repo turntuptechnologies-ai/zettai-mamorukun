@@ -339,7 +339,7 @@ impl Module for AuditdMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         let log_path = self.config.log_path.clone();
         let check_interval_secs = self.config.check_interval_secs;
         let watch_types = self.config.watch_types.clone();
@@ -357,7 +357,7 @@ impl Module for AuditdMonitorModule {
             "auditd ログの初回スキャンが完了しました"
         );
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(check_interval_secs));
             // 最初の tick は即座に発火するのでスキップ
@@ -389,7 +389,7 @@ impl Module for AuditdMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn stop(&mut self) -> Result<(), AppError> {

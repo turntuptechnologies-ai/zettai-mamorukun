@@ -310,9 +310,17 @@ impl Daemon {
             *names = module_manager.running_module_names();
         }
 
+        // ステータス用: モジュール再起動回数の共有状態
+        let shared_module_restarts: Arc<StdMutex<std::collections::HashMap<String, u32>>> =
+            Arc::new(StdMutex::new(std::collections::HashMap::new()));
+
         // ステータスサーバーの起動
         if self.config.status.enabled {
-            let state = DaemonState::new(Arc::clone(&shared_module_names), shared_metrics.clone());
+            let state = DaemonState::new(
+                Arc::clone(&shared_module_names),
+                shared_metrics.clone(),
+                Arc::clone(&shared_module_restarts),
+            );
             let server = StatusServer::new(&self.config.status.socket_path, state);
             status_cancel_token = Some(server.cancel_token());
             match server.spawn() {
@@ -323,12 +331,29 @@ impl Daemon {
             }
         }
 
+        // モジュールウォッチドッグの初期化
+        let watchdog_enabled = self.config.module_watchdog.enabled;
+        let watchdog_interval_duration =
+            Duration::from_secs(self.config.module_watchdog.check_interval_secs);
+        let mut watchdog_interval = tokio::time::interval(watchdog_interval_duration);
+        // 最初の tick は即座に発火するのでスキップ
+        watchdog_interval.tick().await;
+
         tracing::info!("デーモンを起動しました");
 
         if health_enabled {
             tracing::info!(
                 interval_secs = self.config.health.heartbeat_interval_secs,
                 "ハートビートを有効化しました"
+            );
+        }
+
+        if watchdog_enabled {
+            tracing::info!(
+                check_interval_secs = self.config.module_watchdog.check_interval_secs,
+                auto_restart = self.config.module_watchdog.auto_restart,
+                max_restarts = self.config.module_watchdog.max_restarts,
+                "モジュールウォッチドッグを有効化しました"
             );
         }
 
@@ -559,6 +584,35 @@ impl Daemon {
                                 uptime_secs = status.uptime_secs,
                                 "ハートビート（メモリ情報取得不可）"
                             );
+                        }
+                    }
+                }
+                _ = watchdog_interval.tick(), if watchdog_enabled => {
+                    let report = module_manager.check_health(
+                        &self.config.module_watchdog,
+                        &self.config.modules,
+                        &event_bus,
+                    ).await;
+                    if !report.crashed.is_empty() {
+                        tracing::warn!(
+                            crashed = ?report.crashed,
+                            restarted = ?report.restarted,
+                            restart_limit_reached = ?report.restart_limit_reached,
+                            cooldown_skipped = ?report.cooldown_skipped,
+                            "ウォッチドッグ: モジュールの異常停止を検知"
+                        );
+                    }
+                    // ステータス用モジュール名リストと再起動回数を更新
+                    if !report.restarted.is_empty() || !report.crashed.is_empty() {
+                        {
+                            // unwrap safety: Mutex が poisoned になるのはパニック時のみ
+                            let mut names = shared_module_names.lock().unwrap();
+                            *names = module_manager.running_module_names();
+                        }
+                        {
+                            // unwrap safety: Mutex が poisoned になるのはパニック時のみ
+                            let mut restarts = shared_module_restarts.lock().unwrap();
+                            *restarts = module_manager.module_restart_counts();
                         }
                     }
                 }

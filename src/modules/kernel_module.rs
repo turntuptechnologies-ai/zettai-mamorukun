@@ -135,7 +135,7 @@ impl Module for KernelModuleMonitor {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         // 初回スキャンでベースラインを取得
         let content = Self::read_proc_modules()?;
         let entries = Self::parse_proc_modules(&content);
@@ -150,7 +150,7 @@ impl Module for KernelModuleMonitor {
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(scan_interval_secs));
             // 最初の tick は即座に発火するのでスキップ
@@ -236,7 +236,7 @@ impl Module for KernelModuleMonitor {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {

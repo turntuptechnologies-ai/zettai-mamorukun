@@ -294,7 +294,7 @@ impl Module for InitramfsMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         let patterns = self.config.paths.clone();
         let interval_secs = self.config.scan_interval_secs;
         let cancel_token = self.cancel_token.clone();
@@ -314,7 +314,7 @@ impl Module for InitramfsMonitorModule {
             );
         }
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
             // 最初の tick は即座に発火するのでスキップ
             interval.tick().await;
@@ -344,7 +344,7 @@ impl Module for InitramfsMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {

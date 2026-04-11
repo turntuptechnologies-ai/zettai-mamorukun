@@ -285,7 +285,7 @@ impl Module for ProcessExecMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         // 初回スキャンで既存の PID を記録
         let known_pids = Self::scan_pids();
         tracing::info!(
@@ -300,7 +300,7 @@ impl Module for ProcessExecMonitorModule {
         let event_bus = self.event_bus.clone();
         let compiled_patterns = self.compiled_patterns.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(scan_interval_secs));
             // 最初の tick は即座に発火するのでスキップ
@@ -382,7 +382,7 @@ impl Module for ProcessExecMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn stop(&mut self) -> Result<(), AppError> {

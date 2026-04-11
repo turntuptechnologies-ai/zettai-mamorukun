@@ -402,7 +402,7 @@ impl Module for ProcNetMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         let route_path = self.config.route_path.clone();
         let arp_path = self.config.arp_path.clone();
         let scan_interval_secs = self.config.scan_interval_secs;
@@ -416,7 +416,7 @@ impl Module for ProcNetMonitorModule {
             "/proc/net/ ベースラインスキャンが完了しました"
         );
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(scan_interval_secs));
             interval.tick().await;
@@ -443,7 +443,7 @@ impl Module for ProcNetMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {

@@ -262,7 +262,7 @@ impl Module for ShellConfigMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         let baseline = Self::scan_files(&self.config.watch_paths);
         let total_lines: usize = baseline.files.values().map(|s| s.line_count()).sum();
         tracing::info!(
@@ -276,7 +276,7 @@ impl Module for ShellConfigMonitorModule {
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(scan_interval_secs));
             interval.tick().await;
@@ -303,7 +303,7 @@ impl Module for ShellConfigMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {

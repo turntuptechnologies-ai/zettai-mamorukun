@@ -340,7 +340,7 @@ impl Module for LoginSessionMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         let params = ScanParams {
             utmp_path: self.config.utmp_path.clone(),
             alert_root_login: self.config.alert_root_login,
@@ -361,7 +361,7 @@ impl Module for LoginSessionMonitorModule {
             "ログインセッションの初回スキャンが完了しました"
         );
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(check_interval_secs));
             // 最初の tick は即座に発火するのでスキップ
@@ -393,7 +393,7 @@ impl Module for LoginSessionMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn stop(&mut self) -> Result<(), AppError> {

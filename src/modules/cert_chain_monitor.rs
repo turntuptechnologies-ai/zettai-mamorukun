@@ -403,7 +403,7 @@ impl Module for CertChainMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         let watch_dirs = self.config.watch_dirs.clone();
         let file_extensions = self.config.file_extensions.clone();
         let trusted_ca_dirs = self.config.trusted_ca_dirs.clone();
@@ -418,7 +418,7 @@ impl Module for CertChainMonitorModule {
             "TLS 証明書チェーンの初回スキャンが完了しました"
         );
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(check_interval_secs));
             // 最初の tick は即座に発火するのでスキップ
@@ -447,7 +447,7 @@ impl Module for CertChainMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn stop(&mut self) -> Result<(), AppError> {

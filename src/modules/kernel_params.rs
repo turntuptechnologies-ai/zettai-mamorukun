@@ -223,7 +223,7 @@ impl Module for KernelParamsModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         let proc_sys_path = self.config.proc_sys_path.clone();
         let watch_params = self.config.watch_params.clone();
         let scan_interval_secs = self.config.scan_interval_secs;
@@ -236,7 +236,7 @@ impl Module for KernelParamsModule {
             "カーネルパラメータベースラインスキャンが完了しました"
         );
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(scan_interval_secs));
             interval.tick().await;
@@ -268,7 +268,7 @@ impl Module for KernelParamsModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {

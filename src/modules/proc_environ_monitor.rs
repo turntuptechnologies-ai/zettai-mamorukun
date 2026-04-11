@@ -544,7 +544,7 @@ impl Module for ProcEnvironMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         let whitelist = Self::compile_whitelist(&self.config.whitelist_patterns);
 
         // ベースラインスナップショットの取得
@@ -563,7 +563,7 @@ impl Module for ProcEnvironMonitorModule {
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(config.scan_interval_secs));
             interval.tick().await;
@@ -634,7 +634,7 @@ impl Module for ProcEnvironMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {

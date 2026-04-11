@@ -193,7 +193,7 @@ impl Module for ProcessMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         // 初回スキャンで動作確認
         let processes = Self::scan_processes();
         tracing::info!(
@@ -209,7 +209,7 @@ impl Module for ProcessMonitorModule {
         // 既知の PID を記録し、同じ PID の同じ異常を繰り返し警告しない
         let mut known_anomalies: HashSet<(u32, String)> = HashSet::new();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(scan_interval_secs));
             // 最初の tick は即座に発火するのでスキップ
@@ -266,7 +266,7 @@ impl Module for ProcessMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn stop(&mut self) -> Result<(), AppError> {

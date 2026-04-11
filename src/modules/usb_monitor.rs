@@ -141,7 +141,7 @@ impl Module for UsbMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         let baseline = Self::scan_devices(&self.config.devices_path)?;
         tracing::info!(
             device_count = baseline.len(),
@@ -153,7 +153,7 @@ impl Module for UsbMonitorModule {
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(scan_interval_secs));
             // 最初の tick は即座に発火するのでスキップ
@@ -237,7 +237,7 @@ impl Module for UsbMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {

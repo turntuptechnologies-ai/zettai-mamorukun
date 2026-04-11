@@ -347,11 +347,11 @@ impl Module for DbusMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         // D-Bus が利用可能か確認
         if !check_dbus_available().await {
             tracing::warn!("D-Bus が利用できないため、dbus_monitor モジュールをスキップします");
-            return Ok(());
+            return Ok(tokio::spawn(async {}));
         }
 
         let scan_interval_secs = self.config.scan_interval_secs;
@@ -397,7 +397,7 @@ impl Module for DbusMonitorModule {
             "D-Bus ベースラインスキャンが完了しました"
         );
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(scan_interval_secs));
             interval.tick().await;
@@ -447,7 +447,7 @@ impl Module for DbusMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {

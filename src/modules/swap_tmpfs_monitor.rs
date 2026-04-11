@@ -503,7 +503,7 @@ impl Module for SwapTmpfsMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         let proc_path = self.config.proc_path.clone();
         let exclude_paths = self.config.exclude_paths.clone();
         let baseline = Self::take_snapshot(&proc_path, &exclude_paths);
@@ -519,7 +519,7 @@ impl Module for SwapTmpfsMonitorModule {
         let event_bus = self.event_bus.clone();
         let config = self.config.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(scan_interval_secs));
             interval.tick().await;
@@ -554,7 +554,7 @@ impl Module for SwapTmpfsMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn stop(&mut self) -> Result<(), AppError> {

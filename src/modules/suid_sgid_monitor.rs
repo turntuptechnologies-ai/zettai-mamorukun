@@ -277,7 +277,7 @@ impl Module for SuidSgidMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         let baseline = Self::scan_dirs(&self.config.watch_dirs);
         tracing::info!(
             suid_sgid_count = baseline.files.len(),
@@ -289,7 +289,7 @@ impl Module for SuidSgidMonitorModule {
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(scan_interval_secs));
             interval.tick().await;
@@ -316,7 +316,7 @@ impl Module for SuidSgidMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {

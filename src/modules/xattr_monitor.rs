@@ -392,7 +392,7 @@ impl Module for XattrMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         let baseline = Self::scan_paths(&self.config.watch_paths, &self.config.namespaces);
         tracing::info!(
             file_count = baseline.files.len(),
@@ -405,7 +405,7 @@ impl Module for XattrMonitorModule {
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(scan_interval_secs));
             interval.tick().await;
@@ -436,7 +436,7 @@ impl Module for XattrMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn stop(&mut self) -> Result<(), AppError> {
