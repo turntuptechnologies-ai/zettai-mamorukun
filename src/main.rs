@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use zettai_mamorukun::config::AppConfig;
 use zettai_mamorukun::core::daemon::Daemon;
+use zettai_mamorukun::core::dashboard;
 use zettai_mamorukun::core::event_store;
 use zettai_mamorukun::core::event_stream;
 use zettai_mamorukun::core::status;
@@ -102,6 +103,15 @@ enum Commands {
         /// 出力フォーマット (json, text)
         #[arg(long, default_value = "json")]
         format: String,
+    },
+    /// リアルタイム監視ダッシュボードを表示する
+    Dashboard {
+        /// ステータスソケットのパス
+        #[arg(long, default_value = "/var/run/zettai-mamorukun/status.sock")]
+        status_socket: PathBuf,
+        /// イベントストリームソケットのパス
+        #[arg(long, default_value = "/var/run/zettai-mamorukun/event_stream.sock")]
+        event_stream_socket: PathBuf,
     },
     /// 永続化されたセキュリティイベントを検索する
     SearchEvents {
@@ -864,6 +874,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             format,
         }) => {
             match event_stream::stream_events(socket_path, format).await {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("エラー: {}", e);
+                    process::exit(1);
+                }
+            }
+            return Ok(());
+        }
+        Some(Commands::Dashboard {
+            status_socket,
+            event_stream_socket,
+        }) => {
+            match dashboard::run_dashboard(status_socket, event_stream_socket).await {
                 Ok(()) => {}
                 Err(e) => {
                     eprintln!("エラー: {}", e);
