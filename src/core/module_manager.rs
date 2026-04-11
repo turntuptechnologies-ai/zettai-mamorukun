@@ -1,7 +1,9 @@
 //! モジュールマネージャー — モジュールのライフサイクルを一括管理する
 
+use crate::config::ModuleWatchdogConfig;
 use crate::config::ModulesConfig;
 use crate::core::event::EventBus;
+use crate::core::event::{SecurityEvent, Severity};
 use crate::modules::abstract_socket_monitor::AbstractSocketMonitorModule;
 use crate::modules::at_job_monitor::AtJobMonitorModule;
 use crate::modules::auditd_monitor::AuditdMonitorModule;
@@ -74,6 +76,7 @@ use crate::modules::user_account::UserAccountModule;
 use crate::modules::xattr_monitor::XattrMonitorModule;
 use crate::modules::{InitialScanResult, Module};
 use std::time::{Duration, Instant};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 /// モジュールレジストリ — 全モジュールの一元管理
@@ -161,6 +164,24 @@ struct RunningModule {
     name: String,
     /// キャンセルトークン（停止用）
     cancel_token: CancellationToken,
+    /// タスクハンドル（死活監視用）
+    join_handle: JoinHandle<()>,
+    /// 再起動回数
+    restart_count: u32,
+    /// 最後の再起動時刻
+    last_restart: Option<Instant>,
+}
+
+/// ウォッチドッグレポート
+pub struct WatchdogReport {
+    /// 異常停止を検知したモジュール名
+    pub crashed: Vec<String>,
+    /// 再起動に成功したモジュール名
+    pub restarted: Vec<String>,
+    /// 再起動上限に達したモジュール名
+    pub restart_limit_reached: Vec<String>,
+    /// クールダウン中でスキップしたモジュール名
+    pub cooldown_skipped: Vec<String>,
 }
 
 /// 起動時スキャン全体のレポート
@@ -223,11 +244,14 @@ macro_rules! start_module {
 
                     let cancel_token = module.cancel_token();
                     match module.start().await {
-                        Ok(()) => {
+                        Ok(handle) => {
                             tracing::info!(concat!($label, "を起動しました"));
                             $modules.push(RunningModule {
                                 name: $label.to_string(),
                                 cancel_token,
+                                join_handle: handle,
+                                restart_count: 0,
+                                last_restart: None,
                             });
                         }
                         Err(e) => {
@@ -262,11 +286,14 @@ macro_rules! reload_module {
                     <$ModuleType>::new($new_config.$field.clone(), $event_bus.clone());
                 match module.init() {
                     Ok(()) => match module.start().await {
-                        Ok(()) => {
+                        Ok(handle) => {
                             tracing::info!(concat!($label, "を起動しました"));
                             $new_modules.push(RunningModule {
                                 name: $label.to_string(),
                                 cancel_token: module.cancel_token(),
+                                join_handle: handle,
+                                restart_count: 0,
+                                last_restart: None,
                             });
                             $result.started.push($label.to_string());
                         }
@@ -306,11 +333,14 @@ macro_rules! reload_module {
                         <$ModuleType>::new($new_config.$field.clone(), $event_bus.clone());
                     match module.init() {
                         Ok(()) => match module.start().await {
-                            Ok(()) => {
+                            Ok(handle) => {
                                 tracing::info!(concat!($label, "を再起動しました"));
                                 $new_modules.push(RunningModule {
                                     name: $label.to_string(),
                                     cancel_token: module.cancel_token(),
+                                    join_handle: handle,
+                                    restart_count: 0,
+                                    last_restart: None,
                                 });
                                 $result.restarted.push($label.to_string());
                             }
@@ -512,6 +542,187 @@ impl ModuleManager {
         }
 
         result
+    }
+
+    /// モジュール再起動情報を取得する（モジュール名 → 再起動回数）
+    pub fn module_restart_counts(&self) -> std::collections::HashMap<String, u32> {
+        self.running_modules
+            .iter()
+            .filter(|m| m.restart_count > 0)
+            .map(|m| (m.name.clone(), m.restart_count))
+            .collect()
+    }
+
+    /// モジュールのヘルスチェックを実行する
+    ///
+    /// 異常停止したモジュールを検知し、設定に応じて自動再起動を試みる。
+    pub async fn check_health(
+        &mut self,
+        config: &ModuleWatchdogConfig,
+        modules_config: &ModulesConfig,
+        event_bus: &Option<EventBus>,
+    ) -> WatchdogReport {
+        let mut report = WatchdogReport {
+            crashed: Vec::new(),
+            restarted: Vec::new(),
+            restart_limit_reached: Vec::new(),
+            cooldown_skipped: Vec::new(),
+        };
+
+        // 異常停止したモジュールのインデックスを収集（cancel されていないのに終了している）
+        let mut crashed_indices: Vec<usize> = Vec::new();
+        for (idx, module) in self.running_modules.iter().enumerate() {
+            if module.join_handle.is_finished() && !module.cancel_token.is_cancelled() {
+                crashed_indices.push(idx);
+            }
+        }
+
+        // 後方からインデックスを処理して remove
+        let mut crashed_modules: Vec<(String, u32, Option<Instant>)> = Vec::new();
+        for &idx in crashed_indices.iter().rev() {
+            let removed = self.running_modules.remove(idx);
+            report.crashed.push(removed.name.clone());
+
+            // セキュリティイベントを発行
+            if let Some(bus) = event_bus {
+                bus.publish(SecurityEvent::new(
+                    "module_crashed",
+                    Severity::Warning,
+                    "watchdog",
+                    format!("モジュールの異常停止を検知: {}", removed.name),
+                ));
+            }
+
+            crashed_modules.push((removed.name, removed.restart_count, removed.last_restart));
+        }
+
+        // 自動再起動処理
+        if config.auto_restart {
+            for (name, restart_count, last_restart) in crashed_modules {
+                // 再起動上限チェック
+                if restart_count >= config.max_restarts {
+                    tracing::error!(
+                        module = %name,
+                        restart_count = restart_count,
+                        max_restarts = config.max_restarts,
+                        "モジュールの再起動上限に達しました"
+                    );
+                    report.restart_limit_reached.push(name.clone());
+
+                    if let Some(bus) = event_bus {
+                        bus.publish(SecurityEvent::new(
+                            "module_restart_limit_reached",
+                            Severity::Critical,
+                            "watchdog",
+                            format!(
+                                "モジュール {} の再起動上限（{}回）に達しました",
+                                name, config.max_restarts
+                            ),
+                        ));
+                    }
+                    continue;
+                }
+
+                // クールダウンチェック
+                if let Some(last) = last_restart {
+                    let elapsed = last.elapsed();
+                    if elapsed < Duration::from_secs(config.restart_cooldown_secs) {
+                        tracing::info!(
+                            module = %name,
+                            remaining_secs = (Duration::from_secs(config.restart_cooldown_secs) - elapsed).as_secs(),
+                            "クールダウン中のため再起動をスキップします"
+                        );
+                        report.cooldown_skipped.push(name);
+                        continue;
+                    }
+                }
+
+                // 再起動を試みる
+                match Self::restart_module_by_name(&name, modules_config, event_bus).await {
+                    Some(mut running) => {
+                        running.restart_count = restart_count + 1;
+                        running.last_restart = Some(Instant::now());
+                        tracing::info!(
+                            module = %name,
+                            restart_count = running.restart_count,
+                            "モジュールを再起動しました"
+                        );
+                        report.restarted.push(name.clone());
+
+                        if let Some(bus) = event_bus {
+                            bus.publish(SecurityEvent::new(
+                                "module_restarted",
+                                Severity::Info,
+                                "watchdog",
+                                format!(
+                                    "モジュールを再起動しました: {} ({}回目)",
+                                    name, running.restart_count
+                                ),
+                            ));
+                        }
+
+                        self.running_modules.push(running);
+                    }
+                    None => {
+                        tracing::error!(
+                            module = %name,
+                            "モジュールの再起動に失敗しました"
+                        );
+                    }
+                }
+            }
+        }
+
+        report
+    }
+
+    /// 名前に基づいてモジュールを再起動する
+    async fn restart_module_by_name(
+        name: &str,
+        config: &ModulesConfig,
+        event_bus: &Option<EventBus>,
+    ) -> Option<RunningModule> {
+        /// モジュール再起動マクロ
+        macro_rules! try_restart {
+            ($name:expr, $config:expr, $event_bus:expr, $field:ident, $ModuleType:ty, $label:expr) => {
+                if $name == $label {
+                    let mut module =
+                        <$ModuleType>::new($config.$field.clone(), $event_bus.clone());
+                    match module.init() {
+                        Ok(()) => match module.start().await {
+                            Ok(handle) => {
+                                return Some(RunningModule {
+                                    name: $label.to_string(),
+                                    cancel_token: module.cancel_token(),
+                                    join_handle: handle,
+                                    restart_count: 0,
+                                    last_restart: None,
+                                });
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    error = %e,
+                                    concat!($label, "の再起動に失敗しました（start）")
+                                );
+                                return None;
+                            }
+                        },
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                concat!($label, "の再起動に失敗しました（init）")
+                            );
+                            return None;
+                        }
+                    }
+                }
+            };
+        }
+
+        for_each_module!(try_restart!(name, config, event_bus,));
+
+        tracing::warn!(module = %name, "不明なモジュール名のため再起動できません");
+        None
     }
 }
 
@@ -764,5 +975,51 @@ mod tests {
         let (_, report) = ModuleManager::start_modules(&config, &event_bus, true).await;
         // total_duration はゼロ以上
         assert!(report.total_duration.as_nanos() >= 0);
+    }
+
+    #[tokio::test]
+    async fn test_check_health_no_crash() {
+        // モジュールが正常動作中の場合、空のレポートを返す
+        let mut config = ModulesConfig::default();
+        config.dns_monitor.enabled = true;
+        let event_bus = None;
+        let (mut manager, _) = ModuleManager::start_modules(&config, &event_bus, false).await;
+        assert_eq!(manager.running_modules.len(), 1);
+
+        let watchdog_config = crate::config::ModuleWatchdogConfig::default();
+        let report = manager
+            .check_health(&watchdog_config, &config, &event_bus)
+            .await;
+        assert!(report.crashed.is_empty());
+        assert!(report.restarted.is_empty());
+        assert!(report.restart_limit_reached.is_empty());
+        assert!(report.cooldown_skipped.is_empty());
+
+        // モジュールは引き続き動作中
+        assert_eq!(manager.running_modules.len(), 1);
+        manager.stop_all();
+    }
+
+    #[test]
+    fn test_watchdog_report_structure() {
+        let report = WatchdogReport {
+            crashed: vec!["module_a".to_string()],
+            restarted: vec!["module_a".to_string()],
+            restart_limit_reached: vec![],
+            cooldown_skipped: vec![],
+        };
+        assert_eq!(report.crashed.len(), 1);
+        assert_eq!(report.restarted.len(), 1);
+        assert!(report.restart_limit_reached.is_empty());
+        assert!(report.cooldown_skipped.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_module_restart_counts_empty() {
+        let config = ModulesConfig::default();
+        let event_bus = None;
+        let (manager, _) = ModuleManager::start_modules(&config, &event_bus, false).await;
+        let counts = manager.module_restart_counts();
+        assert!(counts.is_empty());
     }
 }

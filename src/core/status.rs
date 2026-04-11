@@ -21,6 +21,9 @@ pub struct StatusResponse {
     pub modules: Vec<String>,
     /// メトリクスサマリー（メトリクスが無効の場合は None）
     pub metrics: Option<MetricsSummary>,
+    /// モジュール再起動情報（モジュール名 → 再起動回数）
+    #[serde(default)]
+    pub module_restarts: HashMap<String, u32>,
 }
 
 /// メトリクスサマリー
@@ -43,6 +46,7 @@ pub struct DaemonState {
     started_at: Instant,
     modules: Arc<Mutex<Vec<String>>>,
     shared_metrics: Option<Arc<Mutex<SharedMetrics>>>,
+    shared_module_restarts: Arc<Mutex<HashMap<String, u32>>>,
 }
 
 impl DaemonState {
@@ -50,11 +54,13 @@ impl DaemonState {
     pub fn new(
         modules: Arc<Mutex<Vec<String>>>,
         shared_metrics: Option<Arc<Mutex<SharedMetrics>>>,
+        shared_module_restarts: Arc<Mutex<HashMap<String, u32>>>,
     ) -> Self {
         Self {
             started_at: Instant::now(),
             modules,
             shared_metrics,
+            shared_module_restarts,
         }
     }
 
@@ -72,11 +78,14 @@ impl DaemonState {
                 module_counts: m.module_counts.clone(),
             }
         });
+        // unwrap safety: Mutex が poisoned になるのはパニック時のみ
+        let module_restarts = self.shared_module_restarts.lock().unwrap().clone();
         StatusResponse {
             version: env!("CARGO_PKG_VERSION").to_string(),
             uptime_secs: self.started_at.elapsed().as_secs(),
             modules,
             metrics,
+            module_restarts,
         }
     }
 }
@@ -231,6 +240,16 @@ pub fn print_status(response: &StatusResponse) {
         println!();
         println!("メトリクス: 無効");
     }
+
+    if !response.module_restarts.is_empty() {
+        println!();
+        println!("モジュール再起動:");
+        let mut restarts: Vec<_> = response.module_restarts.iter().collect();
+        restarts.sort_by_key(|(_, v)| std::cmp::Reverse(**v));
+        for (module, count) in restarts {
+            println!("  {}: {}回", module, count);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -253,6 +272,7 @@ mod tests {
                     ("module_b".to_string(), 17),
                 ]),
             }),
+            module_restarts: HashMap::new(),
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -275,6 +295,7 @@ mod tests {
             uptime_secs: 60,
             modules: vec![],
             metrics: None,
+            module_restarts: HashMap::new(),
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -298,7 +319,8 @@ mod tests {
             module_counts: HashMap::from([("module_a".to_string(), 10)]),
         }));
 
-        let state = DaemonState::new(modules, Some(shared_metrics));
+        let restarts = Arc::new(Mutex::new(HashMap::new()));
+        let state = DaemonState::new(modules, Some(shared_metrics), restarts);
         let response = state.to_response();
 
         assert_eq!(response.modules.len(), 2);
@@ -310,7 +332,8 @@ mod tests {
     #[test]
     fn test_daemon_state_to_response_without_metrics() {
         let modules = Arc::new(Mutex::new(vec![]));
-        let state = DaemonState::new(modules, None);
+        let restarts = Arc::new(Mutex::new(HashMap::new()));
+        let state = DaemonState::new(modules, None, restarts);
         let response = state.to_response();
 
         assert!(response.modules.is_empty());
@@ -330,6 +353,7 @@ mod tests {
                 critical_count: 5,
                 module_counts: HashMap::from([("module_a".to_string(), 100)]),
             }),
+            module_restarts: HashMap::new(),
         };
         // パニックしないことを確認
         print_status(&response);
@@ -342,6 +366,7 @@ mod tests {
             uptime_secs: 0,
             modules: vec![],
             metrics: None,
+            module_restarts: HashMap::new(),
         };
         // パニックしないことを確認
         print_status(&response);
@@ -361,7 +386,8 @@ mod tests {
             module_counts: HashMap::from([("test_module".to_string(), 5)]),
         }));
 
-        let state = DaemonState::new(modules, Some(shared_metrics));
+        let restarts = Arc::new(Mutex::new(HashMap::new()));
+        let state = DaemonState::new(modules, Some(shared_metrics), restarts);
         let server = StatusServer::new(&socket_path, state);
         let cancel_token = server.cancel_token();
         server.spawn().unwrap();

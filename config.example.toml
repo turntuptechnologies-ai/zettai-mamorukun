@@ -804,6 +804,19 @@ enabled = true
 # ハートビートのインターバル（秒）
 heartbeat_interval_secs = 60
 
+[module_watchdog]
+# モジュール死活監視（ウォッチドッグ）
+# モジュールの異常停止を検知し、自動再起動を行う
+enabled = true
+# ヘルスチェックインターバル（秒）
+check_interval_secs = 30
+# 異常停止時の自動再起動
+auto_restart = true
+# 最大再起動回数（超過すると再起動を停止しアラートのみ）
+max_restarts = 3
+# 再起動クールダウン（秒）— 前回の再起動からこの時間経過するまで再起動しない
+restart_cooldown_secs = 60
+
 [modules.kallsyms_monitor]
 # カーネルシンボルテーブル監視モジュール — /proc/kallsyms を監視しルートキットによるシンボル改ざんを検知
 enabled = false

@@ -457,7 +457,7 @@ impl Module for UserAccountModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         let passwd_path = self.config.passwd_path.clone();
         let group_path = self.config.group_path.clone();
         let scan_interval_secs = self.config.scan_interval_secs;
@@ -477,7 +477,7 @@ impl Module for UserAccountModule {
             "初回スナップショットを取得しました"
         );
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(scan_interval_secs));
             // 最初の tick は即座に発火するのでスキップ
@@ -505,7 +505,7 @@ impl Module for UserAccountModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {

@@ -509,7 +509,7 @@ impl Module for ProcessCmdlineMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         let compiled = CompiledPatterns::compile(&self.config)?;
 
         // ベースラインスナップショット
@@ -527,7 +527,7 @@ impl Module for ProcessCmdlineMonitorModule {
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             // ループ内でパターンを再コンパイル（config は clone 済み）
             let compiled = match CompiledPatterns::compile(&config) {
                 Ok(c) => c,
@@ -604,7 +604,7 @@ impl Module for ProcessCmdlineMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {

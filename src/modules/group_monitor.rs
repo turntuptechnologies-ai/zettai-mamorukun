@@ -474,7 +474,7 @@ impl Module for GroupMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         let group_path = self.config.group_path.clone();
         let gshadow_path = self.config.gshadow_path.clone();
         let interval_secs = self.config.interval_secs;
@@ -496,7 +496,7 @@ impl Module for GroupMonitorModule {
             "初回スナップショットを取得しました"
         );
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
             // 最初の tick は即座に発火するのでスキップ
             interval.tick().await;
@@ -528,7 +528,7 @@ impl Module for GroupMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {

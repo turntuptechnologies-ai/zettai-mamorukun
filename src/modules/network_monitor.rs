@@ -357,7 +357,7 @@ impl Module for NetworkMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         // 初回スキャンで動作確認
         let connections = Self::read_connections(self.config.enable_ipv6);
         tracing::info!(
@@ -375,7 +375,7 @@ impl Module for NetworkMonitorModule {
         // 既知の不審接続を記録し、同じ接続の繰り返し警告を抑制
         let mut known_suspicious: HashSet<(IpAddr, u16)> = HashSet::new();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
             // 最初の tick は即座に発火するのでスキップ
             interval.tick().await;
@@ -482,7 +482,7 @@ impl Module for NetworkMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn stop(&mut self) -> Result<(), AppError> {

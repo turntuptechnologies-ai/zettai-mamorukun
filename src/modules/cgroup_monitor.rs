@@ -329,7 +329,7 @@ impl Module for CgroupMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         let cgroup_path = self.config.cgroup_path.clone();
         let watch_files = self.config.watch_files.clone();
         let max_depth = self.config.max_depth;
@@ -343,7 +343,7 @@ impl Module for CgroupMonitorModule {
             "cgroup ベースラインスキャンが完了しました"
         );
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(scan_interval_secs));
             interval.tick().await;
@@ -376,7 +376,7 @@ impl Module for CgroupMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {

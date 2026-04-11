@@ -300,7 +300,7 @@ impl Module for InotifyMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         // 除外パターンをコンパイル
         let mut exclude_regexes = Vec::new();
         for pattern in &self.config.exclude_patterns {
@@ -352,7 +352,7 @@ impl Module for InotifyMonitorModule {
         let debounce_ms = self.config.debounce_ms;
         let exclude_regexes_clone = exclude_regexes;
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut buffer = vec![0u8; 4096];
             let mut debounce_map: HashMap<PathBuf, Instant> = HashMap::new();
             let debounce_duration = Duration::from_millis(debounce_ms);
@@ -448,7 +448,7 @@ impl Module for InotifyMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn stop(&mut self) -> Result<(), AppError> {

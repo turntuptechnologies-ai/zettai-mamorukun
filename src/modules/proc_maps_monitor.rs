@@ -366,7 +366,7 @@ impl Module for ProcMapsMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         let config = self.config.clone();
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
@@ -381,7 +381,7 @@ impl Module for ProcMapsMonitorModule {
         );
         Self::publish_findings(&initial_results, &event_bus);
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(config.scan_interval_secs));
             interval.tick().await;
@@ -404,7 +404,7 @@ impl Module for ProcMapsMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn stop(&mut self) -> Result<(), AppError> {

@@ -72,6 +72,7 @@ pub mod xattr_monitor;
 use crate::error::AppError;
 use std::collections::BTreeMap;
 use std::time::Duration;
+use tokio::task::JoinHandle;
 
 /// 起動時スキャン結果
 ///
@@ -104,7 +105,9 @@ pub trait Module: Send + Sync {
     fn init(&mut self) -> Result<(), AppError>;
 
     /// モジュールを開始する（監視を開始）
-    fn start(&mut self) -> impl std::future::Future<Output = Result<(), AppError>> + Send;
+    fn start(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<JoinHandle<()>, AppError>> + Send;
 
     /// モジュールを停止する（グレースフルシャットダウン）
     fn stop(&mut self) -> impl std::future::Future<Output = Result<(), AppError>> + Send;
@@ -136,8 +139,8 @@ mod tests {
             Ok(())
         }
 
-        async fn start(&mut self) -> Result<(), AppError> {
-            Ok(())
+        async fn start(&mut self) -> Result<JoinHandle<()>, AppError> {
+            Ok(tokio::spawn(async {}))
         }
 
         async fn stop(&mut self) -> Result<(), AppError> {

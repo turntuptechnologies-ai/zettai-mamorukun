@@ -267,7 +267,7 @@ impl Module for SshKeyMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         // 初回スキャンでベースライン作成
         let baseline = Self::scan_files(&self.config.watch_paths);
         let total_keys: usize = baseline.files.values().map(|s| s.key_count()).sum();
@@ -282,7 +282,7 @@ impl Module for SshKeyMonitorModule {
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(scan_interval_secs));
             // 最初の tick は即座に発火するのでスキップ
@@ -310,7 +310,7 @@ impl Module for SshKeyMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn stop(&mut self) -> Result<(), AppError> {

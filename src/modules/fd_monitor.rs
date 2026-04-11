@@ -244,7 +244,7 @@ impl Module for FdMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         let scan_interval_secs = self.config.scan_interval_secs;
         let max_fd_per_process = self.config.max_fd_per_process;
         let proc_path = self.config.proc_path.clone();
@@ -252,7 +252,7 @@ impl Module for FdMonitorModule {
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(scan_interval_secs));
             interval.tick().await;
@@ -278,7 +278,7 @@ impl Module for FdMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {

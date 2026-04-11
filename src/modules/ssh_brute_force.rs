@@ -94,7 +94,7 @@ impl Module for SshBruteForceModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         let auth_log_path = self.config.auth_log_path.clone();
         let interval_secs = self.config.interval_secs;
         let max_failures = self.config.max_failures;
@@ -102,7 +102,7 @@ impl Module for SshBruteForceModule {
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             // unwrap safety: このパターンは固定文字列リテラルであり、常に有効な正規表現
             let pattern = Regex::new(
                 r"Failed password for (?:invalid user )?(\S+) from (\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})"
@@ -226,7 +226,7 @@ impl Module for SshBruteForceModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn stop(&mut self) -> Result<(), AppError> {

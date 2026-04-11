@@ -393,7 +393,7 @@ impl Module for SecurityFilesMonitorModule {
         Ok(())
     }
 
-    async fn start(&mut self) -> Result<(), AppError> {
+    async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
         let baseline = Self::scan_files(&self.config.watch_paths);
         let total_lines: usize = baseline.files.values().map(|s| s.line_count()).sum();
         tracing::info!(
@@ -411,7 +411,7 @@ impl Module for SecurityFilesMonitorModule {
         let mut reported_dangers = HashSet::new();
         Self::check_dangerous_patterns(&watch_paths, &mut reported_dangers, &event_bus);
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(scan_interval_secs));
             interval.tick().await;
@@ -442,7 +442,7 @@ impl Module for SecurityFilesMonitorModule {
             }
         });
 
-        Ok(())
+        Ok(handle)
     }
 
     async fn stop(&mut self) -> Result<(), AppError> {
