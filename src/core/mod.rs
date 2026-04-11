@@ -12,3 +12,4 @@ pub mod module_manager;
 pub mod scan_diff;
 pub mod scan_state;
 pub mod status;
+pub mod syslog;

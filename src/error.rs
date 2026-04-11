@@ -75,4 +75,8 @@ pub enum AppError {
     /// 相関分析エンジンエラー
     #[error("相関分析エンジンエラー: {message}")]
     CorrelationEngine { message: String },
+
+    /// Syslog 転送エラー
+    #[error("Syslog 転送エラー: {message}")]
+    SyslogForward { message: String },
 }
