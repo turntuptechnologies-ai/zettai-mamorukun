@@ -1,17 +1,20 @@
 //! ファイル整合性監視モジュール
 //!
 //! 指定されたパスのファイルを定期的にスキャンし、
-//! SHA-256 ハッシュを用いて変更・追加・削除を検知する。
+//! SHA-256 ハッシュまたは HMAC-SHA256 署名を用いて変更・追加・削除を検知する。
 
 use crate::config::FileIntegrityConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
+use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 use walkdir::WalkDir;
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// ファイル変更レポート
 struct ChangeReport {
@@ -53,12 +56,12 @@ impl FileIntegrityModule {
         self.cancel_token.clone()
     }
 
-    /// 監視対象パスをスキャンし、各ファイルの SHA-256 ハッシュを返す
-    fn scan_files(watch_paths: &[PathBuf]) -> HashMap<PathBuf, String> {
+    /// 監視対象パスをスキャンし、各ファイルのハッシュを返す
+    fn scan_files(watch_paths: &[PathBuf], hmac_key: Option<&[u8]>) -> HashMap<PathBuf, String> {
         let mut result = HashMap::new();
         for path in watch_paths {
             if path.is_file() {
-                match compute_hash(path) {
+                match compute_hash(path, hmac_key) {
                     Ok(hash) => {
                         result.insert(path.clone(), hash);
                     }
@@ -71,7 +74,7 @@ impl FileIntegrityModule {
                     match entry {
                         Ok(entry) if entry.file_type().is_file() => {
                             let file_path = entry.into_path();
-                            match compute_hash(&file_path) {
+                            match compute_hash(&file_path, hmac_key) {
                                 Ok(hash) => {
                                     result.insert(file_path, hash);
                                 }
@@ -126,16 +129,31 @@ impl FileIntegrityModule {
     }
 }
 
-/// ファイルの SHA-256 ハッシュを計算する
-fn compute_hash(path: &PathBuf) -> Result<String, AppError> {
+/// ファイルのハッシュを計算する
+///
+/// `hmac_key` が指定されている場合は HMAC-SHA256、未指定の場合は SHA-256 を使用する。
+fn compute_hash(path: &PathBuf, hmac_key: Option<&[u8]>) -> Result<String, AppError> {
     let data = std::fs::read(path).map_err(|e| AppError::FileIo {
         path: path.clone(),
         source: e,
     })?;
-    let mut hasher = Sha256::new();
-    hasher.update(&data);
-    let hash = hasher.finalize();
-    Ok(format!("{:x}", hash))
+
+    match hmac_key {
+        Some(key) => {
+            let mut mac = HmacSha256::new_from_slice(key).map_err(|e| AppError::ModuleConfig {
+                message: format!("HMAC キーの初期化に失敗しました: {e}"),
+            })?;
+            mac.update(&data);
+            let result = mac.finalize();
+            Ok(format!("{:x}", result.into_bytes()))
+        }
+        None => {
+            let mut hasher = Sha256::new();
+            hasher.update(&data);
+            let hash = hasher.finalize();
+            Ok(format!("{:x}", hash))
+        }
+    }
 }
 
 impl Module for FileIntegrityModule {
@@ -148,6 +166,16 @@ impl Module for FileIntegrityModule {
             return Err(AppError::ModuleConfig {
                 message: "scan_interval_secs は 0 より大きい値を指定してください".to_string(),
             });
+        }
+
+        if let Some(ref key) = self.config.hmac_key {
+            if key.len() < 32 {
+                tracing::warn!(
+                    key_length = key.len(),
+                    "HMAC キーが短すぎます（推奨: 32 バイト以上）。セキュリティが低下する可能性があります"
+                );
+            }
+            tracing::info!("HMAC-SHA256 モードで動作します");
         }
 
         // パストラバーサル防止: canonicalize でパスを正規化
@@ -169,6 +197,7 @@ impl Module for FileIntegrityModule {
         tracing::info!(
             watch_paths = ?self.config.watch_paths,
             scan_interval_secs = self.config.scan_interval_secs,
+            hmac_enabled = self.config.hmac_key.is_some(),
             "ファイル整合性監視モジュールを初期化しました"
         );
 
@@ -176,8 +205,10 @@ impl Module for FileIntegrityModule {
     }
 
     async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
+        let hmac_key_bytes = self.config.hmac_key.as_ref().map(|k| k.as_bytes().to_vec());
+
         // 初回スキャンでベースライン作成
-        let baseline = Self::scan_files(&self.config.watch_paths);
+        let baseline = Self::scan_files(&self.config.watch_paths, hmac_key_bytes.as_deref());
         tracing::info!(
             file_count = baseline.len(),
             "ベースラインスキャンが完了しました"
@@ -208,7 +239,7 @@ impl Module for FileIntegrityModule {
                         break;
                     }
                     _ = interval.tick() => {
-                        let current = FileIntegrityModule::scan_files(&watch_paths);
+                        let current = FileIntegrityModule::scan_files(&watch_paths, hmac_key_bytes.as_deref());
                         let report = FileIntegrityModule::detect_changes(&baseline, &current);
 
                         if report.has_changes() {
@@ -269,7 +300,8 @@ impl Module for FileIntegrityModule {
 
     async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {
         let start = std::time::Instant::now();
-        let files = Self::scan_files(&self.config.watch_paths);
+        let hmac_key_bytes = self.config.hmac_key.as_ref().map(|k| k.as_bytes().to_vec());
+        let files = Self::scan_files(&self.config.watch_paths, hmac_key_bytes.as_deref());
         let items_scanned = files.len();
         let snapshot: BTreeMap<String, String> = files
             .iter()
@@ -301,7 +333,7 @@ mod tests {
     fn test_compute_hash() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
         write!(tmpfile, "hello world").unwrap();
-        let hash = compute_hash(&tmpfile.path().to_path_buf()).unwrap();
+        let hash = compute_hash(&tmpfile.path().to_path_buf(), None).unwrap();
         // SHA-256 of "hello world"
         assert_eq!(
             hash,
@@ -310,8 +342,43 @@ mod tests {
     }
 
     #[test]
+    fn test_compute_hash_hmac() {
+        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+        write!(tmpfile, "hello world").unwrap();
+        let key = b"supersecretkey-for-hmac-testing!!";
+        let hash = compute_hash(&tmpfile.path().to_path_buf(), Some(key)).unwrap();
+        // HMAC-SHA256 should differ from plain SHA-256
+        assert_ne!(
+            hash,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
+        assert_eq!(hash.len(), 64);
+    }
+
+    #[test]
+    fn test_compute_hash_hmac_deterministic() {
+        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+        write!(tmpfile, "hello world").unwrap();
+        let key = b"test-key-1234567890123456789012";
+        let hash1 = compute_hash(&tmpfile.path().to_path_buf(), Some(key)).unwrap();
+        let hash2 = compute_hash(&tmpfile.path().to_path_buf(), Some(key)).unwrap();
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_compute_hash_different_keys_different_hashes() {
+        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+        write!(tmpfile, "hello world").unwrap();
+        let key1 = b"key-aaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let key2 = b"key-bbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let hash1 = compute_hash(&tmpfile.path().to_path_buf(), Some(key1)).unwrap();
+        let hash2 = compute_hash(&tmpfile.path().to_path_buf(), Some(key2)).unwrap();
+        assert_ne!(hash1, hash2);
+    }
+
+    #[test]
     fn test_compute_hash_nonexistent_file() {
-        let result = compute_hash(&PathBuf::from("/tmp/nonexistent-file-zettai-test"));
+        let result = compute_hash(&PathBuf::from("/tmp/nonexistent-file-zettai-test"), None);
         assert!(result.is_err());
     }
 
@@ -324,10 +391,26 @@ mod tests {
         std::fs::write(&file2, "content b").unwrap();
 
         let watch_paths = vec![dir.path().to_path_buf()];
-        let result = FileIntegrityModule::scan_files(&watch_paths);
+        let result = FileIntegrityModule::scan_files(&watch_paths, None);
         assert_eq!(result.len(), 2);
         assert!(result.contains_key(&file1));
         assert!(result.contains_key(&file2));
+    }
+
+    #[test]
+    fn test_scan_files_with_hmac_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let file1 = dir.path().join("a.txt");
+        std::fs::write(&file1, "content a").unwrap();
+
+        let watch_paths = vec![dir.path().to_path_buf()];
+        let result_plain = FileIntegrityModule::scan_files(&watch_paths, None);
+        let result_hmac =
+            FileIntegrityModule::scan_files(&watch_paths, Some(b"hmac-test-key-1234567890123456"));
+
+        let hash_plain = result_plain.get(&file1).unwrap();
+        let hash_hmac = result_hmac.get(&file1).unwrap();
+        assert_ne!(hash_plain, hash_hmac);
     }
 
     #[test]
@@ -337,7 +420,7 @@ mod tests {
         let path = tmpfile.path().to_path_buf();
 
         let watch_paths = vec![path.clone()];
-        let result = FileIntegrityModule::scan_files(&watch_paths);
+        let result = FileIntegrityModule::scan_files(&watch_paths, None);
         assert_eq!(result.len(), 1);
         assert!(result.contains_key(&path));
     }
@@ -396,6 +479,7 @@ mod tests {
             enabled: true,
             scan_interval_secs: 0,
             watch_paths: vec![],
+            hmac_key: None,
         };
         let mut module = FileIntegrityModule::new(config, None);
         let result = module.init();
@@ -408,6 +492,7 @@ mod tests {
             enabled: true,
             scan_interval_secs: 300,
             watch_paths: vec![PathBuf::from("/nonexistent-path-zettai-test")],
+            hmac_key: None,
         };
         let mut module = FileIntegrityModule::new(config, None);
         // Should succeed but skip the nonexistent path
@@ -428,6 +513,7 @@ mod tests {
             enabled: true,
             scan_interval_secs: 300,
             watch_paths: vec![non_canonical],
+            hmac_key: None,
         };
         let mut module = FileIntegrityModule::new(config, None);
         let result = module.init();
@@ -441,7 +527,7 @@ mod tests {
     #[test]
     fn test_scan_files_empty_watch_paths() {
         let watch_paths: Vec<PathBuf> = vec![];
-        let result = FileIntegrityModule::scan_files(&watch_paths);
+        let result = FileIntegrityModule::scan_files(&watch_paths, None);
         assert!(result.is_empty());
     }
 
@@ -461,7 +547,7 @@ mod tests {
         std::os::unix::fs::symlink(&target_file, &link_path).unwrap();
 
         let watch_paths = vec![dir.path().to_path_buf()];
-        let result = FileIntegrityModule::scan_files(&watch_paths);
+        let result = FileIntegrityModule::scan_files(&watch_paths, None);
 
         // real.txt は含まれるが、シンボリックリンクは follow_links(false) のため
         // WalkDir がシンボリックリンクのファイルタイプを symlink として報告し、
@@ -484,7 +570,7 @@ mod tests {
         std::fs::write(&file_sub2, "sub2").unwrap();
 
         let watch_paths = vec![dir.path().to_path_buf()];
-        let result = FileIntegrityModule::scan_files(&watch_paths);
+        let result = FileIntegrityModule::scan_files(&watch_paths, None);
         assert_eq!(result.len(), 3);
         assert!(result.contains_key(&file_root));
         assert!(result.contains_key(&file_sub1));
@@ -497,6 +583,7 @@ mod tests {
             enabled: true,
             scan_interval_secs: 300,
             watch_paths: vec![],
+            hmac_key: None,
         };
         let mut module = FileIntegrityModule::new(config, None);
         let result = module.init();
@@ -514,6 +601,7 @@ mod tests {
             enabled: true,
             scan_interval_secs: 3600,
             watch_paths: vec![dir.path().to_path_buf()],
+            hmac_key: None,
         };
         let mut module = FileIntegrityModule::new(config, None);
         module.init().unwrap();
@@ -523,6 +611,28 @@ mod tests {
 
         // start() が成功すればベースラインスキャンが完了している
         // stop() でクリーンに停止できることを確認
+        module.stop().await.unwrap();
+        assert!(cancel_token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_start_with_hmac_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let file1 = dir.path().join("a.txt");
+        std::fs::write(&file1, "content a").unwrap();
+
+        let config = FileIntegrityConfig {
+            enabled: true,
+            scan_interval_secs: 3600,
+            watch_paths: vec![dir.path().to_path_buf()],
+            hmac_key: Some("test-hmac-key-for-start-test-1234".to_string()),
+        };
+        let mut module = FileIntegrityModule::new(config, None);
+        module.init().unwrap();
+
+        let cancel_token = module.cancel_token();
+        module.start().await.unwrap();
+
         module.stop().await.unwrap();
         assert!(cancel_token.is_cancelled());
     }
@@ -565,6 +675,7 @@ mod tests {
             enabled: true,
             scan_interval_secs: 300,
             watch_paths: vec![dir.path().to_path_buf()],
+            hmac_key: None,
         };
         let mut module = FileIntegrityModule::new(config, None);
         assert!(module.init().is_ok());
@@ -577,6 +688,7 @@ mod tests {
             enabled: true,
             scan_interval_secs: 300,
             watch_paths: vec![dir.path().to_path_buf()],
+            hmac_key: None,
         };
         let bus = EventBus::new(16);
         let mut module = FileIntegrityModule::new(config, Some(bus));
@@ -595,6 +707,7 @@ mod tests {
             enabled: true,
             scan_interval_secs: 300,
             watch_paths: vec![dir.path().to_path_buf()],
+            hmac_key: None,
         };
         let mut module = FileIntegrityModule::new(config, None);
         module.init().unwrap();
@@ -606,16 +719,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_initial_scan_with_hmac() {
+        let dir = tempfile::tempdir().unwrap();
+        let file1 = dir.path().join("a.txt");
+        std::fs::write(&file1, "content a").unwrap();
+
+        let config_plain = FileIntegrityConfig {
+            enabled: true,
+            scan_interval_secs: 300,
+            watch_paths: vec![dir.path().to_path_buf()],
+            hmac_key: None,
+        };
+        let mut module_plain = FileIntegrityModule::new(config_plain, None);
+        module_plain.init().unwrap();
+        let result_plain = module_plain.initial_scan().await.unwrap();
+
+        let config_hmac = FileIntegrityConfig {
+            enabled: true,
+            scan_interval_secs: 300,
+            watch_paths: vec![dir.path().to_path_buf()],
+            hmac_key: Some("test-key-for-initial-scan-12345678".to_string()),
+        };
+        let mut module_hmac = FileIntegrityModule::new(config_hmac, None);
+        module_hmac.init().unwrap();
+        let result_hmac = module_hmac.initial_scan().await.unwrap();
+
+        assert_eq!(result_plain.items_scanned, result_hmac.items_scanned);
+        // ハッシュ値は異なるはず
+        let plain_hashes: Vec<&String> = result_plain.snapshot.values().collect();
+        let hmac_hashes: Vec<&String> = result_hmac.snapshot.values().collect();
+        assert_ne!(plain_hashes, hmac_hashes);
+    }
+
+    #[tokio::test]
     async fn test_initial_scan_empty() {
         let config = FileIntegrityConfig {
             enabled: true,
             scan_interval_secs: 300,
             watch_paths: vec![],
+            hmac_key: None,
         };
         let module = FileIntegrityModule::new(config, None);
 
         let result = module.initial_scan().await.unwrap();
         assert_eq!(result.items_scanned, 0);
         assert_eq!(result.issues_found, 0);
+    }
+
+    #[test]
+    fn test_init_with_hmac_key() {
+        let config = FileIntegrityConfig {
+            enabled: true,
+            scan_interval_secs: 300,
+            watch_paths: vec![],
+            hmac_key: Some("a-very-long-hmac-key-that-is-at-least-32-bytes".to_string()),
+        };
+        let mut module = FileIntegrityModule::new(config, None);
+        assert!(module.init().is_ok());
+    }
+
+    #[test]
+    fn test_init_with_short_hmac_key() {
+        let config = FileIntegrityConfig {
+            enabled: true,
+            scan_interval_secs: 300,
+            watch_paths: vec![],
+            hmac_key: Some("short".to_string()),
+        };
+        let mut module = FileIntegrityModule::new(config, None);
+        // Should succeed but emit a warning (can't easily test the warning log)
+        assert!(module.init().is_ok());
     }
 }
