@@ -3013,6 +3013,14 @@ pub struct SyslogTlsConfig {
     /// ホスト名検証の有効/無効（デフォルト: true）
     #[serde(default = "SyslogTlsConfig::default_verify_hostname")]
     pub verify_hostname: bool,
+
+    /// クライアント証明書ファイルパス（PEM 形式、mTLS 用）
+    #[serde(default)]
+    pub client_cert_path: Option<String>,
+
+    /// クライアント秘密鍵ファイルパス（PEM 形式、mTLS 用）
+    #[serde(default)]
+    pub client_key_path: Option<String>,
 }
 
 impl SyslogTlsConfig {
@@ -3026,6 +3034,8 @@ impl Default for SyslogTlsConfig {
         Self {
             ca_cert_path: None,
             verify_hostname: true,
+            client_cert_path: None,
+            client_key_path: None,
         }
     }
 }
