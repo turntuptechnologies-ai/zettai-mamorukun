@@ -9,6 +9,7 @@ use zettai_mamorukun::core::event_store;
 use zettai_mamorukun::core::event_stream;
 use zettai_mamorukun::core::status;
 use zettai_mamorukun::error::AppError;
+use zettai_mamorukun::profile::{self, ProfileKind};
 
 /// サイバー攻撃防御デーモン
 #[derive(Parser)]
@@ -55,6 +56,21 @@ enum Commands {
         /// JSON 形式で出力
         #[arg(long)]
         json: bool,
+    },
+    /// サーバロール別の設定プロファイルから設定ファイルを生成する
+    Init {
+        /// プロファイル名 (minimal, webserver, database, full)
+        #[arg(long, value_name = "PROFILE")]
+        profile: Option<String>,
+        /// 利用可能なプロファイル一覧を表示する
+        #[arg(long)]
+        list_profiles: bool,
+        /// 出力先ファイルパス
+        #[arg(long, default_value = "./config.toml", value_name = "PATH")]
+        output: PathBuf,
+        /// 既存ファイルを上書きする
+        #[arg(long)]
+        force: bool,
     },
     /// イベントストアの統計サマリーを表示する
     EventStats {
@@ -175,6 +191,83 @@ fn init_logging(log_level: &str, journald_enabled: bool) {
         .with(fmt_layer)
         .with(journald_layer)
         .init();
+}
+
+/// 設定プロファイルから設定ファイルを生成する
+fn run_init(profile_name: Option<&str>, list_profiles: bool, output: &Path, force: bool) {
+    if list_profiles {
+        eprintln!("利用可能なプロファイル:\n");
+        for p in ProfileKind::all_profiles() {
+            eprintln!(
+                "  {:<12} {} （約 {} モジュール）",
+                p.name, p.description, p.module_count
+            );
+        }
+        return;
+    }
+
+    let Some(name) = profile_name else {
+        eprintln!("エラー: --profile または --list-profiles を指定してください");
+        eprintln!("  例: zettai-mamorukun init --profile minimal");
+        eprintln!("  プロファイル一覧: zettai-mamorukun init --list-profiles");
+        process::exit(1);
+    };
+
+    let Some(kind) = ProfileKind::from_name(name) else {
+        eprintln!("エラー: 不明なプロファイルです: {}", name);
+        eprintln!("利用可能なプロファイル:");
+        for p in ProfileKind::all_profiles() {
+            eprintln!("  {:<12} {}", p.name, p.description);
+        }
+        process::exit(1);
+    };
+
+    // 既存ファイルチェック
+    if output.exists() && !force {
+        eprintln!("エラー: ファイルが既に存在します: {}", output.display());
+        eprintln!("  上書きするには --force を指定してください");
+        process::exit(1);
+    }
+
+    // 出力先ディレクトリの存在チェック
+    if let Some(parent) = output.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        eprintln!(
+            "エラー: 出力先ディレクトリが存在しません: {}",
+            parent.display()
+        );
+        process::exit(1);
+    }
+
+    // TOML 生成
+    let toml_str = match profile::generate_config_toml(kind) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("エラー: 設定ファイルの生成に失敗しました: {}", e);
+            process::exit(1);
+        }
+    };
+
+    // ファイル書き込み
+    if let Err(e) = std::fs::write(output, &toml_str) {
+        eprintln!(
+            "エラー: ファイルの書き込みに失敗しました ({}): {}",
+            output.display(),
+            e
+        );
+        process::exit(1);
+    }
+
+    let config = kind.build_config();
+    let enabled = config.count_enabled_modules();
+    eprintln!(
+        "設定ファイルを生成しました: {} （プロファイル: {}, 有効モジュール: {} 個）",
+        output.display(),
+        kind,
+        enabled,
+    );
 }
 
 /// 設定ファイルをチェックし、結果を表示する
@@ -932,6 +1025,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     process::exit(2);
                 }
             }
+            return Ok(());
+        }
+        Some(Commands::Init {
+            profile,
+            list_profiles,
+            output,
+            force,
+        }) => {
+            run_init(profile.as_deref(), *list_profiles, output, *force);
             return Ok(());
         }
         None => {}
