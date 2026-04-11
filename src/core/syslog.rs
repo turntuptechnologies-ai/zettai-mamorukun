@@ -1,21 +1,34 @@
-//! Syslog イベント転送 — RFC 5424 形式で外部 SIEM に SecurityEvent を転送
+//! Syslog イベント転送 — RFC 5424 / RFC 5425 形式で外部 SIEM に SecurityEvent を転送
 
 use crate::config::SyslogConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
+use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::{broadcast, watch};
+use tokio_rustls::TlsConnector;
+use tokio_rustls::rustls;
 
 /// ホットリロード対象のランタイム設定
 #[derive(Debug, Clone)]
 pub struct SyslogRuntimeConfig {
+    /// プロトコル（"udp", "tcp", "tls"）
     pub protocol: String,
+    /// Syslog サーバのアドレス
     pub server: String,
+    /// Syslog サーバのポート
     pub port: u16,
+    /// Syslog facility
     pub facility: String,
+    /// ホスト名
     pub hostname: String,
+    /// アプリケーション名
     pub app_name: String,
+    /// TLS CA 証明書ファイルパス（PEM 形式）
+    pub tls_ca_cert_path: Option<String>,
+    /// TLS ホスト名検証の有効/無効
+    pub tls_verify_hostname: bool,
 }
 
 impl From<&SyslogConfig> for SyslogRuntimeConfig {
@@ -27,6 +40,8 @@ impl From<&SyslogConfig> for SyslogRuntimeConfig {
             facility: config.facility.clone(),
             hostname: config.hostname.clone(),
             app_name: config.app_name.clone(),
+            tls_ca_cert_path: config.tls.ca_cert_path.clone(),
+            tls_verify_hostname: config.tls.verify_hostname,
         }
     }
 }
@@ -103,7 +118,9 @@ impl SyslogForwarder {
                             let new_config = config_receiver.borrow_and_update().clone();
                             let needs_reconnect = new_config.protocol != runtime.protocol
                                 || new_config.server != runtime.server
-                                || new_config.port != runtime.port;
+                                || new_config.port != runtime.port
+                                || new_config.tls_ca_cert_path != runtime.tls_ca_cert_path
+                                || new_config.tls_verify_hostname != runtime.tls_verify_hostname;
                             runtime = new_config;
                             if needs_reconnect {
                                 tracing::info!(
@@ -261,10 +278,110 @@ fn sd_escape(s: &str) -> String {
         .replace(']', "\\]")
 }
 
-/// トランスポート層（UDP / TCP）
+/// TLS クライアント設定を構築する
+fn build_tls_config(config: &SyslogRuntimeConfig) -> Result<rustls::ClientConfig, String> {
+    // CryptoProvider がまだインストールされていなければ ring を設定
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let mut root_store = rustls::RootCertStore::empty();
+
+    if let Some(ref ca_path) = config.tls_ca_cert_path {
+        let pem_data = std::fs::read(ca_path)
+            .map_err(|e| format!("CA 証明書ファイルの読み込みに失敗: {}: {}", ca_path, e))?;
+        let mut cursor = std::io::Cursor::new(pem_data);
+        let certs = rustls_pemfile::certs(&mut cursor)
+            .filter_map(|r| r.ok())
+            .collect::<Vec<_>>();
+        if certs.is_empty() {
+            return Err(format!(
+                "CA 証明書ファイルに有効な証明書が見つかりません: {}",
+                ca_path
+            ));
+        }
+        for cert in certs {
+            root_store
+                .add(cert)
+                .map_err(|e| format!("CA 証明書の追加に失敗: {}", e))?;
+        }
+    } else {
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    }
+
+    if config.tls_verify_hostname {
+        rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth()
+            .pipe(Ok)
+    } else {
+        tracing::warn!(
+            "Syslog TLS: ホスト名検証が無効です。本番環境では有効にすることを推奨します"
+        );
+        let config = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoVerifier))
+            .with_no_client_auth();
+        Ok(config)
+    }
+}
+
+/// ホスト名検証をスキップするカスタム証明書検証器
+///
+/// CA 証明書による署名検証は行わず、サーバ証明書の SAN/CN とホスト名の一致も検証しない。
+/// 自己署名証明書を使用するテスト環境等での利用を想定。
+#[derive(Debug)]
+struct NoVerifier;
+
+impl rustls::client::danger::ServerCertVerifier for NoVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls_pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls_pki_types::CertificateDer<'_>],
+        _server_name: &rustls_pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls_pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls_pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls_pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+/// パイプライン演算子的なヘルパートレイト
+trait Pipe: Sized {
+    fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T {
+        f(self)
+    }
+}
+
+impl<T> Pipe for T {}
+
+/// トランスポート層（UDP / TCP / TLS）
 enum Transport {
     Udp(UdpSocket),
     Tcp(TcpStream),
+    Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
     Disconnected,
 }
 
@@ -308,6 +425,47 @@ impl Transport {
                     Transport::Disconnected
                 }
             },
+            "tls" => {
+                let tls_config = match build_tls_config(config) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Syslog: TLS 設定の構築に失敗しました");
+                        return Transport::Disconnected;
+                    }
+                };
+                let connector = TlsConnector::from(Arc::new(tls_config));
+                let tcp_stream = match TcpStream::connect(&addr).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(error = %e, addr = %addr, "Syslog: TLS 用 TCP 接続に失敗しました");
+                        return Transport::Disconnected;
+                    }
+                };
+                let server_name = match rustls_pki_types::ServerName::try_from(
+                    config.server.clone(),
+                ) {
+                    Ok(name) => name,
+                    Err(e) => {
+                        tracing::warn!(error = %e, server = %config.server, "Syslog: サーバ名の解析に失敗しました");
+                        return Transport::Disconnected;
+                    }
+                };
+                match connector.connect(server_name, tcp_stream).await {
+                    Ok(tls_stream) => {
+                        tracing::info!(
+                            protocol = "tls",
+                            server = %config.server,
+                            port = config.port,
+                            "Syslog: TLS 接続を確立しました"
+                        );
+                        Transport::Tls(Box::new(tls_stream))
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Syslog: TLS ハンドシェイクに失敗しました");
+                        Transport::Disconnected
+                    }
+                }
+            }
             _ => {
                 tracing::error!(protocol = %config.protocol, "Syslog: 不明なプロトコル");
                 Transport::Disconnected
@@ -332,6 +490,14 @@ impl Transport {
                     .map_err(|e| format!("TCP 送信エラー: {}", e))?;
                 Ok(())
             }
+            Transport::Tls(stream) => {
+                let framed = format!("{}\n", message);
+                stream
+                    .write_all(framed.as_bytes())
+                    .await
+                    .map_err(|e| format!("TLS 送信エラー: {}", e))?;
+                Ok(())
+            }
             Transport::Disconnected => {
                 *self = Self::connect(config).await;
                 match self {
@@ -350,6 +516,14 @@ impl Transport {
                             .map_err(|e| format!("TCP 送信エラー（再接続後）: {}", e))?;
                         Ok(())
                     }
+                    Transport::Tls(stream) => {
+                        let framed = format!("{}\n", message);
+                        stream
+                            .write_all(framed.as_bytes())
+                            .await
+                            .map_err(|e| format!("TLS 送信エラー（再接続後）: {}", e))?;
+                        Ok(())
+                    }
                     Transport::Disconnected => {
                         Err("Syslog サーバへの接続に失敗しました".to_string())
                     }
@@ -362,6 +536,7 @@ impl Transport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::SyslogTlsConfig;
 
     #[test]
     fn test_facility_code() {
@@ -415,6 +590,8 @@ mod tests {
             facility: "local0".to_string(),
             hostname: "test-host".to_string(),
             app_name: "zettai-mamorukun".to_string(),
+            tls_ca_cert_path: None,
+            tls_verify_hostname: true,
         };
 
         let msg = format_rfc5424(&event, &config);
@@ -445,6 +622,8 @@ mod tests {
             facility: "auth".to_string(),
             hostname: "prod-server".to_string(),
             app_name: "zettai-mamorukun".to_string(),
+            tls_ca_cert_path: None,
+            tls_verify_hostname: true,
         };
 
         let msg = format_rfc5424(&event, &config);
@@ -464,6 +643,8 @@ mod tests {
             facility: "local0".to_string(),
             hostname: "host".to_string(),
             app_name: "app".to_string(),
+            tls_ca_cert_path: None,
+            tls_verify_hostname: true,
         };
 
         let msg = format_rfc5424(&event, &config);
@@ -508,6 +689,7 @@ mod tests {
             facility: "auth".to_string(),
             hostname: "my-server".to_string(),
             app_name: "test-app".to_string(),
+            tls: SyslogTlsConfig::default(),
         };
         let runtime = SyslogRuntimeConfig::from(&config);
         assert_eq!(runtime.protocol, "tcp");
@@ -516,6 +698,34 @@ mod tests {
         assert_eq!(runtime.facility, "auth");
         assert_eq!(runtime.hostname, "my-server");
         assert_eq!(runtime.app_name, "test-app");
+        assert!(runtime.tls_ca_cert_path.is_none());
+        assert!(runtime.tls_verify_hostname);
+    }
+
+    #[test]
+    fn test_syslog_runtime_config_from_syslog_config_with_tls() {
+        let config = SyslogConfig {
+            enabled: true,
+            protocol: "tls".to_string(),
+            server: "siem.example.com".to_string(),
+            port: 6514,
+            facility: "local0".to_string(),
+            hostname: "tls-host".to_string(),
+            app_name: "zettai-tls".to_string(),
+            tls: SyslogTlsConfig {
+                ca_cert_path: Some("/etc/ssl/ca.pem".to_string()),
+                verify_hostname: false,
+            },
+        };
+        let runtime = SyslogRuntimeConfig::from(&config);
+        assert_eq!(runtime.protocol, "tls");
+        assert_eq!(runtime.server, "siem.example.com");
+        assert_eq!(runtime.port, 6514);
+        assert_eq!(
+            runtime.tls_ca_cert_path,
+            Some("/etc/ssl/ca.pem".to_string())
+        );
+        assert!(!runtime.tls_verify_hostname);
     }
 
     #[test]
@@ -538,6 +748,7 @@ mod tests {
             facility: "local0".to_string(),
             hostname: "test".to_string(),
             app_name: "test".to_string(),
+            tls: SyslogTlsConfig::default(),
         };
         let bus = EventBus::new(16);
         let (forwarder, sender) = SyslogForwarder::new(&config, &bus);
@@ -564,6 +775,7 @@ mod tests {
             facility: "local0".to_string(),
             hostname: "test-host".to_string(),
             app_name: "zettai-test".to_string(),
+            tls: SyslogTlsConfig::default(),
         };
         let bus = EventBus::new(16);
         let (forwarder, _sender) = SyslogForwarder::new(&config, &bus);
@@ -612,6 +824,7 @@ mod tests {
             facility: "auth".to_string(),
             hostname: "tcp-test".to_string(),
             app_name: "zettai-tcp".to_string(),
+            tls: SyslogTlsConfig::default(),
         };
         let bus = EventBus::new(16);
         let (forwarder, _sender) = SyslogForwarder::new(&config, &bus);
@@ -668,6 +881,7 @@ mod tests {
             facility: "local0".to_string(),
             hostname: "reload-test".to_string(),
             app_name: "zettai-reload".to_string(),
+            tls: SyslogTlsConfig::default(),
         };
         let bus = EventBus::new(16);
         let (forwarder, sender) = SyslogForwarder::new(&config, &bus);
@@ -681,6 +895,8 @@ mod tests {
             facility: "auth".to_string(),
             hostname: "reload-test".to_string(),
             app_name: "zettai-reload".to_string(),
+            tls_ca_cert_path: None,
+            tls_verify_hostname: true,
         };
         sender.send(new_runtime).unwrap();
 
@@ -706,5 +922,125 @@ mod tests {
             }
             _ => panic!("リロード後の UDP メッセージを受信できませんでした"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_syslog_forwarder_receives_and_sends_tls() {
+        use rcgen::{CertificateParams, KeyPair};
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use tokio::net::TcpListener;
+        use tokio_rustls::TlsAcceptor;
+
+        // CryptoProvider を初期化
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        // 自己署名 CA 証明書とサーバ証明書を生成
+        let ca_key_pair = KeyPair::generate().unwrap();
+        let mut ca_params = CertificateParams::new(vec!["Test CA".to_string()]).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca_cert = ca_params.self_signed(&ca_key_pair).unwrap();
+
+        let server_key_pair = KeyPair::generate().unwrap();
+        let server_params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        let server_cert = server_params
+            .signed_by(&server_key_pair, &ca_cert, &ca_key_pair)
+            .unwrap();
+
+        // CA 証明書を一時ファイルに書き出す
+        let ca_pem = ca_cert.pem();
+        let ca_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(ca_file.path(), ca_pem.as_bytes()).unwrap();
+
+        // TLS サーバ設定
+        let server_cert_der = CertificateDer::from(server_cert.der().to_vec());
+        let server_key_der =
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(server_key_pair.serialize_der()));
+
+        let tls_server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![server_cert_der], server_key_der)
+            .unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(tls_server_config));
+
+        // ローカル TLS サーバを起動
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+
+        let accept_handle = tokio::spawn(async move {
+            let (tcp_stream, _) = listener.accept().await.unwrap();
+            let mut tls_stream = acceptor.accept(tcp_stream).await.unwrap();
+            let mut buf = [0u8; 4096];
+            let len = tokio::io::AsyncReadExt::read(&mut tls_stream, &mut buf)
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&buf[..len]).to_string()
+        });
+
+        // SyslogForwarder を TLS モードで起動
+        let config = SyslogConfig {
+            enabled: true,
+            protocol: "tls".to_string(),
+            server: "localhost".to_string(),
+            port: server_addr.port(),
+            facility: "local0".to_string(),
+            hostname: "tls-test-host".to_string(),
+            app_name: "zettai-tls-test".to_string(),
+            tls: SyslogTlsConfig {
+                ca_cert_path: Some(ca_file.path().to_string_lossy().into_owned()),
+                verify_hostname: true,
+            },
+        };
+        let bus = EventBus::new(16);
+        let (forwarder, _sender) = SyslogForwarder::new(&config, &bus);
+        forwarder.spawn();
+
+        // 接続確立を少し待つ
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // イベントを発行
+        bus.publish(SecurityEvent::new(
+            "tls_test_event",
+            Severity::Warning,
+            "tls_module",
+            "TLS テストメッセージ",
+        ));
+
+        // メッセージの受信を待つ
+        let received = tokio::time::timeout(std::time::Duration::from_secs(5), accept_handle)
+            .await
+            .expect("TLS メッセージ受信がタイムアウトしました")
+            .expect("TLS サーバタスクがパニックしました");
+
+        // PRI: local0(16)*8 + warning(4) = 132
+        assert!(
+            received.contains("<132>1 "),
+            "PRI 値が正しくありません: {}",
+            received
+        );
+        assert!(
+            received.contains("tls-test-host"),
+            "ホスト名が含まれていません: {}",
+            received
+        );
+        assert!(
+            received.contains("zettai-tls-test"),
+            "アプリ名が含まれていません: {}",
+            received
+        );
+        assert!(
+            received.contains("eventType=\"tls_test_event\""),
+            "イベントタイプが含まれていません: {}",
+            received
+        );
+        assert!(
+            received.contains("TLS テストメッセージ"),
+            "メッセージが含まれていません: {}",
+            received
+        );
+        assert!(
+            received.ends_with('\n'),
+            "改行で終わっていません: {}",
+            received
+        );
     }
 }

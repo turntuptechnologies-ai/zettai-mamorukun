@@ -710,7 +710,8 @@ enabled = false
 # Syslog 転送（RFC 5424 形式）の有効/無効
 # 有効にすると SecurityEvent を外部 Syslog サーバ（SIEM 等）に転送する
 enabled = false
-# プロトコル（"udp" or "tcp"）
+# プロトコル（"udp", "tcp", or "tls"）
+# TLS を指定すると RFC 5425 形式の暗号化ログ転送を行う
 protocol = "udp"
 # Syslog サーバのアドレス
 server = "127.0.0.1"
@@ -724,6 +725,14 @@ facility = "local0"
 hostname = ""
 # アプリケーション名
 app_name = "zettai-mamorukun"
+
+[syslog.tls]
+# CA 証明書ファイルパス（PEM 形式）
+# 未指定の場合はシステムのルート証明書を使用
+# ca_cert_path = "/etc/zettai-mamorukun/ca.pem"
+# ホスト名検証（デフォルト: true）
+# 自己署名証明書を使う場合は false に設定
+verify_hostname = true
 
 [event_store]
 # イベントストア（SQLite 永続化）の有効/無効

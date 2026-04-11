@@ -3003,6 +3003,33 @@ impl Default for ModuleWatchdogConfig {
     }
 }
 
+/// Syslog TLS 設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct SyslogTlsConfig {
+    /// CA 証明書ファイルパス（PEM 形式）
+    #[serde(default)]
+    pub ca_cert_path: Option<String>,
+
+    /// ホスト名検証の有効/無効（デフォルト: true）
+    #[serde(default = "SyslogTlsConfig::default_verify_hostname")]
+    pub verify_hostname: bool,
+}
+
+impl SyslogTlsConfig {
+    fn default_verify_hostname() -> bool {
+        true
+    }
+}
+
+impl Default for SyslogTlsConfig {
+    fn default() -> Self {
+        Self {
+            ca_cert_path: None,
+            verify_hostname: true,
+        }
+    }
+}
+
 /// Syslog 転送設定
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct SyslogConfig {
@@ -3010,7 +3037,7 @@ pub struct SyslogConfig {
     #[serde(default)]
     pub enabled: bool,
 
-    /// プロトコル（"udp" or "tcp"）
+    /// プロトコル（"udp", "tcp", or "tls"）
     #[serde(default = "SyslogConfig::default_protocol")]
     pub protocol: String,
 
@@ -3033,6 +3060,10 @@ pub struct SyslogConfig {
     /// アプリケーション名
     #[serde(default = "SyslogConfig::default_app_name")]
     pub app_name: String,
+
+    /// TLS 設定
+    #[serde(default)]
+    pub tls: SyslogTlsConfig,
 }
 
 impl SyslogConfig {
@@ -3067,6 +3098,7 @@ impl Default for SyslogConfig {
             facility: Self::default_facility(),
             hostname: String::new(),
             app_name: Self::default_app_name(),
+            tls: SyslogTlsConfig::default(),
         }
     }
 }
@@ -3753,10 +3785,10 @@ impl AppConfig {
 
         // syslog 設定の検証
         if self.syslog.enabled {
-            let valid_protocols = ["udp", "tcp"];
+            let valid_protocols = ["udp", "tcp", "tls"];
             if !valid_protocols.contains(&self.syslog.protocol.as_str()) {
                 errors.push(format!(
-                    "syslog.protocol: 無効な値 '{}' (有効値: udp, tcp)",
+                    "syslog.protocol: 無効な値 '{}' (有効値: udp, tcp, tls)",
                     self.syslog.protocol
                 ));
             }
