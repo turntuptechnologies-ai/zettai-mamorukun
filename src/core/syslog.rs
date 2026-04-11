@@ -29,6 +29,10 @@ pub struct SyslogRuntimeConfig {
     pub tls_ca_cert_path: Option<String>,
     /// TLS ホスト名検証の有効/無効
     pub tls_verify_hostname: bool,
+    /// TLS クライアント証明書ファイルパス（PEM 形式、mTLS 用）
+    pub tls_client_cert_path: Option<String>,
+    /// TLS クライアント秘密鍵ファイルパス（PEM 形式、mTLS 用）
+    pub tls_client_key_path: Option<String>,
 }
 
 impl From<&SyslogConfig> for SyslogRuntimeConfig {
@@ -42,6 +46,8 @@ impl From<&SyslogConfig> for SyslogRuntimeConfig {
             app_name: config.app_name.clone(),
             tls_ca_cert_path: config.tls.ca_cert_path.clone(),
             tls_verify_hostname: config.tls.verify_hostname,
+            tls_client_cert_path: config.tls.client_cert_path.clone(),
+            tls_client_key_path: config.tls.client_key_path.clone(),
         }
     }
 }
@@ -120,7 +126,9 @@ impl SyslogForwarder {
                                 || new_config.server != runtime.server
                                 || new_config.port != runtime.port
                                 || new_config.tls_ca_cert_path != runtime.tls_ca_cert_path
-                                || new_config.tls_verify_hostname != runtime.tls_verify_hostname;
+                                || new_config.tls_verify_hostname != runtime.tls_verify_hostname
+                                || new_config.tls_client_cert_path != runtime.tls_client_cert_path
+                                || new_config.tls_client_key_path != runtime.tls_client_key_path;
                             runtime = new_config;
                             if needs_reconnect {
                                 tracing::info!(
@@ -307,20 +315,79 @@ fn build_tls_config(config: &SyslogRuntimeConfig) -> Result<rustls::ClientConfig
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     }
 
+    let client_auth = match (&config.tls_client_cert_path, &config.tls_client_key_path) {
+        (Some(cert_path), Some(key_path)) => {
+            let cert_pem = std::fs::read(cert_path).map_err(|e| {
+                format!(
+                    "クライアント証明書ファイルの読み込みに失敗: {}: {}",
+                    cert_path, e
+                )
+            })?;
+            let mut cert_cursor = std::io::Cursor::new(cert_pem);
+            let certs = rustls_pemfile::certs(&mut cert_cursor)
+                .filter_map(|r| r.ok())
+                .collect::<Vec<_>>();
+            if certs.is_empty() {
+                return Err(format!(
+                    "クライアント証明書ファイルに有効な証明書が見つかりません: {}",
+                    cert_path
+                ));
+            }
+
+            let key_pem = std::fs::read(key_path).map_err(|e| {
+                format!(
+                    "クライアント秘密鍵ファイルの読み込みに失敗: {}: {}",
+                    key_path, e
+                )
+            })?;
+            let mut key_cursor = std::io::Cursor::new(key_pem);
+            let key = rustls_pemfile::private_key(&mut key_cursor)
+                .map_err(|e| format!("クライアント秘密鍵の読み込みに失敗: {}: {}", key_path, e))?
+                .ok_or_else(|| {
+                    format!(
+                        "クライアント秘密鍵ファイルに有効な秘密鍵が見つかりません: {}",
+                        key_path
+                    )
+                })?;
+
+            Some((certs, key))
+        }
+        (Some(_), None) => {
+            return Err(
+                "クライアント証明書が設定されていますが、秘密鍵（client_key_path）が設定されていません"
+                    .to_string(),
+            );
+        }
+        (None, Some(_)) => {
+            return Err(
+                "クライアント秘密鍵が設定されていますが、証明書（client_cert_path）が設定されていません"
+                    .to_string(),
+            );
+        }
+        (None, None) => None,
+    };
+
     if config.tls_verify_hostname {
-        rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth()
-            .pipe(Ok)
+        let builder = rustls::ClientConfig::builder().with_root_certificates(root_store);
+        match client_auth {
+            Some((certs, key)) => builder
+                .with_client_auth_cert(certs, key)
+                .map_err(|e| format!("クライアント証明書の設定に失敗: {}", e)),
+            None => Ok(builder.with_no_client_auth()),
+        }
     } else {
         tracing::warn!(
             "Syslog TLS: ホスト名検証が無効です。本番環境では有効にすることを推奨します"
         );
-        let config = rustls::ClientConfig::builder()
+        let builder = rustls::ClientConfig::builder()
             .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NoVerifier))
-            .with_no_client_auth();
-        Ok(config)
+            .with_custom_certificate_verifier(Arc::new(NoVerifier));
+        match client_auth {
+            Some((certs, key)) => builder
+                .with_client_auth_cert(certs, key)
+                .map_err(|e| format!("クライアント証明書の設定に失敗: {}", e)),
+            None => Ok(builder.with_no_client_auth()),
+        }
     }
 }
 
@@ -367,15 +434,6 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
             .supported_schemes()
     }
 }
-
-/// パイプライン演算子的なヘルパートレイト
-trait Pipe: Sized {
-    fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T {
-        f(self)
-    }
-}
-
-impl<T> Pipe for T {}
 
 /// トランスポート層（UDP / TCP / TLS）
 enum Transport {
@@ -592,6 +650,8 @@ mod tests {
             app_name: "zettai-mamorukun".to_string(),
             tls_ca_cert_path: None,
             tls_verify_hostname: true,
+            tls_client_cert_path: None,
+            tls_client_key_path: None,
         };
 
         let msg = format_rfc5424(&event, &config);
@@ -624,6 +684,8 @@ mod tests {
             app_name: "zettai-mamorukun".to_string(),
             tls_ca_cert_path: None,
             tls_verify_hostname: true,
+            tls_client_cert_path: None,
+            tls_client_key_path: None,
         };
 
         let msg = format_rfc5424(&event, &config);
@@ -645,6 +707,8 @@ mod tests {
             app_name: "app".to_string(),
             tls_ca_cert_path: None,
             tls_verify_hostname: true,
+            tls_client_cert_path: None,
+            tls_client_key_path: None,
         };
 
         let msg = format_rfc5424(&event, &config);
@@ -715,6 +779,8 @@ mod tests {
             tls: SyslogTlsConfig {
                 ca_cert_path: Some("/etc/ssl/ca.pem".to_string()),
                 verify_hostname: false,
+                client_cert_path: None,
+                client_key_path: None,
             },
         };
         let runtime = SyslogRuntimeConfig::from(&config);
@@ -897,6 +963,8 @@ mod tests {
             app_name: "zettai-reload".to_string(),
             tls_ca_cert_path: None,
             tls_verify_hostname: true,
+            tls_client_cert_path: None,
+            tls_client_key_path: None,
         };
         sender.send(new_runtime).unwrap();
 
@@ -988,6 +1056,8 @@ mod tests {
             tls: SyslogTlsConfig {
                 ca_cert_path: Some(ca_file.path().to_string_lossy().into_owned()),
                 verify_hostname: true,
+                client_cert_path: None,
+                client_key_path: None,
             },
         };
         let bus = EventBus::new(16);
@@ -1041,6 +1111,213 @@ mod tests {
             received.ends_with('\n'),
             "改行で終わっていません: {}",
             received
+        );
+    }
+
+    #[tokio::test]
+    async fn test_syslog_forwarder_receives_and_sends_tls_mtls() {
+        use rcgen::{CertificateParams, KeyPair};
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use tokio::net::TcpListener;
+        use tokio_rustls::TlsAcceptor;
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        // CA 証明書を生成
+        let ca_key_pair = KeyPair::generate().unwrap();
+        let mut ca_params = CertificateParams::new(vec!["Test CA".to_string()]).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca_cert = ca_params.self_signed(&ca_key_pair).unwrap();
+
+        // サーバ証明書を生成
+        let server_key_pair = KeyPair::generate().unwrap();
+        let server_params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        let server_cert = server_params
+            .signed_by(&server_key_pair, &ca_cert, &ca_key_pair)
+            .unwrap();
+
+        // クライアント証明書を生成
+        let client_key_pair = KeyPair::generate().unwrap();
+        let client_params =
+            CertificateParams::new(vec!["zettai-mamorukun-client".to_string()]).unwrap();
+        let client_cert = client_params
+            .signed_by(&client_key_pair, &ca_cert, &ca_key_pair)
+            .unwrap();
+
+        // CA 証明書を一時ファイルに書き出す
+        let ca_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(ca_file.path(), ca_cert.pem().as_bytes()).unwrap();
+
+        // クライアント証明書・秘密鍵を一時ファイルに書き出す
+        let client_cert_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(client_cert_file.path(), client_cert.pem().as_bytes()).unwrap();
+
+        let client_key_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            client_key_file.path(),
+            client_key_pair.serialize_pem().as_bytes(),
+        )
+        .unwrap();
+
+        // mTLS を要求するサーバ設定
+        let ca_cert_der = CertificateDer::from(ca_cert.der().to_vec());
+        let mut client_auth_roots = rustls::RootCertStore::empty();
+        client_auth_roots.add(ca_cert_der).unwrap();
+        let client_verifier =
+            rustls::server::WebPkiClientVerifier::builder(Arc::new(client_auth_roots))
+                .build()
+                .unwrap();
+
+        let server_cert_der = CertificateDer::from(server_cert.der().to_vec());
+        let server_key_der =
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(server_key_pair.serialize_der()));
+
+        let tls_server_config = rustls::ServerConfig::builder()
+            .with_client_cert_verifier(client_verifier)
+            .with_single_cert(vec![server_cert_der], server_key_der)
+            .unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(tls_server_config));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+
+        let accept_handle = tokio::spawn(async move {
+            let (tcp_stream, _) = listener.accept().await.unwrap();
+            let mut tls_stream = acceptor.accept(tcp_stream).await.unwrap();
+            let mut buf = [0u8; 4096];
+            let len = tokio::io::AsyncReadExt::read(&mut tls_stream, &mut buf)
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&buf[..len]).to_string()
+        });
+
+        let config = SyslogConfig {
+            enabled: true,
+            protocol: "tls".to_string(),
+            server: "localhost".to_string(),
+            port: server_addr.port(),
+            facility: "local0".to_string(),
+            hostname: "mtls-test-host".to_string(),
+            app_name: "zettai-mtls-test".to_string(),
+            tls: SyslogTlsConfig {
+                ca_cert_path: Some(ca_file.path().to_string_lossy().into_owned()),
+                verify_hostname: true,
+                client_cert_path: Some(client_cert_file.path().to_string_lossy().into_owned()),
+                client_key_path: Some(client_key_file.path().to_string_lossy().into_owned()),
+            },
+        };
+        let bus = EventBus::new(16);
+        let (forwarder, _sender) = SyslogForwarder::new(&config, &bus);
+        forwarder.spawn();
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        bus.publish(SecurityEvent::new(
+            "mtls_test_event",
+            Severity::Warning,
+            "mtls_module",
+            "mTLS テストメッセージ",
+        ));
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(5), accept_handle)
+            .await
+            .expect("mTLS メッセージ受信がタイムアウトしました")
+            .expect("mTLS サーバタスクがパニックしました");
+
+        assert!(
+            received.contains("<132>1 "),
+            "PRI 値が正しくありません: {}",
+            received
+        );
+        assert!(
+            received.contains("mtls-test-host"),
+            "ホスト名が含まれていません: {}",
+            received
+        );
+        assert!(
+            received.contains("zettai-mtls-test"),
+            "アプリ名が含まれていません: {}",
+            received
+        );
+        assert!(
+            received.contains("eventType=\"mtls_test_event\""),
+            "イベントタイプが含まれていません: {}",
+            received
+        );
+        assert!(
+            received.contains("mTLS テストメッセージ"),
+            "メッセージが含まれていません: {}",
+            received
+        );
+    }
+
+    #[test]
+    fn test_build_tls_config_client_cert_only_error() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let config = SyslogRuntimeConfig {
+            protocol: "tls".to_string(),
+            server: "localhost".to_string(),
+            port: 6514,
+            facility: "local0".to_string(),
+            hostname: "test".to_string(),
+            app_name: "test".to_string(),
+            tls_ca_cert_path: None,
+            tls_verify_hostname: true,
+            tls_client_cert_path: Some("/tmp/nonexistent-cert.pem".to_string()),
+            tls_client_key_path: None,
+        };
+        let result = build_tls_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("秘密鍵"));
+    }
+
+    #[test]
+    fn test_build_tls_config_client_key_only_error() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let config = SyslogRuntimeConfig {
+            protocol: "tls".to_string(),
+            server: "localhost".to_string(),
+            port: 6514,
+            facility: "local0".to_string(),
+            hostname: "test".to_string(),
+            app_name: "test".to_string(),
+            tls_ca_cert_path: None,
+            tls_verify_hostname: true,
+            tls_client_cert_path: None,
+            tls_client_key_path: Some("/tmp/nonexistent-key.pem".to_string()),
+        };
+        let result = build_tls_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("証明書"));
+    }
+
+    #[test]
+    fn test_syslog_runtime_config_from_syslog_config_with_mtls() {
+        let config = SyslogConfig {
+            enabled: true,
+            protocol: "tls".to_string(),
+            server: "siem.example.com".to_string(),
+            port: 6514,
+            facility: "local0".to_string(),
+            hostname: "test-host".to_string(),
+            app_name: "zettai-mamorukun".to_string(),
+            tls: SyslogTlsConfig {
+                ca_cert_path: Some("/path/to/ca.pem".to_string()),
+                verify_hostname: true,
+                client_cert_path: Some("/path/to/client.pem".to_string()),
+                client_key_path: Some("/path/to/client-key.pem".to_string()),
+            },
+        };
+        let runtime = SyslogRuntimeConfig::from(&config);
+        assert_eq!(
+            runtime.tls_client_cert_path,
+            Some("/path/to/client.pem".to_string())
+        );
+        assert_eq!(
+            runtime.tls_client_key_path,
+            Some("/path/to/client-key.pem".to_string())
         );
     }
 }

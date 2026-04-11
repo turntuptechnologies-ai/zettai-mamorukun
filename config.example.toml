@@ -733,6 +733,9 @@ app_name = "zettai-mamorukun"
 # ホスト名検証（デフォルト: true）
 # 自己署名証明書を使う場合は false に設定
 verify_hostname = true
+# クライアント証明書（mTLS 認証用、PEM 形式）
+# client_cert_path = "/etc/zettai-mamorukun/client.pem"
+# client_key_path = "/etc/zettai-mamorukun/client-key.pem"
 
 [event_store]
 # イベントストア（SQLite 永続化）の有効/無効

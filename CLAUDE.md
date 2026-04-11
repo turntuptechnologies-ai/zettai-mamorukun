@@ -64,7 +64,7 @@ Linux サーバ上でデーモンとして動作し（systemd で管理）、あ
 - **Event Bus**: `SecurityEvent` を `tokio::sync::broadcast` で各モジュールからサブスクライバーへ伝達。ログサブスクライバーが全イベントを構造化ログに記録
 - **Action Engine**: 検知イベントに対するアクション（ログ・コマンド実行・Webhook 送信）を設定ベースで実行。イベントバスのサブスクライバーとして動作し、Severity やモジュール名に基づくルールマッチングでアクションを選択する
 - **Metrics Collector**: SecurityEvent の発生件数・種別・Severity を集計し、定期的にサマリーをログ出力する。イベントバスのサブスクライバーとして動作。`tokio::sync::watch` チャネルによるインターバルのホットリロードに対応
-- **Syslog Forwarder**: SecurityEvent を RFC 5424 形式で外部 Syslog サーバ（SIEM 等）に転送する。UDP/TCP/TLS（RFC 5425）プロトコル対応。TLS 接続時はカスタム CA 証明書またはシステムルート証明書を使用。イベントバスのサブスクライバーとして動作し、設定ホットリロードに対応
+- **Syslog Forwarder**: SecurityEvent を RFC 5424 形式で外部 Syslog サーバ（SIEM 等）に転送する。UDP/TCP/TLS（RFC 5425）プロトコル対応。TLS 接続時はカスタム CA 証明書またはシステムルート証明書を使用。mTLS（相互TLS認証）によるクライアント証明書認証に対応。イベントバスのサブスクライバーとして動作し、設定ホットリロードに対応
 - **Event Store**: SecurityEvent を SQLite データベースに永続保存する。イベントバスのサブスクライバーとして動作し、バッチ挿入・自動クリーンアップ・設定ホットリロードに対応
 - **Module Manager**: モジュールの一括起動・停止・リロードを管理。設定変更の差分検出により、変更のあったモジュールのみ再起動する
 
