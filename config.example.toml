@@ -44,6 +44,13 @@ enabled = false
 scan_interval_secs = 300
 # 監視対象パスのリスト
 watch_paths = []
+# HMAC-SHA256 キー（省略時は SHA-256 を使用）
+# 設定すると HMAC-SHA256 による署名ベースの整合性検証を行い、
+# 攻撃者によるハッシュすり替えを防止する
+# 推奨: 32 バイト以上のランダム文字列を使用すること
+# 注意: このキーは設定ファイルに平文で保存されるため、
+#        ファイルのパーミッションを適切に設定すること（例: chmod 600）
+# hmac_key = "your-secret-key-here-at-least-32-bytes!"
 
 [modules.process_monitor]
 # プロセス異常検知モジュールの有効/無効

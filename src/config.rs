@@ -449,6 +449,10 @@ pub struct FileIntegrityConfig {
     /// 監視対象パスのリスト
     #[serde(default)]
     pub watch_paths: Vec<PathBuf>,
+
+    /// HMAC-SHA256 キー（設定時は HMAC-SHA256、未設定時は SHA-256 を使用）
+    #[serde(default)]
+    pub hmac_key: Option<String>,
 }
 
 impl FileIntegrityConfig {
@@ -463,6 +467,7 @@ impl Default for FileIntegrityConfig {
             enabled: false,
             scan_interval_secs: Self::default_scan_interval_secs(),
             watch_paths: Vec::new(),
+            hmac_key: None,
         }
     }
 }
