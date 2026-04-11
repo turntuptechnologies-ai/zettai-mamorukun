@@ -435,7 +435,6 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
     }
 }
 
-
 /// トランスポート層（UDP / TCP / TLS）
 enum Transport {
     Udp(UdpSocket),
