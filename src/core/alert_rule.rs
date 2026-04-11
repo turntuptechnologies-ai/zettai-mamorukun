@@ -503,14 +503,17 @@ impl AlertRuleEngine {
             CompiledCondition::Compound {
                 operator,
                 conditions,
-            } => match operator {
-                LogicalOperator::And => conditions
+            } => {
+                // 短絡評価せず全サブ条件を評価し、threshold ウィンドウの更新漏れを防ぐ
+                let results: Vec<bool> = conditions
                     .iter()
-                    .all(|c| Self::evaluate_condition(c, event, rule_name, sub_index, windows)),
-                LogicalOperator::Or => conditions
-                    .iter()
-                    .any(|c| Self::evaluate_condition(c, event, rule_name, sub_index, windows)),
-            },
+                    .map(|c| Self::evaluate_condition(c, event, rule_name, sub_index, windows))
+                    .collect();
+                match operator {
+                    LogicalOperator::And => results.iter().all(|&r| r),
+                    LogicalOperator::Or => results.iter().any(|&r| r),
+                }
+            }
         }
     }
 
@@ -618,11 +621,18 @@ impl AlertRuleEngine {
 
     fn expand_placeholders(template: &str, event: &SecurityEvent) -> String {
         template
-            .replace("{{source}}", &event.source_module)
-            .replace("{{message}}", &event.message)
+            .replace("{{source}}", &Self::shell_escape(&event.source_module))
+            .replace("{{message}}", &Self::shell_escape(&event.message))
             .replace("{{severity}}", &event.severity.to_string())
-            .replace("{{event_type}}", &event.event_type)
-            .replace("{{details}}", event.details.as_deref().unwrap_or(""))
+            .replace("{{event_type}}", &Self::shell_escape(&event.event_type))
+            .replace(
+                "{{details}}",
+                &Self::shell_escape(event.details.as_deref().unwrap_or("")),
+            )
+    }
+
+    fn shell_escape(s: &str) -> String {
+        s.replace('\'', "'\"'\"'")
     }
 
     async fn run_command(command: &str, timeout: Duration) -> Result<(), AppError> {
