@@ -57,6 +57,10 @@ pub struct AppConfig {
     /// モジュールウォッチドッグ設定
     #[serde(default)]
     pub module_watchdog: ModuleWatchdogConfig,
+
+    /// Syslog 転送設定
+    #[serde(default)]
+    pub syslog: SyslogConfig,
 }
 
 /// デーモン動作設定
@@ -2999,6 +3003,74 @@ impl Default for ModuleWatchdogConfig {
     }
 }
 
+/// Syslog 転送設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct SyslogConfig {
+    /// Syslog 転送の有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// プロトコル（"udp" or "tcp"）
+    #[serde(default = "SyslogConfig::default_protocol")]
+    pub protocol: String,
+
+    /// Syslog サーバのアドレス
+    #[serde(default = "SyslogConfig::default_server")]
+    pub server: String,
+
+    /// Syslog サーバのポート
+    #[serde(default = "SyslogConfig::default_port")]
+    pub port: u16,
+
+    /// Syslog facility（"auth", "authpriv", "daemon", "local0"-"local7" 等）
+    #[serde(default = "SyslogConfig::default_facility")]
+    pub facility: String,
+
+    /// ホスト名（空文字の場合はシステムから自動取得）
+    #[serde(default)]
+    pub hostname: String,
+
+    /// アプリケーション名
+    #[serde(default = "SyslogConfig::default_app_name")]
+    pub app_name: String,
+}
+
+impl SyslogConfig {
+    fn default_protocol() -> String {
+        "udp".to_string()
+    }
+
+    fn default_server() -> String {
+        "127.0.0.1".to_string()
+    }
+
+    fn default_port() -> u16 {
+        514
+    }
+
+    fn default_facility() -> String {
+        "local0".to_string()
+    }
+
+    fn default_app_name() -> String {
+        "zettai-mamorukun".to_string()
+    }
+}
+
+impl Default for SyslogConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            protocol: Self::default_protocol(),
+            server: Self::default_server(),
+            port: Self::default_port(),
+            facility: Self::default_facility(),
+            hostname: String::new(),
+            app_name: Self::default_app_name(),
+        }
+    }
+}
+
 /// イベントフィルタリング設定
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
 pub struct EventFilterConfig {
@@ -3677,6 +3749,38 @@ impl AppConfig {
         // status 設定の検証
         if self.status.enabled && self.status.socket_path.is_empty() {
             errors.push("status.socket_path: 空文字列は指定できません".to_string());
+        }
+
+        // syslog 設定の検証
+        if self.syslog.enabled {
+            let valid_protocols = ["udp", "tcp"];
+            if !valid_protocols.contains(&self.syslog.protocol.as_str()) {
+                errors.push(format!(
+                    "syslog.protocol: 無効な値 '{}' (有効値: udp, tcp)",
+                    self.syslog.protocol
+                ));
+            }
+            if self.syslog.server.is_empty() {
+                errors.push("syslog.server: 空文字列は指定できません".to_string());
+            }
+            if self.syslog.port == 0 {
+                errors.push("syslog.port: 0 より大きい値を指定してください".to_string());
+            }
+            let valid_facilities = [
+                "kern", "user", "mail", "daemon", "auth", "syslog", "lpr", "news", "uucp", "cron",
+                "authpriv", "ftp", "local0", "local1", "local2", "local3", "local4", "local5",
+                "local6", "local7",
+            ];
+            if !valid_facilities.contains(&self.syslog.facility.as_str()) {
+                errors.push(format!(
+                    "syslog.facility: 無効な値 '{}' (有効値: {})",
+                    self.syslog.facility,
+                    valid_facilities.join(", ")
+                ));
+            }
+            if self.syslog.app_name.is_empty() {
+                errors.push("syslog.app_name: 空文字列は指定できません".to_string());
+            }
         }
 
         // rate_limit の検証

@@ -706,6 +706,25 @@ enabled = false
 # # ボディテンプレート（プレースホルダ: {{count}}, {{summary}}, {{period_secs}}）
 # body_template = '{"text": "ダイジェスト通知: {{period_secs}}秒間に{{count}}件のイベントが発生しました\n{{summary}}"}'
 
+[syslog]
+# Syslog 転送（RFC 5424 形式）の有効/無効
+# 有効にすると SecurityEvent を外部 Syslog サーバ（SIEM 等）に転送する
+enabled = false
+# プロトコル（"udp" or "tcp"）
+protocol = "udp"
+# Syslog サーバのアドレス
+server = "127.0.0.1"
+# Syslog サーバのポート
+port = 514
+# Syslog facility
+# 有効値: kern, user, mail, daemon, auth, syslog, lpr, news, uucp, cron,
+#         authpriv, ftp, local0〜local7
+facility = "local0"
+# ホスト名（空文字の場合はシステムから自動取得）
+hostname = ""
+# アプリケーション名
+app_name = "zettai-mamorukun"
+
 [event_store]
 # イベントストア（SQLite 永続化）の有効/無効
 # 有効にすると SecurityEvent を SQLite データベースに永続保存する

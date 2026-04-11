@@ -10,6 +10,7 @@ use crate::core::metrics::{MetricsCollector, SharedMetrics};
 use crate::core::module_manager::ModuleManager;
 use crate::core::scan_state::{self, DiffKind};
 use crate::core::status::{DaemonState, StatusServer};
+use crate::core::syslog::{SyslogForwarder, SyslogRuntimeConfig};
 use crate::error::AppError;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -59,6 +60,7 @@ impl Daemon {
         let mut event_stream_cancel_token: Option<CancellationToken> = None;
         let mut event_stream_config_sender: Option<watch::Sender<EventStreamRuntimeConfig>> = None;
         let mut correlation_config_sender: Option<watch::Sender<CorrelationRuntimeConfig>> = None;
+        let mut syslog_config_sender: Option<watch::Sender<SyslogRuntimeConfig>> = None;
         let event_bus = if self.config.event_bus.enabled {
             let bus = EventBus::with_filters(
                 self.config.event_bus.channel_capacity,
@@ -176,6 +178,20 @@ impl Daemon {
                 }
             }
 
+            // Syslog フォワーダーの起動
+            if self.config.syslog.enabled {
+                let (forwarder, sender) = SyslogForwarder::new(&self.config.syslog, &bus);
+                syslog_config_sender = Some(sender);
+                forwarder.spawn();
+                tracing::info!(
+                    protocol = %self.config.syslog.protocol,
+                    server = %self.config.syslog.server,
+                    port = self.config.syslog.port,
+                    facility = %self.config.syslog.facility,
+                    "Syslog フォワーダーを起動しました"
+                );
+            }
+
             tracing::info!(
                 channel_capacity = self.config.event_bus.channel_capacity,
                 "イベントバスを起動しました"
@@ -191,6 +207,10 @@ impl Daemon {
 
         if event_bus.is_none() && self.config.event_stream.enabled {
             tracing::warn!("イベントストリームはイベントバスが無効のため起動できません");
+        }
+
+        if event_bus.is_none() && self.config.syslog.enabled {
+            tracing::warn!("Syslog フォワーダーはイベントバスが無効のため起動できません");
         }
 
         // 前回のスキャン状態を読み込み
@@ -548,6 +568,20 @@ impl Daemon {
                                 } else {
                                     tracing::warn!(
                                         "相関分析エンジンの設定リロードに失敗しました（受信側が閉じています）"
+                                    );
+                                }
+                            }
+
+                            // Syslog フォワーダーのリロード
+                            if let Some(ref sender) = syslog_config_sender {
+                                let new_runtime = SyslogRuntimeConfig::from(&new_config.syslog);
+                                if sender.send(new_runtime).is_ok() {
+                                    tracing::info!(
+                                        "Syslog フォワーダーの設定をリロードしました"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        "Syslog フォワーダーの設定リロードに失敗しました（受信側が閉じています）"
                                     );
                                 }
                             }
