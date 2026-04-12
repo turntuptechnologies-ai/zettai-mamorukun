@@ -242,6 +242,10 @@ pub struct ModulesConfig {
     #[serde(default)]
     pub sshd_config_monitor: SshdConfigMonitorConfig,
 
+    /// パッケージ整合性検証モジュールの設定
+    #[serde(default)]
+    pub package_verify: PackageVerifyConfig,
+
     /// パッケージリポジトリ改ざん検知モジュールの設定
     #[serde(default)]
     pub pkg_repo_monitor: PkgRepoMonitorConfig,
@@ -5821,6 +5825,43 @@ impl Default for SshdConfigMonitorConfig {
             check_permit_tunnel: true,
             follow_includes: true,
             max_file_size_bytes: Self::default_max_file_size_bytes(),
+        }
+    }
+}
+
+/// パッケージ整合性検証モジュールの設定
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct PackageVerifyConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// 検証間隔（秒）
+    #[serde(default = "PackageVerifyConfig::default_interval_secs")]
+    pub interval_secs: u64,
+
+    /// 除外パッケージ名リスト
+    #[serde(default)]
+    pub exclude_packages: Vec<String>,
+
+    /// 除外パスパターンリスト（前方一致）
+    #[serde(default)]
+    pub exclude_paths: Vec<String>,
+}
+
+impl PackageVerifyConfig {
+    fn default_interval_secs() -> u64 {
+        3600
+    }
+}
+
+impl Default for PackageVerifyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: Self::default_interval_secs(),
+            exclude_packages: Vec::new(),
+            exclude_paths: Vec::new(),
         }
     }
 }

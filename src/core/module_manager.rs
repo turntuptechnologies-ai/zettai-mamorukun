@@ -47,6 +47,7 @@ use crate::modules::namespace_monitor::NamespaceMonitorModule;
 use crate::modules::network_interface_monitor::NetworkInterfaceMonitorModule;
 use crate::modules::network_monitor::NetworkMonitorModule;
 use crate::modules::network_traffic_monitor::NetworkTrafficMonitorModule;
+use crate::modules::package_verify::PackageVerifyModule;
 use crate::modules::pam_monitor::PamMonitorModule;
 use crate::modules::pkg_repo_monitor::PkgRepoMonitorModule;
 use crate::modules::privilege_escalation_monitor::PrivilegeEscalationMonitorModule;
@@ -161,6 +162,7 @@ macro_rules! for_each_module {
         $callback!($($prefix)* journal_pattern_monitor, JournalPatternMonitorModule, "systemd ジャーナルパターン監視モジュール");
         $callback!($($prefix)* keylogger_detector, KeyloggerDetectorModule, "キーロガー検知モジュール");
         $callback!($($prefix)* sshd_config_monitor, SshdConfigMonitorModule, "SSH 設定セキュリティ監査モジュール");
+        $callback!($($prefix)* package_verify, PackageVerifyModule, "パッケージ整合性検証モジュール");
     };
 }
 
