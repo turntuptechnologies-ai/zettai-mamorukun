@@ -65,6 +65,7 @@ use crate::modules::shell_config_monitor::ShellConfigMonitorModule;
 use crate::modules::shm_monitor::ShmMonitorModule;
 use crate::modules::ssh_brute_force::SshBruteForceModule;
 use crate::modules::ssh_key_monitor::SshKeyMonitorModule;
+use crate::modules::sshd_config_monitor::SshdConfigMonitorModule;
 use crate::modules::sudoers_monitor::SudoersMonitorModule;
 use crate::modules::suid_sgid_monitor::SuidSgidMonitorModule;
 use crate::modules::swap_tmpfs_monitor::SwapTmpfsMonitorModule;
@@ -159,6 +160,7 @@ macro_rules! for_each_module {
         $callback!($($prefix)* livepatch_monitor, LivepatchMonitorModule, "カーネルライブパッチ監視モジュール");
         $callback!($($prefix)* journal_pattern_monitor, JournalPatternMonitorModule, "systemd ジャーナルパターン監視モジュール");
         $callback!($($prefix)* keylogger_detector, KeyloggerDetectorModule, "キーロガー検知モジュール");
+        $callback!($($prefix)* sshd_config_monitor, SshdConfigMonitorModule, "SSH 設定セキュリティ監査モジュール");
     };
 }
 

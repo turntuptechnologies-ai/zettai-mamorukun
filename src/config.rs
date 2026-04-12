@@ -238,6 +238,10 @@ pub struct ModulesConfig {
     #[serde(default)]
     pub ssh_brute_force: SshBruteForceConfig,
 
+    /// SSH 設定セキュリティ監査モジュールの設定
+    #[serde(default)]
+    pub sshd_config_monitor: SshdConfigMonitorConfig,
+
     /// パッケージリポジトリ改ざん検知モジュールの設定
     #[serde(default)]
     pub pkg_repo_monitor: PkgRepoMonitorConfig,
@@ -5709,6 +5713,114 @@ impl Default for KeyloggerDetectorConfig {
             enabled: false,
             scan_interval_secs: Self::default_scan_interval_secs(),
             allowed_processes: Self::default_allowed_processes(),
+        }
+    }
+}
+
+/// SSH 設定セキュリティ監査モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct SshdConfigMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "SshdConfigMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象の sshd_config ファイルパス
+    #[serde(default = "SshdConfigMonitorConfig::default_config_paths")]
+    pub config_paths: Vec<String>,
+
+    /// PermitRootLogin チェックの有効/無効
+    #[serde(default = "SshdConfigMonitorConfig::default_true")]
+    pub check_permit_root_login: bool,
+
+    /// PasswordAuthentication チェックの有効/無効
+    #[serde(default = "SshdConfigMonitorConfig::default_true")]
+    pub check_password_authentication: bool,
+
+    /// PermitEmptyPasswords チェックの有効/無効
+    #[serde(default = "SshdConfigMonitorConfig::default_true")]
+    pub check_permit_empty_passwords: bool,
+
+    /// Protocol バージョンチェックの有効/無効
+    #[serde(default = "SshdConfigMonitorConfig::default_true")]
+    pub check_protocol_version: bool,
+
+    /// X11Forwarding チェックの有効/無効
+    #[serde(default = "SshdConfigMonitorConfig::default_true")]
+    pub check_x11_forwarding: bool,
+
+    /// StrictModes チェックの有効/無効
+    #[serde(default = "SshdConfigMonitorConfig::default_true")]
+    pub check_strict_modes: bool,
+
+    /// MaxAuthTries チェックの有効/無効
+    #[serde(default = "SshdConfigMonitorConfig::default_true")]
+    pub check_max_auth_tries: bool,
+
+    /// MaxAuthTries の閾値
+    #[serde(default = "SshdConfigMonitorConfig::default_max_auth_tries_threshold")]
+    pub max_auth_tries_threshold: u32,
+
+    /// GatewayPorts チェックの有効/無効
+    #[serde(default = "SshdConfigMonitorConfig::default_true")]
+    pub check_gateway_ports: bool,
+
+    /// PermitTunnel チェックの有効/無効
+    #[serde(default = "SshdConfigMonitorConfig::default_true")]
+    pub check_permit_tunnel: bool,
+
+    /// Include ディレクティブの再帰的展開
+    #[serde(default = "SshdConfigMonitorConfig::default_true")]
+    pub follow_includes: bool,
+
+    /// ファイルサイズ上限（バイト）
+    #[serde(default = "SshdConfigMonitorConfig::default_max_file_size_bytes")]
+    pub max_file_size_bytes: u64,
+}
+
+impl SshdConfigMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        300
+    }
+
+    fn default_config_paths() -> Vec<String> {
+        vec!["/etc/ssh/sshd_config".to_string()]
+    }
+
+    fn default_true() -> bool {
+        true
+    }
+
+    fn default_max_auth_tries_threshold() -> u32 {
+        6
+    }
+
+    fn default_max_file_size_bytes() -> u64 {
+        1_048_576
+    }
+}
+
+impl Default for SshdConfigMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            config_paths: Self::default_config_paths(),
+            check_permit_root_login: true,
+            check_password_authentication: true,
+            check_permit_empty_passwords: true,
+            check_protocol_version: true,
+            check_x11_forwarding: true,
+            check_strict_modes: true,
+            check_max_auth_tries: true,
+            max_auth_tries_threshold: Self::default_max_auth_tries_threshold(),
+            check_gateway_ports: true,
+            check_permit_tunnel: true,
+            follow_includes: true,
+            max_file_size_bytes: Self::default_max_file_size_bytes(),
         }
     }
 }
