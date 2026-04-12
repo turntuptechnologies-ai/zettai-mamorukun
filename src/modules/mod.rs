@@ -11,6 +11,7 @@ pub mod coredump_monitor;
 pub mod cron_monitor;
 pub mod dbus_monitor;
 pub mod dns_monitor;
+pub mod dns_query_monitor;
 pub mod ebpf_monitor;
 pub mod env_injection_monitor;
 pub mod fd_monitor;

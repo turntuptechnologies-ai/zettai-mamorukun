@@ -206,6 +206,10 @@ pub struct ModulesConfig {
     #[serde(default)]
     pub dns_monitor: DnsMonitorConfig,
 
+    /// ネットワーク名前解決監視モジュールの設定
+    #[serde(default)]
+    pub dns_query_monitor: DnsQueryMonitorConfig,
+
     /// SSH公開鍵ファイル監視モジュールの設定
     #[serde(default)]
     pub ssh_key_monitor: SshKeyMonitorConfig,
@@ -912,6 +916,65 @@ impl Default for DnsMonitorConfig {
             enabled: false,
             scan_interval_secs: Self::default_scan_interval_secs(),
             watch_paths: Self::default_watch_paths(),
+        }
+    }
+}
+
+/// ネットワーク名前解決監視モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct DnsQueryMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "DnsQueryMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// DNS 接続数閾値（この値以上で警告）
+    #[serde(default = "DnsQueryMonitorConfig::default_query_rate_threshold")]
+    pub query_rate_threshold: u64,
+
+    /// 不明 DNS サーバ検知の有効/無効
+    #[serde(default = "DnsQueryMonitorConfig::default_unknown_dns_server_detection")]
+    pub unknown_dns_server_detection: bool,
+
+    /// tx_queue 異常閾値（DNS トンネリング検知）
+    #[serde(default = "DnsQueryMonitorConfig::default_tx_queue_threshold")]
+    pub tx_queue_threshold: u64,
+
+    /// ホワイトリストアドレス
+    #[serde(default)]
+    pub whitelist_addresses: Vec<String>,
+}
+
+impl DnsQueryMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_query_rate_threshold() -> u64 {
+        100
+    }
+
+    fn default_unknown_dns_server_detection() -> bool {
+        true
+    }
+
+    fn default_tx_queue_threshold() -> u64 {
+        4096
+    }
+}
+
+impl Default for DnsQueryMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            query_rate_threshold: Self::default_query_rate_threshold(),
+            unknown_dns_server_detection: Self::default_unknown_dns_server_detection(),
+            tx_queue_threshold: Self::default_tx_queue_threshold(),
+            whitelist_addresses: Vec::new(),
         }
     }
 }
@@ -3655,6 +3718,11 @@ impl AppConfig {
             &mut errors,
         );
         Self::validate_interval(
+            self.modules.dns_query_monitor.scan_interval_secs,
+            "modules.dns_query_monitor.scan_interval_secs",
+            &mut errors,
+        );
+        Self::validate_interval(
             self.modules.ssh_key_monitor.scan_interval_secs,
             "modules.ssh_key_monitor.scan_interval_secs",
             &mut errors,
@@ -4003,6 +4071,7 @@ impl AppConfig {
             m.systemd_timer_monitor.enabled,
             m.firewall_monitor.enabled,
             m.dns_monitor.enabled,
+            m.dns_query_monitor.enabled,
             m.ssh_key_monitor.enabled,
             m.mount_monitor.enabled,
             m.shell_config_monitor.enabled,

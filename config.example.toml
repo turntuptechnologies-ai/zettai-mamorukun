@@ -1181,6 +1181,22 @@ debounce_ms = 500
 # 定期的にデコイファイルの存在を確���する（消失は証拠隠滅の可能性）
 health_check_interval_secs = 300
 
+[modules.dns_query_monitor]
+# ネットワーク名前解決監視モジュール
+# /proc/net/udp と /proc/net/udp6 から DNS ポート（53）宛の接続を定期スキャンし、
+# 不審な DNS アクティビティを検知する
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 30
+# DNS 接続数閾値（この値以上で警告イベントを発行）
+query_rate_threshold = 100
+# resolv.conf に未登録の DNS サーバへの接続を検知する
+unknown_dns_server_detection = true
+# tx_queue 異常閾値（バイト）— DNS トンネリングの兆候検知
+tx_queue_threshold = 4096
+# ホワイトリストアドレス — これらの DNS サーバへの接続は不明サーバ検知から除外
+whitelist_addresses = []
+
 [modules.keylogger_detector]
 # キーロガー検知モジュール — /dev/input/ デバイスファイルへの不審なアクセスを監視し、
 # キーロガーの兆候を検知する
