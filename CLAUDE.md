@@ -105,6 +105,7 @@ src/
     dbus_monitor.rs    # D-Bus シグナル監視モジュール
     dns_monitor.rs     # DNS設定改ざん検知モジュール
     dns_query_monitor.rs # ネットワーク名前解決監視モジュール
+    dynamic_library_monitor.rs # 動的ライブラリインジェクション検知モジュール
     ebpf_monitor.rs    # eBPF プログラム監視モジュール
     env_injection_monitor.rs # 環境変数インジェクション検知モジュール
     fd_monitor.rs      # ファイルディスクリプタ監視モジュール
