@@ -791,6 +791,7 @@ socket_path = "/var/run/zettai-mamorukun/status.sock"
 # 有効にすると HTTP エンドポイントで Prometheus テキスト形式のメトリクスを公開する
 # /metrics — メトリクス取得、/health — ヘルスチェック
 # 注意: metrics.enabled = true が必要
+# SIGHUP でホットリロード可能（enabled, bind_address, port の変更が即時反映される）
 enabled = false
 # バインドアドレス
 bind_address = "127.0.0.1"

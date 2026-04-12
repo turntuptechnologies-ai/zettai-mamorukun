@@ -22,12 +22,16 @@ pub struct PrometheusExporter {
 
 impl PrometheusExporter {
     /// 新しい PrometheusExporter を作成する
-    pub fn new(config: &PrometheusConfig, shared_metrics: Arc<StdMutex<SharedMetrics>>) -> Self {
+    pub fn new(
+        config: &PrometheusConfig,
+        shared_metrics: Arc<StdMutex<SharedMetrics>>,
+        started_at: Instant,
+    ) -> Self {
         Self {
             bind_address: config.bind_address.clone(),
             port: config.port,
             shared_metrics,
-            started_at: Instant::now(),
+            started_at,
             cancel_token: CancellationToken::new(),
         }
     }
@@ -352,7 +356,7 @@ mod tests {
             module_counts,
         }));
 
-        let exporter = PrometheusExporter::new(&config, Arc::clone(&shared));
+        let exporter = PrometheusExporter::new(&config, Arc::clone(&shared), Instant::now());
         let cancel_token = exporter.cancel_token();
         exporter.spawn().unwrap();
 
@@ -422,9 +426,142 @@ mod tests {
             port: 9200,
         };
         let shared = Arc::new(StdMutex::new(SharedMetrics::default()));
-        let exporter = PrometheusExporter::new(&config, shared);
+        let exporter = PrometheusExporter::new(&config, shared, Instant::now());
 
         assert_eq!(exporter.bind_address, "0.0.0.0");
         assert_eq!(exporter.port, 9200);
+    }
+
+    #[test]
+    fn test_prometheus_exporter_new_with_started_at() {
+        let past = Instant::now() - std::time::Duration::from_secs(5);
+        let config = PrometheusConfig {
+            enabled: true,
+            bind_address: "127.0.0.1".to_string(),
+            port: 9200,
+        };
+        let shared = Arc::new(StdMutex::new(SharedMetrics::default()));
+        let exporter = PrometheusExporter::new(&config, shared, past);
+
+        let output =
+            PrometheusExporter::format_metrics(&exporter.shared_metrics, exporter.started_at);
+        assert!(output.contains("zettai_uptime_seconds"));
+        let uptime = parse_uptime_from_metrics(&output);
+        assert!(uptime >= 5.0, "uptime should be >= 5.0, got {uptime}");
+    }
+
+    #[tokio::test]
+    async fn test_prometheus_exporter_restart_on_different_port() {
+        let shared = Arc::new(StdMutex::new(SharedMetrics::default()));
+
+        // 最初のエクスポーターを空きポートで起動
+        let listener1 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port1 = listener1.local_addr().unwrap().port();
+        drop(listener1);
+
+        let config1 = PrometheusConfig {
+            enabled: true,
+            bind_address: "127.0.0.1".to_string(),
+            port: port1,
+        };
+        let exporter1 = PrometheusExporter::new(&config1, Arc::clone(&shared), Instant::now());
+        let cancel1 = exporter1.cancel_token();
+        exporter1.spawn().unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // cancel_token で停止
+        cancel1.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // 別の空きポートで新しいエクスポーターを起動
+        let listener2 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port2 = listener2.local_addr().unwrap().port();
+        drop(listener2);
+
+        let config2 = PrometheusConfig {
+            enabled: true,
+            bind_address: "127.0.0.1".to_string(),
+            port: port2,
+        };
+        let exporter2 = PrometheusExporter::new(&config2, Arc::clone(&shared), Instant::now());
+        let cancel2 = exporter2.cancel_token();
+        exporter2.spawn().unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // 新ポートで /metrics にアクセスできることを確認
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{port2}"))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf);
+
+        assert!(response.contains("HTTP/1.1 200 OK"));
+        assert!(response.contains("zettai_uptime_seconds"));
+
+        cancel2.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn test_prometheus_exporter_started_at_preserved() {
+        let past = Instant::now() - std::time::Duration::from_secs(3);
+        let shared = Arc::new(StdMutex::new(SharedMetrics::default()));
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let config = PrometheusConfig {
+            enabled: true,
+            bind_address: "127.0.0.1".to_string(),
+            port,
+        };
+        let exporter = PrometheusExporter::new(&config, Arc::clone(&shared), past);
+        let cancel = exporter.cancel_token();
+        exporter.spawn().unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // /metrics から uptime を取得
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf);
+
+        assert!(response.contains("HTTP/1.1 200 OK"));
+        let uptime = parse_uptime_from_metrics(&response);
+        assert!(
+            uptime >= 3.0,
+            "uptime should be >= 3.0 (started_at preserved), got {uptime}"
+        );
+
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    fn parse_uptime_from_metrics(output: &str) -> f64 {
+        for line in output.lines() {
+            if line.starts_with("zettai_uptime_seconds ") {
+                return line
+                    .strip_prefix("zettai_uptime_seconds ")
+                    .unwrap()
+                    .trim()
+                    .parse::<f64>()
+                    .unwrap();
+            }
+        }
+        panic!("zettai_uptime_seconds not found in metrics output");
     }
 }
