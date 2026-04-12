@@ -17,6 +17,7 @@ use crate::modules::coredump_monitor::CoredumpMonitorModule;
 use crate::modules::cron_monitor::CronMonitorModule;
 use crate::modules::dbus_monitor::DbusMonitorModule;
 use crate::modules::dns_monitor::DnsMonitorModule;
+use crate::modules::dns_query_monitor::DnsQueryMonitorModule;
 use crate::modules::ebpf_monitor::EbpfMonitorModule;
 use crate::modules::env_injection_monitor::EnvInjectionMonitorModule;
 use crate::modules::fd_monitor::FdMonitorModule;
@@ -97,6 +98,7 @@ macro_rules! for_each_module {
         $callback!($($prefix)* systemd_timer_monitor, SystemdTimerMonitorModule, "systemd タイマー監視モジュール");
         $callback!($($prefix)* firewall_monitor, FirewallMonitorModule, "ファイアウォールルール監視モジュール");
         $callback!($($prefix)* dns_monitor, DnsMonitorModule, "DNS設定改ざん検知モジュール");
+        $callback!($($prefix)* dns_query_monitor, DnsQueryMonitorModule, "ネットワーク名前解決監視モジュール");
         $callback!($($prefix)* ssh_key_monitor, SshKeyMonitorModule, "SSH公開鍵ファイル監視モジュール");
         $callback!($($prefix)* shell_config_monitor, ShellConfigMonitorModule, "シェル設定ファイル監視モジュール");
         $callback!($($prefix)* tmp_exec_monitor, TmpExecMonitorModule, "一時ディレクトリ実行ファイル検知モジュール");
