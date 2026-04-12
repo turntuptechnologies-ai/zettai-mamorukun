@@ -152,6 +152,7 @@ src/
     shm_monitor.rs     # 共有メモリ（/dev/shm）監視モジュール
     ssh_brute_force.rs # SSH ブルートフォース検知モジュール
     ssh_key_monitor.rs # SSH公開鍵ファイル監視モジュール
+    sshd_config_monitor.rs # SSH 設定セキュリティ監査モジュール
     sudoers_monitor.rs # sudoers ファイル監視モジュール
     suid_sgid_monitor.rs # SUID/SGID ファイル監視モジュール
     swap_tmpfs_monitor.rs # スワップ / tmpfs 監視モジュール
