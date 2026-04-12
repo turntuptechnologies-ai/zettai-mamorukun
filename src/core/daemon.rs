@@ -16,7 +16,7 @@ use crate::core::syslog::{SyslogForwarder, SyslogRuntimeConfig};
 use crate::error::AppError;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -53,6 +53,7 @@ impl Daemon {
         let mut shared_metrics: Option<Arc<StdMutex<SharedMetrics>>> = None;
         let mut status_cancel_token: Option<CancellationToken> = None;
         let mut prometheus_cancel_token: Option<CancellationToken> = None;
+        let prometheus_started_at = Instant::now();
 
         // イベントバスの初期化
         let mut action_config_sender: Option<watch::Sender<ActionEngineConfig>> = None;
@@ -379,8 +380,11 @@ impl Daemon {
         // Prometheus エクスポーターの起動
         if self.config.prometheus.enabled {
             if let Some(ref metrics) = shared_metrics {
-                let exporter =
-                    PrometheusExporter::new(&self.config.prometheus, Arc::clone(metrics));
+                let exporter = PrometheusExporter::new(
+                    &self.config.prometheus,
+                    Arc::clone(metrics),
+                    prometheus_started_at,
+                );
                 prometheus_cancel_token = Some(exporter.cancel_token());
                 match exporter.spawn() {
                     Ok(()) => {}
@@ -647,11 +651,80 @@ impl Daemon {
                                 }
                             }
 
-                            // Prometheus エクスポーターのリロード警告
+                            // Prometheus エクスポーターのホットリロード
                             if self.config.prometheus != new_config.prometheus {
-                                tracing::warn!(
-                                    "prometheus セクションの変更はホットリロードに対応していません。デーモンを再起動してください"
-                                );
+                                let was_enabled = self.config.prometheus.enabled;
+                                let now_enabled = new_config.prometheus.enabled;
+
+                                if was_enabled && !now_enabled {
+                                    // パターン A: 停止のみ
+                                    if let Some(token) = prometheus_cancel_token.take() {
+                                        token.cancel();
+                                        tracing::info!("Prometheus エクスポーターを停止しました");
+                                    }
+                                } else if !was_enabled && now_enabled {
+                                    // パターン B: 新規起動
+                                    if let Some(ref metrics) = shared_metrics {
+                                        let exporter = PrometheusExporter::new(
+                                            &new_config.prometheus,
+                                            Arc::clone(metrics),
+                                            prometheus_started_at,
+                                        );
+                                        prometheus_cancel_token = Some(exporter.cancel_token());
+                                        match exporter.spawn() {
+                                            Ok(()) => tracing::info!(
+                                                "Prometheus エクスポーターを起動しました（ホットリロード）"
+                                            ),
+                                            Err(e) => tracing::error!(
+                                                error = %e,
+                                                "Prometheus エクスポーターの起動に失敗しました"
+                                            ),
+                                        }
+                                    }
+                                } else {
+                                    // パターン C: bind_address/port 変更（停止→再起動）
+                                    if let Some(token) = prometheus_cancel_token.take() {
+                                        token.cancel();
+                                    }
+                                    tokio::time::sleep(Duration::from_millis(100)).await;
+                                    if let Some(ref metrics) = shared_metrics {
+                                        let exporter = PrometheusExporter::new(
+                                            &new_config.prometheus,
+                                            Arc::clone(metrics),
+                                            prometheus_started_at,
+                                        );
+                                        prometheus_cancel_token = Some(exporter.cancel_token());
+                                        match exporter.spawn() {
+                                            Ok(()) => tracing::info!(
+                                                bind_address = %new_config.prometheus.bind_address,
+                                                port = new_config.prometheus.port,
+                                                "Prometheus エクスポーターをリロードしました"
+                                            ),
+                                            Err(e) => {
+                                                tracing::error!(
+                                                    error = %e,
+                                                    "新設定での Prometheus エクスポーターの起動に失敗。旧設定で復旧を試みます"
+                                                );
+                                                let fallback = PrometheusExporter::new(
+                                                    &self.config.prometheus,
+                                                    Arc::clone(metrics),
+                                                    prometheus_started_at,
+                                                );
+                                                prometheus_cancel_token =
+                                                    Some(fallback.cancel_token());
+                                                match fallback.spawn() {
+                                                    Ok(()) => tracing::info!(
+                                                        "旧設定で Prometheus エクスポーターを復旧しました"
+                                                    ),
+                                                    Err(e2) => tracing::error!(
+                                                        error = %e2,
+                                                        "旧設定での Prometheus エクスポーターの復旧にも失敗しました"
+                                                    ),
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
 
                             self.config = new_config;

@@ -22,12 +22,16 @@ pub struct PrometheusExporter {
 
 impl PrometheusExporter {
     /// 新しい PrometheusExporter を作成する
-    pub fn new(config: &PrometheusConfig, shared_metrics: Arc<StdMutex<SharedMetrics>>) -> Self {
+    pub fn new(
+        config: &PrometheusConfig,
+        shared_metrics: Arc<StdMutex<SharedMetrics>>,
+        started_at: Instant,
+    ) -> Self {
         Self {
             bind_address: config.bind_address.clone(),
             port: config.port,
             shared_metrics,
-            started_at: Instant::now(),
+            started_at,
             cancel_token: CancellationToken::new(),
         }
     }
@@ -352,7 +356,7 @@ mod tests {
             module_counts,
         }));
 
-        let exporter = PrometheusExporter::new(&config, Arc::clone(&shared));
+        let exporter = PrometheusExporter::new(&config, Arc::clone(&shared), Instant::now());
         let cancel_token = exporter.cancel_token();
         exporter.spawn().unwrap();
 
@@ -422,7 +426,7 @@ mod tests {
             port: 9200,
         };
         let shared = Arc::new(StdMutex::new(SharedMetrics::default()));
-        let exporter = PrometheusExporter::new(&config, shared);
+        let exporter = PrometheusExporter::new(&config, shared, Instant::now());
 
         assert_eq!(exporter.bind_address, "0.0.0.0");
         assert_eq!(exporter.port, 9200);
