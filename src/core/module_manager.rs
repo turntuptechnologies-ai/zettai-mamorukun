@@ -18,6 +18,7 @@ use crate::modules::cron_monitor::CronMonitorModule;
 use crate::modules::dbus_monitor::DbusMonitorModule;
 use crate::modules::dns_monitor::DnsMonitorModule;
 use crate::modules::dns_query_monitor::DnsQueryMonitorModule;
+use crate::modules::dynamic_library_monitor::DynamicLibraryMonitorModule;
 use crate::modules::ebpf_monitor::EbpfMonitorModule;
 use crate::modules::env_injection_monitor::EnvInjectionMonitorModule;
 use crate::modules::fd_monitor::FdMonitorModule;
@@ -163,6 +164,7 @@ macro_rules! for_each_module {
         $callback!($($prefix)* keylogger_detector, KeyloggerDetectorModule, "キーロガー検知モジュール");
         $callback!($($prefix)* sshd_config_monitor, SshdConfigMonitorModule, "SSH 設定セキュリティ監査モジュール");
         $callback!($($prefix)* package_verify, PackageVerifyModule, "パッケージ整合性検証モジュール");
+        $callback!($($prefix)* dynamic_library_monitor, DynamicLibraryMonitorModule, "動的ライブラリインジェクション検知モジュール");
     };
 }
 

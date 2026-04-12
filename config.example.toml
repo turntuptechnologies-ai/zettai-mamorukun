@@ -1290,3 +1290,17 @@ enabled = false
 # condition_type = "field_match"
 # field = "source_module"
 # pattern = "file_integrity"
+
+[modules.dynamic_library_monitor]
+# 動的ライブラリインジェクション検知モジュール — /proc/[pid]/maps のベースライン差分で不審な .so ロードを検知
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 60
+# 不審なパスのリスト（これらのパスからの新規ライブラリロードを High で検知）
+suspicious_paths = ["/tmp", "/dev/shm", "/var/tmp"]
+# 除外する PID のリスト
+ignore_pids = []
+# 除外するライブラリパターン（正規表現）
+ignore_libraries = []
+# 全プロセスを監視するか（false の場合は root プロセスのみ）
+monitor_all_processes = false

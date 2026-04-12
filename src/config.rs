@@ -453,6 +453,10 @@ pub struct ModulesConfig {
     /// キーロガー検知モジュールの設定
     #[serde(default)]
     pub keylogger_detector: KeyloggerDetectorConfig,
+
+    /// 動的ライブラリインジェクション検知モジュールの設定
+    #[serde(default)]
+    pub dynamic_library_monitor: DynamicLibraryMonitorConfig,
 }
 
 /// ファイル整合性監視モジュールの設定
@@ -5862,6 +5866,61 @@ impl Default for PackageVerifyConfig {
             interval_secs: Self::default_interval_secs(),
             exclude_packages: Vec::new(),
             exclude_paths: Vec::new(),
+        }
+    }
+}
+
+/// 動的ライブラリインジェクション検知モジュールの設定
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct DynamicLibraryMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "DynamicLibraryMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 不審なパスのリスト
+    #[serde(default = "DynamicLibraryMonitorConfig::default_suspicious_paths")]
+    pub suspicious_paths: Vec<String>,
+
+    /// 除外する PID のリスト
+    #[serde(default)]
+    pub ignore_pids: Vec<u32>,
+
+    /// 除外するライブラリパターン（正規表現）
+    #[serde(default)]
+    pub ignore_libraries: Vec<String>,
+
+    /// 全プロセスを監視するか（false の場合は root プロセスのみ）
+    #[serde(default)]
+    pub monitor_all_processes: bool,
+}
+
+impl DynamicLibraryMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        60
+    }
+
+    fn default_suspicious_paths() -> Vec<String> {
+        vec![
+            "/tmp".to_string(),
+            "/dev/shm".to_string(),
+            "/var/tmp".to_string(),
+        ]
+    }
+}
+
+impl Default for DynamicLibraryMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            suspicious_paths: Self::default_suspicious_paths(),
+            ignore_pids: Vec::new(),
+            ignore_libraries: Vec::new(),
+            monitor_all_processes: false,
         }
     }
 }
