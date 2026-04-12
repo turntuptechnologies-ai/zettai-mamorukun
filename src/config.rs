@@ -414,6 +414,10 @@ pub struct ModulesConfig {
     #[serde(default)]
     pub hidden_process_monitor: HiddenProcessMonitorConfig,
 
+    /// ハニーポットファイル（カナリアトークン）監視モジュールの設定
+    #[serde(default)]
+    pub honeypot_monitor: HoneypotMonitorConfig,
+
     /// initramfs 整合性監視モジュールの設定
     #[serde(default)]
     pub initramfs_monitor: InitramfsMonitorConfig,
@@ -5462,6 +5466,52 @@ impl Default for HiddenProcessMonitorConfig {
             skip_pids: Vec::new(),
             scan_batch_size: Self::default_scan_batch_size(),
             recheck_count: Self::default_recheck_count(),
+        }
+    }
+}
+
+/// ハニーポットファイル（カナリアトークン）監視モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct HoneypotMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// 監視対象のデコイファイル・ディレクトリのリスト
+    #[serde(default)]
+    pub watch_paths: Vec<PathBuf>,
+
+    /// 再帰的監視の有効/無効（ディレクトリ配下も監視するか）
+    #[serde(default)]
+    pub recursive: bool,
+
+    /// デバウンス時間（ミリ秒）
+    #[serde(default = "HoneypotMonitorConfig::default_debounce_ms")]
+    pub debounce_ms: u64,
+
+    /// ヘルスチェック間隔（秒）
+    #[serde(default = "HoneypotMonitorConfig::default_health_check_interval_secs")]
+    pub health_check_interval_secs: u64,
+}
+
+impl HoneypotMonitorConfig {
+    fn default_debounce_ms() -> u64 {
+        500
+    }
+
+    fn default_health_check_interval_secs() -> u64 {
+        300
+    }
+}
+
+impl Default for HoneypotMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            watch_paths: Vec::new(),
+            recursive: false,
+            debounce_ms: Self::default_debounce_ms(),
+            health_check_interval_secs: Self::default_health_check_interval_secs(),
         }
     }
 }

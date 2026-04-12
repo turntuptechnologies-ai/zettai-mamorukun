@@ -1163,6 +1163,24 @@ scan_batch_size = 1000
 # 再確認回数（false positive 対策、短命プロセスのフィルタリング）
 recheck_count = 3
 
+[modules.honeypot_monitor]
+# ハニーポットファイル（カナリアトークン）監視モジュール
+# 指定したデコイファイル・ディレクトリへのアク��スを inotify でリアルタイム監視し、
+# 不正アクセスの兆候を検知する
+# 正常運用では誰もアクセスしないファイルを設置し、アクセスが発生した時点で侵入の早期警告とする
+enabled = false
+# 監視対象のデコイファイル・ディレクトリのリスト
+# あらかじめダミーファイルを配置し、そのパスを指定する
+watch_paths = ["/etc/.secret_credentials", "/var/lib/.backup_keys", "/home/admin/.ssh/authorized_keys.bak"]
+# 再帰的監視の有効/無効（ディレクトリ配下も監視するか）
+recursive = false
+# デバウンス時間（ミリ秒）
+# 同一ファ���ルの連続イベントをこの時間内で集約する
+debounce_ms = 500
+# ヘルスチェック間隔（秒）
+# 定期的にデコイファイルの存在を確���する（消失は証拠隠滅の可能性）
+health_check_interval_secs = 300
+
 [modules.keylogger_detector]
 # キーロガー検知モジュール — /dev/input/ デバイスファイルへの不審なアクセスを監視し、
 # キーロガーの兆候を検知する
