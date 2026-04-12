@@ -2,6 +2,7 @@ use crate::config::AppConfig;
 use crate::config::DigestConfig;
 use crate::core::action::{ActionEngine, ActionEngineConfig, DigestCollector, InFlightTracker};
 use crate::core::alert_rule::{AlertRuleEngine, AlertRuleEngineConfig};
+use crate::core::api::ApiServer;
 use crate::core::correlation::{CorrelationEngine, CorrelationRuntimeConfig};
 use crate::core::event::{self, EventBus, SecurityEvent, Severity};
 use crate::core::event_store::{EventStore, EventStoreRuntimeConfig};
@@ -53,7 +54,11 @@ impl Daemon {
         let mut shared_metrics: Option<Arc<StdMutex<SharedMetrics>>> = None;
         let mut status_cancel_token: Option<CancellationToken> = None;
         let mut prometheus_cancel_token: Option<CancellationToken> = None;
+        let mut api_cancel_token: Option<CancellationToken> = None;
         let prometheus_started_at = Instant::now();
+
+        // API サーバー用リロードチャネル
+        let (reload_sender, mut reload_receiver) = tokio::sync::mpsc::channel::<()>(1);
 
         // イベントバスの初期化
         let mut action_config_sender: Option<watch::Sender<ActionEngineConfig>> = None;
@@ -399,6 +404,31 @@ impl Daemon {
             }
         }
 
+        // REST API サーバーの起動
+        if self.config.api.enabled {
+            let event_store_db_path = if self.config.event_store.enabled {
+                Some(self.config.event_store.database_path.clone())
+            } else {
+                None
+            };
+            let api_server = ApiServer::new(
+                &self.config.api,
+                Arc::clone(&shared_module_names),
+                shared_metrics.clone(),
+                Arc::clone(&shared_module_restarts),
+                prometheus_started_at,
+                event_store_db_path,
+                reload_sender.clone(),
+            );
+            api_cancel_token = Some(api_server.cancel_token());
+            match api_server.spawn() {
+                Ok(()) => {}
+                Err(e) => {
+                    tracing::error!(error = %e, "REST API サーバーの起動に失敗しました");
+                }
+            }
+        }
+
         // モジュールウォッチドッグの初期化
         let watchdog_enabled = self.config.module_watchdog.enabled;
         let watchdog_interval_duration =
@@ -727,6 +757,105 @@ impl Daemon {
                                 }
                             }
 
+                            // REST API サーバーのホットリロード
+                            if self.config.api != new_config.api {
+                                let was_enabled = self.config.api.enabled;
+                                let now_enabled = new_config.api.enabled;
+
+                                if was_enabled && !now_enabled {
+                                    // パターン A: 停止のみ
+                                    if let Some(token) = api_cancel_token.take() {
+                                        token.cancel();
+                                        tracing::info!("REST API サーバーを停止しました");
+                                    }
+                                } else if !was_enabled && now_enabled {
+                                    // パターン B: 新規起動
+                                    let event_store_db_path = if new_config.event_store.enabled {
+                                        Some(new_config.event_store.database_path.clone())
+                                    } else {
+                                        None
+                                    };
+                                    let api_server = ApiServer::new(
+                                        &new_config.api,
+                                        Arc::clone(&shared_module_names),
+                                        shared_metrics.clone(),
+                                        Arc::clone(&shared_module_restarts),
+                                        prometheus_started_at,
+                                        event_store_db_path,
+                                        reload_sender.clone(),
+                                    );
+                                    api_cancel_token = Some(api_server.cancel_token());
+                                    match api_server.spawn() {
+                                        Ok(()) => tracing::info!(
+                                            "REST API サーバーを起動しました（ホットリロード）"
+                                        ),
+                                        Err(e) => tracing::error!(
+                                            error = %e,
+                                            "REST API サーバーの起動に失敗しました"
+                                        ),
+                                    }
+                                } else {
+                                    // パターン C: bind_address/port 変更（停止→再起動）
+                                    if let Some(token) = api_cancel_token.take() {
+                                        token.cancel();
+                                    }
+                                    tokio::time::sleep(Duration::from_millis(100)).await;
+                                    let event_store_db_path = if new_config.event_store.enabled {
+                                        Some(new_config.event_store.database_path.clone())
+                                    } else {
+                                        None
+                                    };
+                                    let api_server = ApiServer::new(
+                                        &new_config.api,
+                                        Arc::clone(&shared_module_names),
+                                        shared_metrics.clone(),
+                                        Arc::clone(&shared_module_restarts),
+                                        prometheus_started_at,
+                                        event_store_db_path,
+                                        reload_sender.clone(),
+                                    );
+                                    api_cancel_token = Some(api_server.cancel_token());
+                                    match api_server.spawn() {
+                                        Ok(()) => tracing::info!(
+                                            bind_address = %new_config.api.bind_address,
+                                            port = new_config.api.port,
+                                            "REST API サーバーをリロードしました"
+                                        ),
+                                        Err(e) => {
+                                            tracing::error!(
+                                                error = %e,
+                                                "新設定での REST API サーバーの起動に失敗。旧設定で復旧を試みます"
+                                            );
+                                            let fallback_db_path = if self.config.event_store.enabled {
+                                                Some(self.config.event_store.database_path.clone())
+                                            } else {
+                                                None
+                                            };
+                                            let fallback = ApiServer::new(
+                                                &self.config.api,
+                                                Arc::clone(&shared_module_names),
+                                                shared_metrics.clone(),
+                                                Arc::clone(&shared_module_restarts),
+                                                prometheus_started_at,
+                                                fallback_db_path,
+                                                reload_sender.clone(),
+                                            );
+                                            api_cancel_token =
+                                                Some(fallback.cancel_token());
+                                            match fallback.spawn() {
+                                                Ok(()) => tracing::info!(
+                                                    "旧設定で REST API サーバーを復旧しました"
+                                                ),
+                                                Err(e2) => tracing::error!(
+                                                    error = %e2,
+                                                    "旧設定での REST API サーバーの復旧にも失敗しました"
+                                                ),
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
                             self.config = new_config;
                         }
                         Err(e) => {
@@ -742,6 +871,12 @@ impl Daemon {
                             }
                         }
                     }
+                }
+                _ = reload_receiver.recv() => {
+                    tracing::info!("API 経由で設定リロードがトリガーされました");
+                    // SAFETY: 自プロセスに SIGHUP を送信してリロードをトリガー
+                    // libc::kill は POSIX 標準の安全な関数だが、Rust の FFI 経由なので unsafe が必要
+                    unsafe { libc::kill(std::process::id() as libc::pid_t, libc::SIGHUP); }
                 }
                 _ = heartbeat.tick(), if health_enabled => {
                     let status = health_checker.status();
@@ -801,6 +936,11 @@ impl Daemon {
 
         // Prometheus エクスポーターの停止
         if let Some(token) = prometheus_cancel_token {
+            token.cancel();
+        }
+
+        // REST API サーバーの停止
+        if let Some(token) = api_cancel_token {
             token.cancel();
         }
 
