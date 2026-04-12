@@ -9,6 +9,7 @@ use crate::core::event_stream::{EventStreamRuntimeConfig, EventStreamServer};
 use crate::core::health::HealthChecker;
 use crate::core::metrics::{MetricsCollector, SharedMetrics};
 use crate::core::module_manager::ModuleManager;
+use crate::core::prometheus::PrometheusExporter;
 use crate::core::scan_state::{self, DiffKind};
 use crate::core::status::{DaemonState, StatusServer};
 use crate::core::syslog::{SyslogForwarder, SyslogRuntimeConfig};
@@ -51,6 +52,7 @@ impl Daemon {
         let shared_module_names: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
         let mut shared_metrics: Option<Arc<StdMutex<SharedMetrics>>> = None;
         let mut status_cancel_token: Option<CancellationToken> = None;
+        let mut prometheus_cancel_token: Option<CancellationToken> = None;
 
         // イベントバスの初期化
         let mut action_config_sender: Option<watch::Sender<ActionEngineConfig>> = None;
@@ -374,6 +376,25 @@ impl Daemon {
             }
         }
 
+        // Prometheus エクスポーターの起動
+        if self.config.prometheus.enabled {
+            if let Some(ref metrics) = shared_metrics {
+                let exporter =
+                    PrometheusExporter::new(&self.config.prometheus, Arc::clone(metrics));
+                prometheus_cancel_token = Some(exporter.cancel_token());
+                match exporter.spawn() {
+                    Ok(()) => {}
+                    Err(e) => {
+                        tracing::error!(error = %e, "Prometheus エクスポーターの起動に失敗しました");
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "Prometheus エクスポーターはメトリクス収集が無効のため起動できません。metrics.enabled = true を設定してください"
+                );
+            }
+        }
+
         // モジュールウォッチドッグの初期化
         let watchdog_enabled = self.config.module_watchdog.enabled;
         let watchdog_interval_duration =
@@ -626,6 +647,13 @@ impl Daemon {
                                 }
                             }
 
+                            // Prometheus エクスポーターのリロード警告
+                            if self.config.prometheus != new_config.prometheus {
+                                tracing::warn!(
+                                    "prometheus セクションの変更はホットリロードに対応していません。デーモンを再起動してください"
+                                );
+                            }
+
                             self.config = new_config;
                         }
                         Err(e) => {
@@ -695,6 +723,11 @@ impl Daemon {
 
         // ステータスサーバーの停止
         if let Some(token) = status_cancel_token {
+            token.cancel();
+        }
+
+        // Prometheus エクスポーターの停止
+        if let Some(token) = prometheus_cancel_token {
             token.cancel();
         }
 

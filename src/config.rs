@@ -65,6 +65,10 @@ pub struct AppConfig {
     /// アラートルール DSL 設定
     #[serde(default)]
     pub alert_rules: AlertRulesConfig,
+
+    /// Prometheus メトリクスエクスポーター設定
+    #[serde(default)]
+    pub prometheus: PrometheusConfig,
 }
 
 /// デーモン動作設定
@@ -4031,6 +4035,14 @@ impl AppConfig {
             }
         }
 
+        // prometheus の検証
+        if self.prometheus.enabled && self.prometheus.port == 0 {
+            errors.push("prometheus.port: 0 より大きい値を指定してください".to_string());
+        }
+        if self.prometheus.enabled && self.prometheus.bind_address.is_empty() {
+            errors.push("prometheus.bind_address: 空文字列は指定できません".to_string());
+        }
+
         if errors.is_empty() {
             Ok(())
         } else {
@@ -5921,6 +5933,42 @@ impl Default for DynamicLibraryMonitorConfig {
             ignore_pids: Vec::new(),
             ignore_libraries: Vec::new(),
             monitor_all_processes: false,
+        }
+    }
+}
+
+/// Prometheus メトリクスエクスポーター設定
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+pub struct PrometheusConfig {
+    /// Prometheus エクスポーターの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// バインドアドレス
+    #[serde(default = "PrometheusConfig::default_bind_address")]
+    pub bind_address: String,
+
+    /// リスニングポート
+    #[serde(default = "PrometheusConfig::default_port")]
+    pub port: u16,
+}
+
+impl PrometheusConfig {
+    fn default_bind_address() -> String {
+        "127.0.0.1".to_string()
+    }
+
+    fn default_port() -> u16 {
+        9100
+    }
+}
+
+impl Default for PrometheusConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind_address: Self::default_bind_address(),
+            port: Self::default_port(),
         }
     }
 }

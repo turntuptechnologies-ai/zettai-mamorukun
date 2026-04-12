@@ -786,6 +786,17 @@ enabled = false
 # Unix ソケットのパス
 socket_path = "/var/run/zettai-mamorukun/status.sock"
 
+[prometheus]
+# Prometheus メトリクスエクスポーターの有効/無効
+# 有効にすると HTTP エンドポイントで Prometheus テキスト形式のメトリクスを公開する
+# /metrics — メトリクス取得、/health — ヘルスチェック
+# 注意: metrics.enabled = true が必要
+enabled = false
+# バインドアドレス
+bind_address = "127.0.0.1"
+# リスニングポート
+port = 9100
+
 [correlation]
 # 相関分析エンジンの有効/無効
 # 複数のセキュリティイベントを時系列で相関分析し、多段階攻撃パターンを検知する

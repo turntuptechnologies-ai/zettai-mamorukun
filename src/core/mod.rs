@@ -10,6 +10,7 @@ pub mod event_stream;
 pub mod health;
 pub mod metrics;
 pub mod module_manager;
+pub mod prometheus;
 pub mod scan_diff;
 pub mod scan_state;
 pub mod status;
