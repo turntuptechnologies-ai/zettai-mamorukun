@@ -1,5 +1,6 @@
 pub mod action;
 pub mod alert_rule;
+pub mod api;
 pub mod correlation;
 pub mod correlation_presets;
 pub mod daemon;

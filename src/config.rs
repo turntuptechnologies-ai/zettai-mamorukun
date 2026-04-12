@@ -69,6 +69,10 @@ pub struct AppConfig {
     /// Prometheus メトリクスエクスポーター設定
     #[serde(default)]
     pub prometheus: PrometheusConfig,
+
+    /// REST API サーバー設定
+    #[serde(default)]
+    pub api: ApiConfig,
 }
 
 /// デーモン動作設定
@@ -4043,6 +4047,14 @@ impl AppConfig {
             errors.push("prometheus.bind_address: 空文字列は指定できません".to_string());
         }
 
+        // api の検証
+        if self.api.enabled && self.api.port == 0 {
+            errors.push("api.port: 0 より大きい値を指定してください".to_string());
+        }
+        if self.api.enabled && self.api.bind_address.is_empty() {
+            errors.push("api.bind_address: 空文字列は指定できません".to_string());
+        }
+
         if errors.is_empty() {
             Ok(())
         } else {
@@ -5964,6 +5976,42 @@ impl PrometheusConfig {
 }
 
 impl Default for PrometheusConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind_address: Self::default_bind_address(),
+            port: Self::default_port(),
+        }
+    }
+}
+
+/// REST API サーバー設定
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+pub struct ApiConfig {
+    /// REST API サーバーの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// バインドアドレス
+    #[serde(default = "ApiConfig::default_bind_address")]
+    pub bind_address: String,
+
+    /// リスニングポート
+    #[serde(default = "ApiConfig::default_port")]
+    pub port: u16,
+}
+
+impl ApiConfig {
+    fn default_bind_address() -> String {
+        "127.0.0.1".to_string()
+    }
+
+    fn default_port() -> u16 {
+        9201
+    }
+}
+
+impl Default for ApiConfig {
     fn default() -> Self {
         Self {
             enabled: false,
