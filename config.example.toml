@@ -1206,6 +1206,30 @@ scan_interval_secs = 30
 # 許可プロセスリスト（ホワイトリスト）— これらのプロセスは正規のデスクトップ環境として除外
 allowed_processes = ["Xorg", "gnome-shell", "kwin_wayland", "sway", "systemd-logind", "libinput", "mutter", "weston", "Hyprland"]
 
+[modules.sshd_config_monitor]
+# SSH 設定セキュリティ監査モジュール
+# sshd_config のセキュリティ設定を定期的に監査し、危険な設定を検知する
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 300
+# 監視対象ファイル
+config_paths = ["/etc/ssh/sshd_config"]
+# Include ディレクティブの再帰的展開
+follow_includes = true
+# ファイルサイズ上限（バイト）
+max_file_size_bytes = 1048576
+# 監査ルール
+check_permit_root_login = true
+check_password_authentication = true
+check_permit_empty_passwords = true
+check_protocol_version = true
+check_x11_forwarding = true
+check_strict_modes = true
+check_max_auth_tries = true
+max_auth_tries_threshold = 6
+check_gateway_ports = true
+check_permit_tunnel = true
+
 # アラートルール DSL
 # カスタム条件でセキュリティイベントを監視し、アクションを実行する
 [alert_rules]

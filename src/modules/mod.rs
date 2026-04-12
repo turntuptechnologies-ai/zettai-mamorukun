@@ -59,6 +59,7 @@ pub mod shell_config_monitor;
 pub mod shm_monitor;
 pub mod ssh_brute_force;
 pub mod ssh_key_monitor;
+pub mod sshd_config_monitor;
 pub mod sudoers_monitor;
 pub mod suid_sgid_monitor;
 pub mod swap_tmpfs_monitor;
