@@ -188,6 +188,8 @@ pub struct ApiServer {
     ws_connections: Arc<AtomicUsize>,
     cors_config: Arc<CorsConfig>,
     openapi_enabled: bool,
+    default_page_size: u32,
+    max_page_size: u32,
 }
 
 impl ApiServer {
@@ -226,6 +228,8 @@ impl ApiServer {
             ws_connections: Arc::new(AtomicUsize::new(0)),
             cors_config: Arc::new(config.cors.clone()),
             openapi_enabled: config.openapi_enabled,
+            default_page_size: config.default_page_size,
+            max_page_size: config.max_page_size,
         }
     }
 
@@ -255,6 +259,8 @@ impl ApiServer {
         let ws_connections = self.ws_connections;
         let cors_config = self.cors_config;
         let openapi_enabled = self.openapi_enabled;
+        let default_page_size = self.default_page_size;
+        let max_page_size = self.max_page_size;
 
         // クリーンアップタスク
         if self.rate_limit_config.enabled {
@@ -301,12 +307,14 @@ impl ApiServer {
                                 let wsc_count = Arc::clone(&ws_connections);
                                 let cors = Arc::clone(&cors_config);
                                 let oa_enabled = openapi_enabled;
+                                let dps = default_page_size;
+                                let mps = max_page_size;
                                 tokio::spawn(async move {
                                     if let Err(e) = Self::handle_connection(
                                         stream, &names, &metrics, &restarts,
                                         started, &db_path, &sender, &toks,
                                         client_ip, &rl, &eb, &wsc, &wsc_count, &cors,
-                                        oa_enabled,
+                                        oa_enabled, dps, mps,
                                     ).await {
                                         tracing::debug!(error = %e, "API 接続の処理に失敗");
                                     }
@@ -461,6 +469,8 @@ impl ApiServer {
         ws_connections: &Arc<AtomicUsize>,
         cors_config: &Arc<CorsConfig>,
         openapi_enabled: bool,
+        default_page_size: u32,
+        max_page_size: u32,
     ) -> Result<(), io::Error> {
         // 接続タイムアウト（スローロリス対策）
         let result = tokio::time::timeout(
@@ -644,7 +654,12 @@ impl ApiServer {
                 Self::send_json_response_with_headers(&mut stream, 200, "OK", &body, extra).await?;
             }
             (HttpMethod::Get, "/api/v1/events") => match event_store_db_path {
-                Some(db_path) => match Self::build_events_response(db_path, &query_params) {
+                Some(db_path) => match Self::build_events_response(
+                    db_path,
+                    &query_params,
+                    default_page_size,
+                    max_page_size,
+                ) {
                     Ok(body) => {
                         Self::send_json_response_with_headers(&mut stream, 200, "OK", &body, extra)
                             .await?;
@@ -1211,6 +1226,8 @@ impl ApiServer {
     fn build_events_response(
         db_path: &str,
         query_params: &HashMap<String, String>,
+        default_page_size: u32,
+        max_page_size: u32,
     ) -> Result<String, String> {
         let conn = rusqlite::Connection::open_with_flags(
             db_path,
@@ -1222,6 +1239,15 @@ impl ApiServer {
             "SELECT id, timestamp, severity, source_module, event_type, message, details FROM security_events WHERE 1=1"
                 .to_string();
         let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        let cursor = query_params
+            .get("cursor")
+            .and_then(|v| v.parse::<i64>().ok());
+
+        if let Some(cursor_val) = cursor {
+            sql.push_str(" AND id < ?");
+            params_vec.push(Box::new(cursor_val));
+        }
 
         if let Some(severity) = query_params.get("severity") {
             sql.push_str(" AND severity = ?");
@@ -1250,11 +1276,11 @@ impl ApiServer {
         let limit = query_params
             .get("limit")
             .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(100)
-            .min(1000);
+            .unwrap_or(default_page_size)
+            .min(max_page_size);
 
         sql.push_str(" ORDER BY id DESC LIMIT ?");
-        params_vec.push(Box::new(limit));
+        params_vec.push(Box::new(limit + 1));
 
         let params_refs: Vec<&dyn rusqlite::types::ToSql> =
             params_vec.iter().map(|p| p.as_ref()).collect();
@@ -1284,7 +1310,7 @@ impl ApiServer {
             })
             .map_err(|e| format!("クエリの実行に失敗: {}", e))?;
 
-        let mut events_json = Vec::new();
+        let mut events_data: Vec<(i64, String)> = Vec::new();
         for row in rows {
             match row {
                 Ok((id, timestamp, severity, source_module, event_type, message, details)) => {
@@ -1292,7 +1318,7 @@ impl ApiServer {
                         Some(ref d) => format!(r#","details":"{}""#, Self::escape_json_string(d)),
                         None => String::new(),
                     };
-                    events_json.push(format!(
+                    let json = format!(
                         r#"{{"id":{},"timestamp":"{}","severity":"{}","source_module":"{}","event_type":"{}","message":"{}"{}}}"#,
                         id,
                         Self::escape_json_string(&timestamp),
@@ -1301,7 +1327,8 @@ impl ApiServer {
                         Self::escape_json_string(&event_type),
                         Self::escape_json_string(&message),
                         details_part
-                    ));
+                    );
+                    events_data.push((id, json));
                 }
                 Err(e) => {
                     tracing::debug!(error = %e, "イベント行の読み取りに失敗");
@@ -1309,10 +1336,26 @@ impl ApiServer {
             }
         }
 
-        let count = events_json.len();
+        let has_more = events_data.len() > limit as usize;
+        if has_more {
+            events_data.pop();
+        }
+        let count = events_data.len();
+        let next_cursor = if has_more {
+            events_data
+                .last()
+                .map(|(id, _)| id.to_string())
+                .unwrap_or_else(|| "null".to_string())
+        } else {
+            "null".to_string()
+        };
+
+        let events_json: Vec<&str> = events_data.iter().map(|(_, json)| json.as_str()).collect();
         Ok(format!(
-            r#"{{"events":[{}],"count":{}}}"#,
+            r#"{{"items":[{}],"next_cursor":{},"has_more":{},"count":{}}}"#,
             events_json.join(","),
+            next_cursor,
+            has_more,
             count
         ))
     }
@@ -1490,6 +1533,8 @@ mod tests {
             websocket: WebSocketConfig::default(),
             cors: CorsConfig::default(),
             openapi_enabled: true,
+            default_page_size: 50,
+            max_page_size: 200,
         };
         let server = ApiServer::new(
             &config,
@@ -1541,6 +1586,8 @@ mod tests {
             websocket: WebSocketConfig::default(),
             cors: CorsConfig::default(),
             openapi_enabled: true,
+            default_page_size: 50,
+            max_page_size: 200,
         };
         let modules = Arc::new(StdMutex::new(vec!["test_module".to_string()]));
         let metrics = Arc::new(StdMutex::new(SharedMetrics {
@@ -1602,6 +1649,8 @@ mod tests {
             websocket: WebSocketConfig::default(),
             cors: CorsConfig::default(),
             openapi_enabled: true,
+            default_page_size: 50,
+            max_page_size: 200,
         };
         let modules = Arc::new(StdMutex::new(vec![
             "mod_a".to_string(),
@@ -1662,6 +1711,8 @@ mod tests {
             websocket: WebSocketConfig::default(),
             cors: CorsConfig::default(),
             openapi_enabled: true,
+            default_page_size: 50,
+            max_page_size: 200,
         };
         let server = ApiServer::new(
             &config,
@@ -1717,6 +1768,8 @@ mod tests {
             websocket: WebSocketConfig::default(),
             cors: CorsConfig::default(),
             openapi_enabled: true,
+            default_page_size: 50,
+            max_page_size: 200,
         };
         let server = ApiServer::new(
             &config,
@@ -1768,6 +1821,8 @@ mod tests {
             websocket: WebSocketConfig::default(),
             cors: CorsConfig::default(),
             openapi_enabled: true,
+            default_page_size: 50,
+            max_page_size: 200,
         };
         let server = ApiServer::new(
             &config,
@@ -1819,6 +1874,8 @@ mod tests {
             websocket: WebSocketConfig::default(),
             cors: CorsConfig::default(),
             openapi_enabled: true,
+            default_page_size: 50,
+            max_page_size: 200,
         };
         let server = ApiServer::new(
             &config,
@@ -1958,6 +2015,8 @@ mod tests {
             websocket: WebSocketConfig::default(),
             cors: CorsConfig::default(),
             openapi_enabled: true,
+            default_page_size: 50,
+            max_page_size: 200,
         };
         let server = ApiServer::new(
             &config,
@@ -2133,6 +2192,8 @@ mod tests {
             websocket: ws_config,
             cors: CorsConfig::default(),
             openapi_enabled: true,
+            default_page_size: 50,
+            max_page_size: 200,
         };
         let server = ApiServer::new(
             &config,
@@ -2589,6 +2650,8 @@ mod tests {
             websocket: WebSocketConfig::default(),
             cors: CorsConfig::default(),
             openapi_enabled: true,
+            default_page_size: 50,
+            max_page_size: 200,
         };
         let server = ApiServer::new(
             &config,
@@ -2813,6 +2876,8 @@ mod tests {
                 ..CorsConfig::default()
             },
             openapi_enabled: true,
+            default_page_size: 50,
+            max_page_size: 200,
         };
         let server = ApiServer::new(
             &config,
@@ -2873,6 +2938,8 @@ mod tests {
                 ..CorsConfig::default()
             },
             openapi_enabled: true,
+            default_page_size: 50,
+            max_page_size: 200,
         };
         let server = ApiServer::new(
             &config,
@@ -2932,6 +2999,8 @@ mod tests {
                 ..CorsConfig::default()
             },
             openapi_enabled: true,
+            default_page_size: 50,
+            max_page_size: 200,
         };
         let server = ApiServer::new(
             &config,
@@ -2987,6 +3056,8 @@ mod tests {
             websocket: WebSocketConfig::default(),
             cors: CorsConfig::default(),
             openapi_enabled: true,
+            default_page_size: 50,
+            max_page_size: 200,
         };
         let server = ApiServer::new(
             &config,
@@ -3039,6 +3110,8 @@ mod tests {
             websocket: WebSocketConfig::default(),
             cors: CorsConfig::default(),
             openapi_enabled: false,
+            default_page_size: 50,
+            max_page_size: 200,
         };
         let server = ApiServer::new(
             &config,
@@ -3071,5 +3144,103 @@ mod tests {
 
         cancel.cancel();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    fn setup_test_db(count: usize) -> tempfile::NamedTempFile {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = rusqlite::Connection::open(tmp.path()).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS security_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                source_module TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                message TEXT NOT NULL,
+                details TEXT
+            )",
+        )
+        .unwrap();
+        for i in 0..count {
+            conn.execute(
+                "INSERT INTO security_events (timestamp, severity, source_module, event_type, message) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    format!("2026-01-01T00:{:02}:00", i),
+                    "INFO",
+                    "test_module",
+                    "test_event",
+                    format!("テストイベント{}", i),
+                ],
+            )
+            .unwrap();
+        }
+        tmp
+    }
+
+    #[test]
+    fn test_events_pagination_basic() {
+        let tmp = setup_test_db(3);
+        let db_path = tmp.path().to_str().unwrap();
+        let params = HashMap::new();
+        let result = ApiServer::build_events_response(db_path, &params, 50, 200).unwrap();
+        assert!(result.contains(r#""items":["#));
+        assert!(result.contains(r#""has_more":false"#));
+        assert!(result.contains(r#""next_cursor":null"#));
+        assert!(result.contains(r#""count":3"#));
+    }
+
+    #[test]
+    fn test_events_pagination_with_cursor() {
+        let tmp = setup_test_db(5);
+        let db_path = tmp.path().to_str().unwrap();
+
+        // 最初のページ（limit=2）
+        let mut params = HashMap::new();
+        params.insert("limit".to_string(), "2".to_string());
+        let result = ApiServer::build_events_response(db_path, &params, 50, 200).unwrap();
+        assert!(result.contains(r#""has_more":true"#));
+        assert!(result.contains(r#""count":2"#));
+
+        // next_cursor を取得
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let next_cursor = parsed["next_cursor"].as_i64().unwrap();
+
+        // 2ページ目
+        let mut params2 = HashMap::new();
+        params2.insert("limit".to_string(), "2".to_string());
+        params2.insert("cursor".to_string(), next_cursor.to_string());
+        let result2 = ApiServer::build_events_response(db_path, &params2, 50, 200).unwrap();
+        let parsed2: serde_json::Value = serde_json::from_str(&result2).unwrap();
+        assert_eq!(parsed2["count"].as_i64().unwrap(), 2);
+        assert!(parsed2["has_more"].as_bool().unwrap());
+
+        // 各アイテムの id が cursor より小さいこと
+        for item in parsed2["items"].as_array().unwrap() {
+            assert!(item["id"].as_i64().unwrap() < next_cursor);
+        }
+    }
+
+    #[test]
+    fn test_events_pagination_has_more() {
+        let tmp = setup_test_db(5);
+        let db_path = tmp.path().to_str().unwrap();
+
+        // limit=5 で 5件ちょうど → has_more=false
+        let mut params = HashMap::new();
+        params.insert("limit".to_string(), "5".to_string());
+        let result = ApiServer::build_events_response(db_path, &params, 50, 200).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert!(!parsed["has_more"].as_bool().unwrap());
+        assert_eq!(parsed["count"].as_i64().unwrap(), 5);
+        assert!(parsed["next_cursor"].is_null());
+
+        // limit=4 で 5件中4件 → has_more=true
+        let mut params2 = HashMap::new();
+        params2.insert("limit".to_string(), "4".to_string());
+        let result2 = ApiServer::build_events_response(db_path, &params2, 50, 200).unwrap();
+        let parsed2: serde_json::Value = serde_json::from_str(&result2).unwrap();
+        assert!(parsed2["has_more"].as_bool().unwrap());
+        assert_eq!(parsed2["count"].as_i64().unwrap(), 4);
+        assert!(parsed2["next_cursor"].is_number());
     }
 }

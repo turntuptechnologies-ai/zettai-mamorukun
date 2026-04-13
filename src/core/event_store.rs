@@ -488,6 +488,8 @@ pub struct EventQuery {
     pub event_type: Option<String>,
     /// 表示件数上限
     pub limit: u32,
+    /// ページネーションカーソル（指定した ID より古いイベントを取得）
+    pub cursor: Option<i64>,
 }
 
 /// 検索結果のイベントレコード
@@ -741,6 +743,11 @@ pub fn query_events(conn: &Connection, query: &EventQuery) -> Result<Vec<EventRe
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     let mut idx = 1;
 
+    if let Some(cursor) = query.cursor {
+        sql.push_str(&format!(" AND id < ?{}", idx));
+        param_values.push(Box::new(cursor));
+        idx += 1;
+    }
     if let Some(module) = &query.module {
         sql.push_str(&format!(" AND source_module = ?{}", idx));
         param_values.push(Box::new(module.clone()));
@@ -1273,6 +1280,7 @@ mod tests {
             until: None,
             event_type: None,
             limit: 100,
+            cursor: None,
         };
         let results = query_events(&conn, &query).unwrap();
         assert!(results.is_empty());
@@ -1313,6 +1321,7 @@ mod tests {
             until: None,
             event_type: None,
             limit: 100,
+            cursor: None,
         };
         let results = query_events(&conn, &query).unwrap();
         assert_eq!(results.len(), 3);
@@ -1346,6 +1355,7 @@ mod tests {
             until: None,
             event_type: None,
             limit: 100,
+            cursor: None,
         };
         let results = query_events(&conn, &query).unwrap();
         assert_eq!(results.len(), 1);
@@ -1370,6 +1380,7 @@ mod tests {
             until: None,
             event_type: None,
             limit: 100,
+            cursor: None,
         };
         let results = query_events(&conn, &query).unwrap();
         assert_eq!(results.len(), 1);
@@ -1393,9 +1404,57 @@ mod tests {
             until: None,
             event_type: None,
             limit: 3,
+            cursor: None,
         };
         let results = query_events(&conn, &query).unwrap();
         assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn test_query_events_with_cursor() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+
+        let events: Vec<SecurityEvent> = (0..5)
+            .map(|i| SecurityEvent::new("ev", Severity::Info, "mod", &format!("イベント{}", i)))
+            .collect();
+        EventStore::insert_events(&mut conn, &events).unwrap();
+
+        // 全件取得して ID を確認
+        let all = query_events(
+            &conn,
+            &EventQuery {
+                module: None,
+                severity: None,
+                since: None,
+                until: None,
+                event_type: None,
+                limit: 100,
+                cursor: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(all.len(), 5);
+
+        // cursor を使って途中から取得（id DESC なので最新の id をカーソルに指定）
+        let cursor_id = all[1].id;
+        let paged = query_events(
+            &conn,
+            &EventQuery {
+                module: None,
+                severity: None,
+                since: None,
+                until: None,
+                event_type: None,
+                limit: 100,
+                cursor: Some(cursor_id),
+            },
+        )
+        .unwrap();
+        assert_eq!(paged.len(), 3);
+        for record in &paged {
+            assert!(record.id < cursor_id);
+        }
     }
 
     fn insert_event_at(conn: &Connection, timestamp: i64, severity: &str, module: &str) {

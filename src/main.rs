@@ -497,6 +497,7 @@ fn run_search_events(
         until: until_ts,
         event_type: event_type.clone(),
         limit,
+        cursor: None,
     };
 
     let records = match event_store::query_events(&conn, &query) {
@@ -640,6 +641,7 @@ fn run_export_events(
         until: until_ts,
         event_type: None,
         limit: limit.unwrap_or(u32::MAX),
+        cursor: None,
     };
 
     let records = match event_store::query_events(&conn, &query) {

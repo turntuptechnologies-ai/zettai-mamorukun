@@ -6150,6 +6150,14 @@ pub struct ApiConfig {
     /// OpenAPI スキーマエンドポイントの有効/無効
     #[serde(default = "ApiConfig::default_openapi_enabled")]
     pub openapi_enabled: bool,
+
+    /// デフォルトページサイズ
+    #[serde(default = "ApiConfig::default_page_size")]
+    pub default_page_size: u32,
+
+    /// 最大ページサイズ
+    #[serde(default = "ApiConfig::default_max_page_size")]
+    pub max_page_size: u32,
 }
 
 impl ApiConfig {
@@ -6164,6 +6172,14 @@ impl ApiConfig {
     fn default_openapi_enabled() -> bool {
         true
     }
+
+    fn default_page_size() -> u32 {
+        50
+    }
+
+    fn default_max_page_size() -> u32 {
+        200
+    }
 }
 
 impl Default for ApiConfig {
@@ -6177,6 +6193,8 @@ impl Default for ApiConfig {
             websocket: WebSocketConfig::default(),
             cors: CorsConfig::default(),
             openapi_enabled: Self::default_openapi_enabled(),
+            default_page_size: Self::default_page_size(),
+            max_page_size: Self::default_max_page_size(),
         }
     }
 }
@@ -6192,6 +6210,8 @@ impl Clone for ApiConfig {
             websocket: self.websocket.clone(),
             cors: self.cors.clone(),
             openapi_enabled: self.openapi_enabled,
+            default_page_size: self.default_page_size,
+            max_page_size: self.max_page_size,
         }
     }
 }
