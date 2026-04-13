@@ -190,6 +190,8 @@ pub struct ApiServer {
     openapi_enabled: bool,
     default_page_size: u32,
     max_page_size: u32,
+    batch_max_size: u32,
+    max_request_body_size: usize,
 }
 
 impl ApiServer {
@@ -230,6 +232,8 @@ impl ApiServer {
             openapi_enabled: config.openapi_enabled,
             default_page_size: config.default_page_size,
             max_page_size: config.max_page_size,
+            batch_max_size: config.batch_max_size,
+            max_request_body_size: config.max_request_body_size,
         }
     }
 
@@ -261,6 +265,8 @@ impl ApiServer {
         let openapi_enabled = self.openapi_enabled;
         let default_page_size = self.default_page_size;
         let max_page_size = self.max_page_size;
+        let batch_max_size = self.batch_max_size;
+        let max_request_body_size = self.max_request_body_size;
 
         // クリーンアップタスク
         if self.rate_limit_config.enabled {
@@ -309,12 +315,14 @@ impl ApiServer {
                                 let oa_enabled = openapi_enabled;
                                 let dps = default_page_size;
                                 let mps = max_page_size;
+                                let bms = batch_max_size;
+                                let mrbs = max_request_body_size;
                                 tokio::spawn(async move {
                                     if let Err(e) = Self::handle_connection(
                                         stream, &names, &metrics, &restarts,
                                         started, &db_path, &sender, &toks,
                                         client_ip, &rl, &eb, &wsc, &wsc_count, &cors,
-                                        oa_enabled, dps, mps,
+                                        oa_enabled, dps, mps, bms, mrbs,
                                     ).await {
                                         tracing::debug!(error = %e, "API 接続の処理に失敗");
                                     }
@@ -392,6 +400,9 @@ impl ApiServer {
             | (HttpMethod::Get, "/api/v1/events")
             | (HttpMethod::Get, "/api/v1/events/stream") => Some(ApiRole::ReadOnly),
             (HttpMethod::Post, "/api/v1/reload") => Some(ApiRole::Admin),
+            (HttpMethod::Post, "/api/v1/events/batch/delete") => Some(ApiRole::Admin),
+            (HttpMethod::Post, "/api/v1/events/batch/export") => Some(ApiRole::ReadOnly),
+            (HttpMethod::Post, "/api/v1/events/batch/acknowledge") => Some(ApiRole::Admin),
             _ => None,
         }
     }
@@ -471,6 +482,8 @@ impl ApiServer {
         openapi_enabled: bool,
         default_page_size: u32,
         max_page_size: u32,
+        batch_max_size: u32,
+        max_request_body_size: usize,
     ) -> Result<(), io::Error> {
         // 接続タイムアウト（スローロリス対策）
         let result = tokio::time::timeout(
@@ -709,6 +722,231 @@ impl ApiServer {
                     .await?;
                 }
             },
+            (HttpMethod::Post, "/api/v1/events/batch/delete") => match event_store_db_path {
+                Some(db_path) => {
+                    let body_result = tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        Self::read_request_with_body(&mut stream, max_request_body_size),
+                    )
+                    .await;
+                    let full = match body_result {
+                        Ok(Ok(s)) => s,
+                        Ok(Err(e)) => {
+                            let msg = format!("リクエストの読み取りに失敗: {}", e);
+                            Self::send_error_with_headers(
+                                &mut stream,
+                                400,
+                                "Bad Request",
+                                &msg,
+                                extra,
+                            )
+                            .await?;
+                            stream.shutdown().await?;
+                            return Ok(());
+                        }
+                        Err(_) => {
+                            Self::send_error_with_headers(
+                                &mut stream,
+                                408,
+                                "Request Timeout",
+                                "リクエストタイムアウト",
+                                extra,
+                            )
+                            .await?;
+                            stream.shutdown().await?;
+                            return Ok(());
+                        }
+                    };
+                    let body = full.split("\r\n\r\n").nth(1).unwrap_or("");
+                    match Self::handle_batch_delete(db_path, body, batch_max_size) {
+                        Ok(resp) => {
+                            Self::send_json_response_with_headers(
+                                &mut stream,
+                                200,
+                                "OK",
+                                &resp,
+                                extra,
+                            )
+                            .await?;
+                        }
+                        Err((status, msg)) => {
+                            let status_text = match status {
+                                400 => "Bad Request",
+                                500 => "Internal Server Error",
+                                _ => "Error",
+                            };
+                            Self::send_error_with_headers(
+                                &mut stream,
+                                status,
+                                status_text,
+                                &msg,
+                                extra,
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                None => {
+                    Self::send_error_with_headers(
+                        &mut stream,
+                        503,
+                        "Service Unavailable",
+                        "イベントストアが無効です",
+                        extra,
+                    )
+                    .await?;
+                }
+            },
+            (HttpMethod::Post, "/api/v1/events/batch/export") => match event_store_db_path {
+                Some(db_path) => {
+                    let body_result = tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        Self::read_request_with_body(&mut stream, max_request_body_size),
+                    )
+                    .await;
+                    let full = match body_result {
+                        Ok(Ok(s)) => s,
+                        Ok(Err(e)) => {
+                            let msg = format!("リクエストの読み取りに失敗: {}", e);
+                            Self::send_error_with_headers(
+                                &mut stream,
+                                400,
+                                "Bad Request",
+                                &msg,
+                                extra,
+                            )
+                            .await?;
+                            stream.shutdown().await?;
+                            return Ok(());
+                        }
+                        Err(_) => {
+                            Self::send_error_with_headers(
+                                &mut stream,
+                                408,
+                                "Request Timeout",
+                                "リクエストタイムアウト",
+                                extra,
+                            )
+                            .await?;
+                            stream.shutdown().await?;
+                            return Ok(());
+                        }
+                    };
+                    let body = full.split("\r\n\r\n").nth(1).unwrap_or("");
+                    match Self::handle_batch_export(db_path, body, batch_max_size) {
+                        Ok(resp) => {
+                            Self::send_json_response_with_headers(
+                                &mut stream,
+                                200,
+                                "OK",
+                                &resp,
+                                extra,
+                            )
+                            .await?;
+                        }
+                        Err((status, msg)) => {
+                            let status_text = match status {
+                                400 => "Bad Request",
+                                500 => "Internal Server Error",
+                                _ => "Error",
+                            };
+                            Self::send_error_with_headers(
+                                &mut stream,
+                                status,
+                                status_text,
+                                &msg,
+                                extra,
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                None => {
+                    Self::send_error_with_headers(
+                        &mut stream,
+                        503,
+                        "Service Unavailable",
+                        "イベントストアが無効です",
+                        extra,
+                    )
+                    .await?;
+                }
+            },
+            (HttpMethod::Post, "/api/v1/events/batch/acknowledge") => match event_store_db_path {
+                Some(db_path) => {
+                    let body_result = tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        Self::read_request_with_body(&mut stream, max_request_body_size),
+                    )
+                    .await;
+                    let full = match body_result {
+                        Ok(Ok(s)) => s,
+                        Ok(Err(e)) => {
+                            let msg = format!("リクエストの読み取りに失敗: {}", e);
+                            Self::send_error_with_headers(
+                                &mut stream,
+                                400,
+                                "Bad Request",
+                                &msg,
+                                extra,
+                            )
+                            .await?;
+                            stream.shutdown().await?;
+                            return Ok(());
+                        }
+                        Err(_) => {
+                            Self::send_error_with_headers(
+                                &mut stream,
+                                408,
+                                "Request Timeout",
+                                "リクエストタイムアウト",
+                                extra,
+                            )
+                            .await?;
+                            stream.shutdown().await?;
+                            return Ok(());
+                        }
+                    };
+                    let body = full.split("\r\n\r\n").nth(1).unwrap_or("");
+                    match Self::handle_batch_acknowledge(db_path, body, batch_max_size) {
+                        Ok(resp) => {
+                            Self::send_json_response_with_headers(
+                                &mut stream,
+                                200,
+                                "OK",
+                                &resp,
+                                extra,
+                            )
+                            .await?;
+                        }
+                        Err((status, msg)) => {
+                            let status_text = match status {
+                                400 => "Bad Request",
+                                500 => "Internal Server Error",
+                                _ => "Error",
+                            };
+                            Self::send_error_with_headers(
+                                &mut stream,
+                                status,
+                                status_text,
+                                &msg,
+                                extra,
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                None => {
+                    Self::send_error_with_headers(
+                        &mut stream,
+                        503,
+                        "Service Unavailable",
+                        "イベントストアが無効です",
+                        extra,
+                    )
+                    .await?;
+                }
+            },
             (HttpMethod::Get, "/api/v1/openapi.json") => {
                 if openapi_enabled {
                     let schema = openapi::generate_openapi_schema();
@@ -742,6 +980,9 @@ impl ApiServer {
                         | "/api/v1/events"
                         | "/api/v1/reload"
                         | "/api/v1/openapi.json"
+                        | "/api/v1/events/batch/delete"
+                        | "/api/v1/events/batch/export"
+                        | "/api/v1/events/batch/acknowledge"
                 ) {
                     Self::send_error_with_headers(
                         &mut stream,
@@ -1117,6 +1358,69 @@ impl ApiServer {
         Ok(String::from_utf8_lossy(&buf[..n]).to_string())
     }
 
+    async fn read_request_with_body(
+        stream: &mut tokio::net::TcpStream,
+        max_body_size: usize,
+    ) -> Result<String, io::Error> {
+        let mut buf = Vec::with_capacity(4096);
+        let mut tmp = [0u8; 4096];
+        let header_end;
+
+        loop {
+            let n = stream.read(&mut tmp).await?;
+            if n == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "空のリクエスト",
+                ));
+            }
+            buf.extend_from_slice(&tmp[..n]);
+
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                header_end = pos + 4;
+                break;
+            }
+
+            if buf.len() > 16384 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "ヘッダーが大きすぎます",
+                ));
+            }
+        }
+
+        let header_str = String::from_utf8_lossy(&buf[..header_end]);
+        let content_length: usize = header_str
+            .lines()
+            .find_map(|line| {
+                let lower = line.to_ascii_lowercase();
+                if lower.starts_with("content-length:") {
+                    line["content-length:".len()..].trim().parse().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+
+        if content_length > max_body_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "リクエストボディが大きすぎます",
+            ));
+        }
+
+        let total_needed = header_end + content_length;
+        while buf.len() < total_needed {
+            let n = stream.read(&mut tmp).await?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+
+        Ok(String::from_utf8_lossy(&buf[..buf.len().min(total_needed)]).to_string())
+    }
+
     fn parse_request(raw: &str) -> (HttpMethod, String, HashMap<String, String>) {
         let first_line = raw.lines().next().unwrap_or("");
         let parts: Vec<&str> = first_line.split_whitespace().collect();
@@ -1429,6 +1733,202 @@ impl ApiServer {
         result
     }
 
+    fn parse_iso8601_to_timestamp(s: &str) -> Option<i64> {
+        let s = s.trim().trim_matches('"');
+        if s.len() == 20 && s.ends_with('Z') {
+            let inner = &s[..19];
+            let parts: Vec<&str> = inner.split('T').collect();
+            if parts.len() == 2 {
+                let datetime_str = format!("{} {}", parts[0], parts[1]);
+                return crate::core::event_store::parse_datetime(&datetime_str).ok();
+            }
+        }
+        if s.len() == 10 {
+            let datetime_str = format!("{} 00:00:00", s);
+            return crate::core::event_store::parse_datetime(&datetime_str).ok();
+        }
+        None
+    }
+
+    fn handle_batch_delete(
+        db_path: &str,
+        body: &str,
+        batch_max_size: u32,
+    ) -> Result<String, (u16, String)> {
+        let json: serde_json::Value = serde_json::from_str(body)
+            .map_err(|e| (400u16, format!("JSON パースに失敗: {}", e)))?;
+
+        let has_ids = json.get("ids").is_some();
+        let has_filter = json.get("filter").is_some();
+
+        if has_ids && has_filter {
+            return Err((400, "ids と filter は同時に指定できません".to_string()));
+        }
+        if !has_ids && !has_filter {
+            return Err((400, "ids または filter を指定してください".to_string()));
+        }
+
+        let conn = rusqlite::Connection::open(db_path)
+            .map_err(|e| (500u16, format!("データベースのオープンに失敗: {}", e)))?;
+
+        if has_ids {
+            let ids = json["ids"]
+                .as_array()
+                .ok_or_else(|| (400u16, "ids は配列で指定してください".to_string()))?;
+            if ids.len() > batch_max_size as usize {
+                return Err((
+                    400,
+                    format!("ids の件数が上限 {} を超えています", batch_max_size),
+                ));
+            }
+            let id_values: Vec<i64> = ids.iter().filter_map(|v| v.as_i64()).collect();
+            if id_values.len() != ids.len() {
+                return Err((400, "ids に不正な値が含まれています".to_string()));
+            }
+            let deleted = crate::core::event_store::batch_delete_by_ids(&conn, &id_values)
+                .map_err(|e| (500u16, format!("{}", e)))?;
+            Ok(format!(r#"{{"deleted":{}}}"#, deleted))
+        } else {
+            let filter_obj = &json["filter"];
+            let filter = crate::core::event_store::BatchDeleteFilter {
+                severity: filter_obj
+                    .get("severity")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                source_module: filter_obj
+                    .get("module")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                since: filter_obj
+                    .get("since")
+                    .and_then(|v| v.as_str())
+                    .and_then(Self::parse_iso8601_to_timestamp),
+                until: filter_obj
+                    .get("until")
+                    .and_then(|v| v.as_str())
+                    .and_then(Self::parse_iso8601_to_timestamp),
+            };
+            let deleted = crate::core::event_store::batch_delete_by_filter(&conn, &filter)
+                .map_err(|e| (500u16, format!("{}", e)))?;
+            Ok(format!(r#"{{"deleted":{}}}"#, deleted))
+        }
+    }
+
+    fn handle_batch_export(
+        db_path: &str,
+        body: &str,
+        batch_max_size: u32,
+    ) -> Result<String, (u16, String)> {
+        let json: serde_json::Value = serde_json::from_str(body)
+            .map_err(|e| (400u16, format!("JSON パースに失敗: {}", e)))?;
+
+        let filter = json.get("filter");
+        let limit = json
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+            .unwrap_or(batch_max_size)
+            .min(batch_max_size);
+
+        let query = crate::core::event_store::EventQuery {
+            module: filter
+                .and_then(|f| f.get("module"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            severity: filter
+                .and_then(|f| f.get("severity"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            since: filter
+                .and_then(|f| f.get("since"))
+                .and_then(|v| v.as_str())
+                .and_then(Self::parse_iso8601_to_timestamp),
+            until: filter
+                .and_then(|f| f.get("until"))
+                .and_then(|v| v.as_str())
+                .and_then(Self::parse_iso8601_to_timestamp),
+            event_type: filter
+                .and_then(|f| f.get("event_type"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            limit,
+            cursor: None,
+        };
+
+        let conn = rusqlite::Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(|e| (500u16, format!("データベースのオープンに失敗: {}", e)))?;
+
+        let records =
+            crate::core::event_store::query_events_for_export(&conn, &query, batch_max_size)
+                .map_err(|e| (500u16, format!("{}", e)))?;
+
+        let count = records.len();
+        let items: Vec<String> = records
+            .iter()
+            .map(|r| {
+                let details_part = match &r.details {
+                    Some(d) => format!(r#","details":"{}""#, Self::escape_json_string(d)),
+                    None => String::new(),
+                };
+                let ts = crate::core::event_store::format_timestamp_iso(r.timestamp);
+                format!(
+                    r#"{{"id":{},"timestamp":"{}","severity":"{}","source_module":"{}","event_type":"{}","message":"{}","acknowledged":{}{}}}"#,
+                    r.id,
+                    Self::escape_json_string(&ts),
+                    Self::escape_json_string(&r.severity),
+                    Self::escape_json_string(&r.source_module),
+                    Self::escape_json_string(&r.event_type),
+                    Self::escape_json_string(&r.message),
+                    r.acknowledged,
+                    details_part,
+                )
+            })
+            .collect();
+
+        Ok(format!(
+            r#"{{"items":[{}],"count":{}}}"#,
+            items.join(","),
+            count
+        ))
+    }
+
+    fn handle_batch_acknowledge(
+        db_path: &str,
+        body: &str,
+        batch_max_size: u32,
+    ) -> Result<String, (u16, String)> {
+        let json: serde_json::Value = serde_json::from_str(body)
+            .map_err(|e| (400u16, format!("JSON パースに失敗: {}", e)))?;
+
+        let ids = json
+            .get("ids")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| (400u16, "ids を配列で指定してください".to_string()))?;
+
+        if ids.len() > batch_max_size as usize {
+            return Err((
+                400,
+                format!("ids の件数が上限 {} を超えています", batch_max_size),
+            ));
+        }
+
+        let id_values: Vec<i64> = ids.iter().filter_map(|v| v.as_i64()).collect();
+        if id_values.len() != ids.len() {
+            return Err((400, "ids に不正な値が含まれています".to_string()));
+        }
+
+        let conn = rusqlite::Connection::open(db_path)
+            .map_err(|e| (500u16, format!("データベースのオープンに失敗: {}", e)))?;
+
+        let acknowledged = crate::core::event_store::batch_acknowledge(&conn, &id_values)
+            .map_err(|e| (500u16, format!("{}", e)))?;
+
+        Ok(format!(r#"{{"acknowledged":{}}}"#, acknowledged))
+    }
+
     async fn send_json_response_with_headers(
         stream: &mut tokio::net::TcpStream,
         status: u16,
@@ -1535,6 +2035,8 @@ mod tests {
             openapi_enabled: true,
             default_page_size: 50,
             max_page_size: 200,
+            batch_max_size: 1000,
+            max_request_body_size: 1_048_576,
         };
         let server = ApiServer::new(
             &config,
@@ -1588,6 +2090,8 @@ mod tests {
             openapi_enabled: true,
             default_page_size: 50,
             max_page_size: 200,
+            batch_max_size: 1000,
+            max_request_body_size: 1_048_576,
         };
         let modules = Arc::new(StdMutex::new(vec!["test_module".to_string()]));
         let metrics = Arc::new(StdMutex::new(SharedMetrics {
@@ -1651,6 +2155,8 @@ mod tests {
             openapi_enabled: true,
             default_page_size: 50,
             max_page_size: 200,
+            batch_max_size: 1000,
+            max_request_body_size: 1_048_576,
         };
         let modules = Arc::new(StdMutex::new(vec![
             "mod_a".to_string(),
@@ -1713,6 +2219,8 @@ mod tests {
             openapi_enabled: true,
             default_page_size: 50,
             max_page_size: 200,
+            batch_max_size: 1000,
+            max_request_body_size: 1_048_576,
         };
         let server = ApiServer::new(
             &config,
@@ -1770,6 +2278,8 @@ mod tests {
             openapi_enabled: true,
             default_page_size: 50,
             max_page_size: 200,
+            batch_max_size: 1000,
+            max_request_body_size: 1_048_576,
         };
         let server = ApiServer::new(
             &config,
@@ -1823,6 +2333,8 @@ mod tests {
             openapi_enabled: true,
             default_page_size: 50,
             max_page_size: 200,
+            batch_max_size: 1000,
+            max_request_body_size: 1_048_576,
         };
         let server = ApiServer::new(
             &config,
@@ -1876,6 +2388,8 @@ mod tests {
             openapi_enabled: true,
             default_page_size: 50,
             max_page_size: 200,
+            batch_max_size: 1000,
+            max_request_body_size: 1_048_576,
         };
         let server = ApiServer::new(
             &config,
@@ -2017,6 +2531,8 @@ mod tests {
             openapi_enabled: true,
             default_page_size: 50,
             max_page_size: 200,
+            batch_max_size: 1000,
+            max_request_body_size: 1_048_576,
         };
         let server = ApiServer::new(
             &config,
@@ -2194,6 +2710,8 @@ mod tests {
             openapi_enabled: true,
             default_page_size: 50,
             max_page_size: 200,
+            batch_max_size: 1000,
+            max_request_body_size: 1_048_576,
         };
         let server = ApiServer::new(
             &config,
@@ -2652,6 +3170,8 @@ mod tests {
             openapi_enabled: true,
             default_page_size: 50,
             max_page_size: 200,
+            batch_max_size: 1000,
+            max_request_body_size: 1_048_576,
         };
         let server = ApiServer::new(
             &config,
@@ -2878,6 +3398,8 @@ mod tests {
             openapi_enabled: true,
             default_page_size: 50,
             max_page_size: 200,
+            batch_max_size: 1000,
+            max_request_body_size: 1_048_576,
         };
         let server = ApiServer::new(
             &config,
@@ -2940,6 +3462,8 @@ mod tests {
             openapi_enabled: true,
             default_page_size: 50,
             max_page_size: 200,
+            batch_max_size: 1000,
+            max_request_body_size: 1_048_576,
         };
         let server = ApiServer::new(
             &config,
@@ -3001,6 +3525,8 @@ mod tests {
             openapi_enabled: true,
             default_page_size: 50,
             max_page_size: 200,
+            batch_max_size: 1000,
+            max_request_body_size: 1_048_576,
         };
         let server = ApiServer::new(
             &config,
@@ -3058,6 +3584,8 @@ mod tests {
             openapi_enabled: true,
             default_page_size: 50,
             max_page_size: 200,
+            batch_max_size: 1000,
+            max_request_body_size: 1_048_576,
         };
         let server = ApiServer::new(
             &config,
@@ -3112,6 +3640,8 @@ mod tests {
             openapi_enabled: false,
             default_page_size: 50,
             max_page_size: 200,
+            batch_max_size: 1000,
+            max_request_body_size: 1_048_576,
         };
         let server = ApiServer::new(
             &config,
@@ -3242,5 +3772,21 @@ mod tests {
         assert!(parsed2["has_more"].as_bool().unwrap());
         assert_eq!(parsed2["count"].as_i64().unwrap(), 4);
         assert!(parsed2["next_cursor"].is_number());
+    }
+
+    #[test]
+    fn test_required_role_batch_endpoints() {
+        assert_eq!(
+            ApiServer::required_role(&HttpMethod::Post, "/api/v1/events/batch/delete"),
+            Some(ApiRole::Admin)
+        );
+        assert_eq!(
+            ApiServer::required_role(&HttpMethod::Post, "/api/v1/events/batch/export"),
+            Some(ApiRole::ReadOnly)
+        );
+        assert_eq!(
+            ApiServer::required_role(&HttpMethod::Post, "/api/v1/events/batch/acknowledge"),
+            Some(ApiRole::Admin)
+        );
     }
 }

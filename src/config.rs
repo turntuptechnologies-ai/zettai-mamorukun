@@ -6158,6 +6158,14 @@ pub struct ApiConfig {
     /// 最大ページサイズ
     #[serde(default = "ApiConfig::default_max_page_size")]
     pub max_page_size: u32,
+
+    /// バッチ操作の最大件数
+    #[serde(default = "ApiConfig::default_batch_max_size")]
+    pub batch_max_size: u32,
+
+    /// リクエストボディの最大サイズ（バイト）
+    #[serde(default = "ApiConfig::default_max_request_body_size")]
+    pub max_request_body_size: usize,
 }
 
 impl ApiConfig {
@@ -6180,6 +6188,14 @@ impl ApiConfig {
     fn default_max_page_size() -> u32 {
         200
     }
+
+    fn default_batch_max_size() -> u32 {
+        1000
+    }
+
+    fn default_max_request_body_size() -> usize {
+        1_048_576
+    }
 }
 
 impl Default for ApiConfig {
@@ -6195,6 +6211,8 @@ impl Default for ApiConfig {
             openapi_enabled: Self::default_openapi_enabled(),
             default_page_size: Self::default_page_size(),
             max_page_size: Self::default_max_page_size(),
+            batch_max_size: Self::default_batch_max_size(),
+            max_request_body_size: Self::default_max_request_body_size(),
         }
     }
 }
@@ -6212,6 +6230,8 @@ impl Clone for ApiConfig {
             openapi_enabled: self.openapi_enabled,
             default_page_size: self.default_page_size,
             max_page_size: self.max_page_size,
+            batch_max_size: self.batch_max_size,
+            max_request_body_size: self.max_request_body_size,
         }
     }
 }

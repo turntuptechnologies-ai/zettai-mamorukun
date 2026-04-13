@@ -80,6 +80,31 @@ fn init_database(conn: &Connection) -> Result<(), AppError> {
         message: format!("テーブル作成に失敗: {}", e),
     })?;
 
+    let has_acknowledged = {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(security_events)")
+            .map_err(|e| AppError::EventStore {
+                message: format!("PRAGMA table_info に失敗: {}", e),
+            })?;
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| AppError::EventStore {
+                message: format!("カラム情報の取得に失敗: {}", e),
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        columns.iter().any(|c| c == "acknowledged")
+    };
+
+    if !has_acknowledged {
+        conn.execute_batch(
+            "ALTER TABLE security_events ADD COLUMN acknowledged INTEGER NOT NULL DEFAULT 0;",
+        )
+        .map_err(|e| AppError::EventStore {
+            message: format!("acknowledged カラムの追加に失敗: {}", e),
+        })?;
+    }
+
     Ok(())
 }
 
@@ -509,6 +534,8 @@ pub struct EventRecord {
     pub message: String,
     /// 追加情報
     pub details: Option<String>,
+    /// 確認済みフラグ
+    pub acknowledged: bool,
 }
 
 /// イベント統計結果
@@ -737,7 +764,7 @@ pub fn open_readonly(db_path: &str) -> Result<Connection, AppError> {
 /// 指定された条件でイベントを検索する
 pub fn query_events(conn: &Connection, query: &EventQuery) -> Result<Vec<EventRecord>, AppError> {
     let mut sql = String::from(
-        "SELECT id, timestamp, severity, source_module, event_type, message, details \
+        "SELECT id, timestamp, severity, source_module, event_type, message, details, acknowledged \
          FROM security_events WHERE 1=1",
     );
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -794,6 +821,7 @@ pub fn query_events(conn: &Connection, query: &EventQuery) -> Result<Vec<EventRe
                 event_type: row.get(4)?,
                 message: row.get(5)?,
                 details: row.get(6)?,
+                acknowledged: row.get::<_, i64>(7).map(|v| v != 0).unwrap_or(false),
             })
         })
         .map_err(|e| AppError::EventStore {
@@ -963,6 +991,208 @@ pub fn parse_datetime(s: &str) -> Result<i64, String> {
     let timestamp = total_days * 86400 + (hour as i64) * 3600 + (min as i64) * 60 + (sec as i64);
 
     Ok(timestamp)
+}
+
+/// バッチ削除フィルタ
+pub struct BatchDeleteFilter {
+    /// 重要度フィルタ
+    pub severity: Option<String>,
+    /// ソースモジュール名フィルタ
+    pub source_module: Option<String>,
+    /// 開始タイムスタンプ（UNIX 秒、以上）
+    pub since: Option<i64>,
+    /// 終了タイムスタンプ（UNIX 秒、以下）
+    pub until: Option<i64>,
+}
+
+/// ID 指定でイベントを一括削除する
+pub fn batch_delete_by_ids(conn: &Connection, ids: &[i64]) -> Result<u64, AppError> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| AppError::EventStore {
+            message: format!("トランザクション開始に失敗: {}", e),
+        })?;
+    let mut total = 0u64;
+    for chunk in ids.chunks(999) {
+        let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("DELETE FROM security_events WHERE id IN ({})", placeholders);
+        let params: Vec<&dyn rusqlite::types::ToSql> = chunk
+            .iter()
+            .map(|id| id as &dyn rusqlite::types::ToSql)
+            .collect();
+        let deleted = tx
+            .execute(&sql, params.as_slice())
+            .map_err(|e| AppError::EventStore {
+                message: format!("バッチ削除に失敗: {}", e),
+            })?;
+        total += deleted as u64;
+    }
+    tx.commit().map_err(|e| AppError::EventStore {
+        message: format!("コミットに失敗: {}", e),
+    })?;
+    Ok(total)
+}
+
+/// フィルタ条件でイベントを一括削除する
+pub fn batch_delete_by_filter(
+    conn: &Connection,
+    filter: &BatchDeleteFilter,
+) -> Result<u64, AppError> {
+    let mut sql = String::from("DELETE FROM security_events WHERE 1=1");
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut idx = 1;
+
+    if let Some(severity) = &filter.severity {
+        sql.push_str(&format!(" AND severity = ?{}", idx));
+        param_values.push(Box::new(severity.to_uppercase()));
+        idx += 1;
+    }
+    if let Some(module) = &filter.source_module {
+        sql.push_str(&format!(" AND source_module = ?{}", idx));
+        param_values.push(Box::new(module.clone()));
+        idx += 1;
+    }
+    if let Some(since) = filter.since {
+        sql.push_str(&format!(" AND timestamp >= ?{}", idx));
+        param_values.push(Box::new(since));
+        idx += 1;
+    }
+    if let Some(until) = filter.until {
+        sql.push_str(&format!(" AND timestamp <= ?{}", idx));
+        param_values.push(Box::new(until));
+        let _ = idx;
+    }
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
+
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| AppError::EventStore {
+            message: format!("トランザクション開始に失敗: {}", e),
+        })?;
+    let deleted = tx
+        .execute(&sql, param_refs.as_slice())
+        .map_err(|e| AppError::EventStore {
+            message: format!("フィルタ削除に失敗: {}", e),
+        })?;
+    tx.commit().map_err(|e| AppError::EventStore {
+        message: format!("コミットに失敗: {}", e),
+    })?;
+    Ok(deleted as u64)
+}
+
+/// ID 指定でイベントを一括確認済みにする
+pub fn batch_acknowledge(conn: &Connection, ids: &[i64]) -> Result<u64, AppError> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| AppError::EventStore {
+            message: format!("トランザクション開始に失敗: {}", e),
+        })?;
+    let mut total = 0u64;
+    for chunk in ids.chunks(999) {
+        let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "UPDATE security_events SET acknowledged = 1 WHERE id IN ({})",
+            placeholders
+        );
+        let params: Vec<&dyn rusqlite::types::ToSql> = chunk
+            .iter()
+            .map(|id| id as &dyn rusqlite::types::ToSql)
+            .collect();
+        let updated = tx
+            .execute(&sql, params.as_slice())
+            .map_err(|e| AppError::EventStore {
+                message: format!("バッチ確認に失敗: {}", e),
+            })?;
+        total += updated as u64;
+    }
+    tx.commit().map_err(|e| AppError::EventStore {
+        message: format!("コミットに失敗: {}", e),
+    })?;
+    Ok(total)
+}
+
+/// エクスポート用クエリ（acknowledged フィールド含む、件数上限あり）
+pub fn query_events_for_export(
+    conn: &Connection,
+    query: &EventQuery,
+    max_size: u32,
+) -> Result<Vec<EventRecord>, AppError> {
+    let mut sql = String::from(
+        "SELECT id, timestamp, severity, source_module, event_type, message, details, acknowledged \
+         FROM security_events WHERE 1=1",
+    );
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut idx = 1;
+
+    if let Some(cursor) = query.cursor {
+        sql.push_str(&format!(" AND id < ?{}", idx));
+        param_values.push(Box::new(cursor));
+        idx += 1;
+    }
+    if let Some(module) = &query.module {
+        sql.push_str(&format!(" AND source_module = ?{}", idx));
+        param_values.push(Box::new(module.clone()));
+        idx += 1;
+    }
+    if let Some(severity) = &query.severity {
+        sql.push_str(&format!(" AND severity = ?{}", idx));
+        param_values.push(Box::new(severity.to_uppercase()));
+        idx += 1;
+    }
+    if let Some(since) = query.since {
+        sql.push_str(&format!(" AND timestamp >= ?{}", idx));
+        param_values.push(Box::new(since));
+        idx += 1;
+    }
+    if let Some(until) = query.until {
+        sql.push_str(&format!(" AND timestamp <= ?{}", idx));
+        param_values.push(Box::new(until));
+        idx += 1;
+    }
+    if let Some(event_type) = &query.event_type {
+        sql.push_str(&format!(" AND event_type = ?{}", idx));
+        param_values.push(Box::new(event_type.clone()));
+        idx += 1;
+    }
+
+    let effective_limit = query.limit.min(max_size);
+    sql.push_str(&format!(" ORDER BY timestamp DESC LIMIT ?{}", idx));
+    param_values.push(Box::new(effective_limit));
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| AppError::EventStore {
+        message: format!("クエリの準備に失敗: {}", e),
+    })?;
+
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(EventRecord {
+                id: row.get(0)?,
+                timestamp: row.get(1)?,
+                severity: row.get(2)?,
+                source_module: row.get(3)?,
+                event_type: row.get(4)?,
+                message: row.get(5)?,
+                details: row.get(6)?,
+                acknowledged: row.get::<_, i64>(7).map(|v| v != 0).unwrap_or(false),
+            })
+        })
+        .map_err(|e| AppError::EventStore {
+            message: format!("クエリの実行に失敗: {}", e),
+        })?;
+
+    let mut records = Vec::new();
+    for row in rows {
+        records.push(row.map_err(|e| AppError::EventStore {
+            message: format!("行の読み取りに失敗: {}", e),
+        })?);
+    }
+
+    Ok(records)
 }
 
 #[cfg(test)]
@@ -1739,5 +1969,159 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn insert_test_events(conn: &Connection, count: usize) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        for i in 0..count {
+            conn.execute(
+                "INSERT INTO security_events (timestamp, severity, source_module, event_type, message) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![now - (i as i64), "INFO", "test_module", "test_event", format!("テスト {}", i)],
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn test_batch_delete_by_ids() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+        insert_test_events(&conn, 5);
+
+        let ids: Vec<i64> = conn
+            .prepare("SELECT id FROM security_events")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let deleted = batch_delete_by_ids(&conn, &ids[..3]).unwrap();
+        assert_eq!(deleted, 3);
+
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM security_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 2);
+    }
+
+    #[test]
+    fn test_batch_delete_by_filter() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        conn.execute(
+            "INSERT INTO security_events (timestamp, severity, source_module, event_type, message) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![now, "WARNING", "file_integrity", "test", "warning event"],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO security_events (timestamp, severity, source_module, event_type, message) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![now, "INFO", "file_integrity", "test", "info event"],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO security_events (timestamp, severity, source_module, event_type, message) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![now, "INFO", "network_monitor", "test", "other event"],
+        ).unwrap();
+
+        let filter = BatchDeleteFilter {
+            severity: Some("INFO".to_string()),
+            source_module: Some("file_integrity".to_string()),
+            since: None,
+            until: None,
+        };
+        let deleted = batch_delete_by_filter(&conn, &filter).unwrap();
+        assert_eq!(deleted, 1);
+
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM security_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 2);
+    }
+
+    #[test]
+    fn test_batch_acknowledge() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+        insert_test_events(&conn, 5);
+
+        let ids: Vec<i64> = conn
+            .prepare("SELECT id FROM security_events LIMIT 3")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let updated = batch_acknowledge(&conn, &ids).unwrap();
+        assert_eq!(updated, 3);
+
+        let acked: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM security_events WHERE acknowledged = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(acked, 3);
+
+        let not_acked: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM security_events WHERE acknowledged = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(not_acked, 2);
+    }
+
+    #[test]
+    fn test_batch_delete_chunks() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+        insert_test_events(&conn, 1500);
+
+        let ids: Vec<i64> = conn
+            .prepare("SELECT id FROM security_events")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(ids.len(), 1500);
+
+        let deleted = batch_delete_by_ids(&conn, &ids).unwrap();
+        assert_eq!(deleted, 1500);
+
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM security_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn test_acknowledged_column_migration() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+
+        let has_col = {
+            let mut stmt = conn.prepare("PRAGMA table_info(security_events)").unwrap();
+            let columns: Vec<String> = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect();
+            columns.iter().any(|c| c == "acknowledged")
+        };
+        assert!(has_col);
+
+        // Running init_database again should be idempotent
+        init_database(&conn).unwrap();
     }
 }
