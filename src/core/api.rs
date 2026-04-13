@@ -4,12 +4,13 @@
 //! 設定リロードをリモートから操作可能にする。
 //! JSON レスポンス形式で `/api/v1/` プレフィックスのエンドポイントを提供する。
 
-use crate::config::{ApiConfig, ApiRole, ApiTokenConfig};
+use crate::config::{ApiConfig, ApiRateLimitConfig, ApiRole, ApiTokenConfig};
 use crate::core::metrics::SharedMetrics;
 use crate::core::status::{MetricsSummary, StatusResponse};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io;
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -34,6 +35,108 @@ enum AuthResult {
     Unauthorized,
 }
 
+/// トークンバケット（IP アドレスごとのレート管理）
+struct TokenBucket {
+    tokens: f64,
+    last_refill: Instant,
+}
+
+/// レートリミット判定結果
+struct RateLimitResult {
+    allowed: bool,
+    limit: u32,
+    remaining: u32,
+    reset_secs: u64,
+    retry_after: Option<f64>,
+}
+
+const MAX_RATE_LIMIT_ENTRIES: usize = 10000;
+
+/// トークンバケット方式のレートリミッター
+struct RateLimiter {
+    buckets: HashMap<IpAddr, TokenBucket>,
+    max_tokens: f64,
+    refill_rate: f64,
+    last_cleanup: Instant,
+    cleanup_interval: std::time::Duration,
+    max_entries: usize,
+}
+
+impl RateLimiter {
+    fn new(config: &ApiRateLimitConfig) -> Self {
+        Self {
+            buckets: HashMap::new(),
+            max_tokens: f64::from(config.burst_size),
+            refill_rate: config.max_requests_per_second,
+            last_cleanup: Instant::now(),
+            cleanup_interval: std::time::Duration::from_secs(config.cleanup_interval_secs),
+            max_entries: MAX_RATE_LIMIT_ENTRIES,
+        }
+    }
+
+    fn check_rate_limit(&mut self, ip: IpAddr) -> RateLimitResult {
+        let now = Instant::now();
+
+        if !self.buckets.contains_key(&ip) && self.buckets.len() >= self.max_entries {
+            self.cleanup();
+            if self.buckets.len() >= self.max_entries {
+                return RateLimitResult {
+                    allowed: false,
+                    limit: self.max_tokens as u32,
+                    remaining: 0,
+                    reset_secs: (self.max_tokens / self.refill_rate).ceil() as u64,
+                    retry_after: Some(1.0),
+                };
+            }
+        }
+
+        let bucket = self.buckets.entry(ip).or_insert_with(|| TokenBucket {
+            tokens: self.max_tokens,
+            last_refill: now,
+        });
+
+        let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
+        bucket.tokens = (bucket.tokens + elapsed * self.refill_rate).min(self.max_tokens);
+        bucket.last_refill = now;
+
+        if bucket.tokens >= 1.0 {
+            bucket.tokens -= 1.0;
+            let remaining = bucket.tokens as u32;
+            let reset_secs = if remaining < self.max_tokens as u32 {
+                ((self.max_tokens - bucket.tokens) / self.refill_rate).ceil() as u64
+            } else {
+                0
+            };
+            RateLimitResult {
+                allowed: true,
+                limit: self.max_tokens as u32,
+                remaining,
+                reset_secs,
+                retry_after: None,
+            }
+        } else {
+            let deficit = 1.0 - bucket.tokens;
+            let retry_after = deficit / self.refill_rate;
+            let reset_secs = (self.max_tokens / self.refill_rate).ceil() as u64;
+            RateLimitResult {
+                allowed: false,
+                limit: self.max_tokens as u32,
+                remaining: 0,
+                reset_secs,
+                retry_after: Some(retry_after),
+            }
+        }
+    }
+
+    fn cleanup(&mut self) {
+        let now = Instant::now();
+        let threshold = self.cleanup_interval * 2;
+        self.buckets
+            .retain(|_, bucket| now.duration_since(bucket.last_refill) < threshold);
+        self.last_cleanup = now;
+    }
+}
+
 /// REST API サーバー
 pub struct ApiServer {
     bind_address: String,
@@ -46,6 +149,8 @@ pub struct ApiServer {
     reload_sender: mpsc::Sender<()>,
     cancel_token: CancellationToken,
     tokens: Arc<StdMutex<Vec<ApiTokenConfig>>>,
+    rate_limiter: Arc<StdMutex<Option<RateLimiter>>>,
+    rate_limit_config: ApiRateLimitConfig,
 }
 
 impl ApiServer {
@@ -60,6 +165,11 @@ impl ApiServer {
         event_store_db_path: Option<String>,
         reload_sender: mpsc::Sender<()>,
     ) -> Self {
+        let rate_limiter = if config.rate_limit.enabled {
+            Some(RateLimiter::new(&config.rate_limit))
+        } else {
+            None
+        };
         Self {
             bind_address: config.bind_address.clone(),
             port: config.port,
@@ -71,6 +181,8 @@ impl ApiServer {
             reload_sender,
             cancel_token: CancellationToken::new(),
             tokens: Arc::new(StdMutex::new(config.tokens.clone())),
+            rate_limiter: Arc::new(StdMutex::new(rate_limiter)),
+            rate_limit_config: config.rate_limit.clone(),
         }
     }
 
@@ -94,13 +206,39 @@ impl ApiServer {
         let reload_sender = self.reload_sender;
         let cancel_token = self.cancel_token;
         let tokens = self.tokens;
+        let rate_limiter = self.rate_limiter;
+
+        // クリーンアップタスク
+        if self.rate_limit_config.enabled {
+            let rl_cleanup = Arc::clone(&rate_limiter);
+            let cleanup_interval =
+                std::time::Duration::from_secs(self.rate_limit_config.cleanup_interval_secs);
+            let cancel_cleanup = cancel_token.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(cleanup_interval);
+                interval.tick().await;
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            // unwrap safety: Mutex が poisoned になるのはパニック時のみ
+                            if let Some(ref mut rl) = *rl_cleanup.lock().unwrap() {
+                                rl.cleanup();
+                            }
+                        }
+                        _ = cancel_cleanup.cancelled() => {
+                            break;
+                        }
+                    }
+                }
+            });
+        }
 
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     result = listener.accept() => {
                         match result {
-                            Ok((stream, _)) => {
+                            Ok((stream, addr)) => {
                                 let names = Arc::clone(&shared_module_names);
                                 let metrics = shared_metrics.clone();
                                 let restarts = Arc::clone(&shared_module_restarts);
@@ -108,10 +246,13 @@ impl ApiServer {
                                 let sender = reload_sender.clone();
                                 let started = started_at;
                                 let toks = Arc::clone(&tokens);
+                                let rl = Arc::clone(&rate_limiter);
+                                let client_ip = addr.ip();
                                 tokio::spawn(async move {
                                     if let Err(e) = Self::handle_connection(
                                         stream, &names, &metrics, &restarts,
                                         started, &db_path, &sender, &toks,
+                                        client_ip, &rl,
                                     ).await {
                                         tracing::debug!(error = %e, "API 接続の処理に失敗");
                                     }
@@ -202,6 +343,8 @@ impl ApiServer {
         event_store_db_path: &Option<String>,
         reload_sender: &mpsc::Sender<()>,
         tokens: &Arc<StdMutex<Vec<ApiTokenConfig>>>,
+        client_ip: IpAddr,
+        rate_limiter: &Arc<StdMutex<Option<RateLimiter>>>,
     ) -> Result<(), io::Error> {
         // 接続タイムアウト（スローロリス対策）
         let result = tokio::time::timeout(
@@ -220,6 +363,48 @@ impl ApiServer {
 
         let (method, path, query_params) = Self::parse_request(&raw);
 
+        // レートリミットチェック（/api/v1/health はスキップ）
+        let rate_limit_check = if path != "/api/v1/health" {
+            // unwrap safety: Mutex が poisoned になるのはパニック時のみ
+            let mut rl_guard = rate_limiter.lock().unwrap();
+            (*rl_guard)
+                .as_mut()
+                .map(|rl| rl.check_rate_limit(client_ip))
+        } else {
+            None
+        };
+
+        if let Some(ref result) = rate_limit_check
+            && !result.allowed
+        {
+            let retry_after = result.retry_after.unwrap_or(1.0).ceil() as u64;
+            let retry_after = if retry_after == 0 { 1 } else { retry_after };
+            let body =
+                r#"{"error":"リクエスト数が上限を超えました。しばらくしてから再試行してください"}"#;
+            let response = format!(
+                "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nRetry-After: {}\r\nX-RateLimit-Limit: {}\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: {}\r\n\r\n{}",
+                body.len(),
+                retry_after,
+                result.limit,
+                result.reset_secs,
+                body
+            );
+            stream.write_all(response.as_bytes()).await?;
+            stream.shutdown().await?;
+            return Ok(());
+        }
+
+        let rate_limit_headers = rate_limit_check.as_ref().and_then(|result| {
+            if result.allowed {
+                Some(format!(
+                    "X-RateLimit-Limit: {}\r\nX-RateLimit-Remaining: {}\r\nX-RateLimit-Reset: {}",
+                    result.limit, result.remaining, result.reset_secs
+                ))
+            } else {
+                None
+            }
+        });
+
         // 認証チェック
         // unwrap safety: Mutex が poisoned になるのはパニック時のみ
         let token_list = tokens.lock().unwrap().clone();
@@ -234,23 +419,44 @@ impl ApiServer {
                             path = %path,
                             "API 認可失敗: 権限不足"
                         );
-                        Self::send_error(&mut stream, 403, "Forbidden", "権限が不足しています")
-                            .await?;
+                        Self::send_error_with_headers(
+                            &mut stream,
+                            403,
+                            "Forbidden",
+                            "権限が不足しています",
+                            rate_limit_headers.as_deref(),
+                        )
+                        .await?;
                         stream.shutdown().await?;
                         return Ok(());
                     }
                 }
                 AuthResult::Unauthorized => {
-                    Self::send_error(&mut stream, 401, "Unauthorized", "認証が必要です").await?;
+                    Self::send_error_with_headers(
+                        &mut stream,
+                        401,
+                        "Unauthorized",
+                        "認証が必要です",
+                        rate_limit_headers.as_deref(),
+                    )
+                    .await?;
                     stream.shutdown().await?;
                     return Ok(());
                 }
             }
         }
 
+        let extra = rate_limit_headers.as_deref();
         match (&method, path.as_str()) {
             (HttpMethod::Get, "/api/v1/health") => {
-                Self::send_json_response(&mut stream, 200, "OK", r#"{"status":"ok"}"#).await?;
+                Self::send_json_response_with_headers(
+                    &mut stream,
+                    200,
+                    "OK",
+                    r#"{"status":"ok"}"#,
+                    None,
+                )
+                .await?;
             }
             (HttpMethod::Get, "/api/v1/status") => {
                 let body = Self::build_status_response(
@@ -259,45 +465,62 @@ impl ApiServer {
                     shared_module_restarts,
                     started_at,
                 );
-                Self::send_json_response(&mut stream, 200, "OK", &body).await?;
+                Self::send_json_response_with_headers(&mut stream, 200, "OK", &body, extra).await?;
             }
             (HttpMethod::Get, "/api/v1/modules") => {
                 let body =
                     Self::build_modules_response(shared_module_names, shared_module_restarts);
-                Self::send_json_response(&mut stream, 200, "OK", &body).await?;
+                Self::send_json_response_with_headers(&mut stream, 200, "OK", &body, extra).await?;
             }
             (HttpMethod::Get, "/api/v1/events") => match event_store_db_path {
                 Some(db_path) => match Self::build_events_response(db_path, &query_params) {
                     Ok(body) => {
-                        Self::send_json_response(&mut stream, 200, "OK", &body).await?;
+                        Self::send_json_response_with_headers(&mut stream, 200, "OK", &body, extra)
+                            .await?;
                     }
                     Err(e) => {
-                        Self::send_error(&mut stream, 500, "Internal Server Error", &e).await?;
+                        Self::send_error_with_headers(
+                            &mut stream,
+                            500,
+                            "Internal Server Error",
+                            &e,
+                            extra,
+                        )
+                        .await?;
                     }
                 },
                 None => {
-                    Self::send_error(
+                    Self::send_error_with_headers(
                         &mut stream,
                         503,
                         "Service Unavailable",
                         "イベントストアが無効です",
+                        extra,
                     )
                     .await?;
                 }
             },
             (HttpMethod::Post, "/api/v1/reload") => match reload_sender.try_send(()) {
                 Ok(()) => {
-                    Self::send_json_response(
+                    Self::send_json_response_with_headers(
                         &mut stream,
                         200,
                         "OK",
                         r#"{"message":"リロードをトリガーしました"}"#,
+                        extra,
                     )
                     .await?;
                 }
                 Err(e) => {
                     let msg = format!("リロードのトリガーに失敗しました: {}", e);
-                    Self::send_error(&mut stream, 500, "Internal Server Error", &msg).await?;
+                    Self::send_error_with_headers(
+                        &mut stream,
+                        500,
+                        "Internal Server Error",
+                        &msg,
+                        extra,
+                    )
+                    .await?;
                 }
             },
             (HttpMethod::Get, _) | (HttpMethod::Other, _) => {
@@ -309,19 +532,21 @@ impl ApiServer {
                         | "/api/v1/events"
                         | "/api/v1/reload"
                 ) {
-                    Self::send_error(
+                    Self::send_error_with_headers(
                         &mut stream,
                         405,
                         "Method Not Allowed",
                         "許可されていないメソッドです",
+                        extra,
                     )
                     .await?;
                 } else {
-                    Self::send_error(
+                    Self::send_error_with_headers(
                         &mut stream,
                         404,
                         "Not Found",
                         "エンドポイントが見つかりません",
+                        extra,
                     )
                     .await?;
                 }
@@ -331,19 +556,21 @@ impl ApiServer {
                     path.as_str(),
                     "/api/v1/health" | "/api/v1/status" | "/api/v1/modules" | "/api/v1/events"
                 ) {
-                    Self::send_error(
+                    Self::send_error_with_headers(
                         &mut stream,
                         405,
                         "Method Not Allowed",
                         "許可されていないメソッドです",
+                        extra,
                     )
                     .await?;
                 } else {
-                    Self::send_error(
+                    Self::send_error_with_headers(
                         &mut stream,
                         404,
                         "Not Found",
                         "エンドポイントが見つかりません",
+                        extra,
                     )
                     .await?;
                 }
@@ -649,30 +876,38 @@ impl ApiServer {
         result
     }
 
-    async fn send_json_response(
+    async fn send_json_response_with_headers(
         stream: &mut tokio::net::TcpStream,
         status: u16,
         status_text: &str,
         body: &str,
+        extra_headers: Option<&str>,
     ) -> Result<(), io::Error> {
+        let extra = match extra_headers {
+            Some(h) => format!("{}\r\n", h),
+            None => String::new(),
+        };
         let response = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n{}\r\n{}",
             status,
             status_text,
             body.len(),
+            extra,
             body
         );
         stream.write_all(response.as_bytes()).await
     }
 
-    async fn send_error(
+    async fn send_error_with_headers(
         stream: &mut tokio::net::TcpStream,
         status: u16,
         status_text: &str,
         message: &str,
+        extra_headers: Option<&str>,
     ) -> Result<(), io::Error> {
         let body = format!(r#"{{"error":"{}"}}"#, Self::escape_json_string(message));
-        Self::send_json_response(stream, status, status_text, &body).await
+        Self::send_json_response_with_headers(stream, status, status_text, &body, extra_headers)
+            .await
     }
 }
 
@@ -741,6 +976,7 @@ mod tests {
             bind_address: "127.0.0.1".to_string(),
             port,
             tokens: Vec::new(),
+            rate_limit: ApiRateLimitConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -787,6 +1023,7 @@ mod tests {
             bind_address: "127.0.0.1".to_string(),
             port,
             tokens: Vec::new(),
+            rate_limit: ApiRateLimitConfig::default(),
         };
         let modules = Arc::new(StdMutex::new(vec!["test_module".to_string()]));
         let metrics = Arc::new(StdMutex::new(SharedMetrics {
@@ -843,6 +1080,7 @@ mod tests {
             bind_address: "127.0.0.1".to_string(),
             port,
             tokens: Vec::new(),
+            rate_limit: ApiRateLimitConfig::default(),
         };
         let modules = Arc::new(StdMutex::new(vec![
             "mod_a".to_string(),
@@ -898,6 +1136,7 @@ mod tests {
             bind_address: "127.0.0.1".to_string(),
             port,
             tokens: Vec::new(),
+            rate_limit: ApiRateLimitConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -948,6 +1187,7 @@ mod tests {
             bind_address: "127.0.0.1".to_string(),
             port,
             tokens: Vec::new(),
+            rate_limit: ApiRateLimitConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -994,6 +1234,7 @@ mod tests {
             bind_address: "127.0.0.1".to_string(),
             port,
             tokens: Vec::new(),
+            rate_limit: ApiRateLimitConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -1040,6 +1281,7 @@ mod tests {
             bind_address: "127.0.0.1".to_string(),
             port,
             tokens: Vec::new(),
+            rate_limit: ApiRateLimitConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -1174,6 +1416,7 @@ mod tests {
             bind_address: "127.0.0.1".to_string(),
             port,
             tokens,
+            rate_limit: ApiRateLimitConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -1318,6 +1561,215 @@ mod tests {
             .await
             .unwrap();
 
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf);
+        assert!(response.contains("HTTP/1.1 200 OK"));
+
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[test]
+    fn test_rate_limiter_allows_within_limit() {
+        let config = ApiRateLimitConfig {
+            enabled: true,
+            max_requests_per_second: 10.0,
+            burst_size: 5,
+            cleanup_interval_secs: 60,
+        };
+        let mut rl = RateLimiter::new(&config);
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+
+        for _ in 0..5 {
+            let result = rl.check_rate_limit(ip);
+            assert!(result.allowed);
+        }
+    }
+
+    #[test]
+    fn test_rate_limiter_blocks_over_limit() {
+        let config = ApiRateLimitConfig {
+            enabled: true,
+            max_requests_per_second: 10.0,
+            burst_size: 3,
+            cleanup_interval_secs: 60,
+        };
+        let mut rl = RateLimiter::new(&config);
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+
+        for _ in 0..3 {
+            let result = rl.check_rate_limit(ip);
+            assert!(result.allowed);
+        }
+
+        let result = rl.check_rate_limit(ip);
+        assert!(!result.allowed);
+        assert_eq!(result.remaining, 0);
+        assert!(result.retry_after.is_some());
+    }
+
+    #[test]
+    fn test_rate_limiter_refills_tokens() {
+        let config = ApiRateLimitConfig {
+            enabled: true,
+            max_requests_per_second: 100.0,
+            burst_size: 2,
+            cleanup_interval_secs: 60,
+        };
+        let mut rl = RateLimiter::new(&config);
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+
+        // 全トークン消費
+        assert!(rl.check_rate_limit(ip).allowed);
+        assert!(rl.check_rate_limit(ip).allowed);
+        assert!(!rl.check_rate_limit(ip).allowed);
+
+        // 手動でバケットの last_refill を過去にずらして補充をシミュレート
+        if let Some(bucket) = rl.buckets.get_mut(&ip) {
+            bucket.last_refill = Instant::now() - std::time::Duration::from_millis(100);
+        }
+
+        // refill_rate=100/s, 100ms 経過 → 10 トークン補充（max_tokens=2 でクランプ）
+        let result = rl.check_rate_limit(ip);
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn test_rate_limiter_cleanup() {
+        let config = ApiRateLimitConfig {
+            enabled: true,
+            max_requests_per_second: 10.0,
+            burst_size: 5,
+            cleanup_interval_secs: 1,
+        };
+        let mut rl = RateLimiter::new(&config);
+        let ip: IpAddr = "172.16.0.1".parse().unwrap();
+
+        rl.check_rate_limit(ip);
+        assert_eq!(rl.buckets.len(), 1);
+
+        // last_refill を古くしてクリーンアップ対象にする
+        if let Some(bucket) = rl.buckets.get_mut(&ip) {
+            bucket.last_refill = Instant::now() - std::time::Duration::from_secs(10);
+        }
+
+        rl.cleanup();
+        assert_eq!(rl.buckets.len(), 0);
+    }
+
+    #[test]
+    fn test_rate_limiter_max_entries() {
+        let config = ApiRateLimitConfig {
+            enabled: true,
+            max_requests_per_second: 10.0,
+            burst_size: 5,
+            cleanup_interval_secs: 60,
+        };
+        let mut rl = RateLimiter::new(&config);
+        rl.max_entries = 3;
+
+        // 3 エントリまでは許可
+        for i in 1..=3u8 {
+            let ip: IpAddr = format!("10.0.0.{}", i).parse().unwrap();
+            let result = rl.check_rate_limit(ip);
+            assert!(result.allowed);
+        }
+        assert_eq!(rl.buckets.len(), 3);
+
+        // 4 番目の新規 IP は上限超過で拒否（クリーンアップしても空かない）
+        let ip4: IpAddr = "10.0.0.4".parse().unwrap();
+        let result = rl.check_rate_limit(ip4);
+        assert!(!result.allowed);
+        assert_eq!(rl.buckets.len(), 3);
+
+        // 既存 IP はまだ使える
+        let ip1: IpAddr = "10.0.0.1".parse().unwrap();
+        let result = rl.check_rate_limit(ip1);
+        assert!(result.allowed);
+
+        // 古いエントリを期限切れにすればクリーンアップで空きができる
+        if let Some(bucket) = rl.buckets.get_mut(&"10.0.0.2".parse::<IpAddr>().unwrap()) {
+            bucket.last_refill = Instant::now() - std::time::Duration::from_secs(300);
+        }
+        let result = rl.check_rate_limit(ip4);
+        assert!(result.allowed);
+        assert_eq!(rl.buckets.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_api_server_rate_limit_429() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let (reload_tx, _reload_rx) = mpsc::channel::<()>(1);
+        let config = ApiConfig {
+            enabled: true,
+            bind_address: "127.0.0.1".to_string(),
+            port,
+            tokens: Vec::new(),
+            rate_limit: ApiRateLimitConfig {
+                enabled: true,
+                max_requests_per_second: 1.0,
+                burst_size: 2,
+                cleanup_interval_secs: 60,
+            },
+        };
+        let server = ApiServer::new(
+            &config,
+            Arc::new(StdMutex::new(Vec::new())),
+            None,
+            Arc::new(StdMutex::new(HashMap::new())),
+            Instant::now(),
+            None,
+            reload_tx,
+        );
+        let cancel = server.cancel_token();
+        server.spawn().unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // バースト内のリクエストは許可（X-RateLimit ヘッダー付き）
+        for _ in 0..2 {
+            let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+                .await
+                .unwrap();
+            stream
+                .write_all(b"GET /api/v1/status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .await
+                .unwrap();
+            let mut buf = Vec::new();
+            stream.read_to_end(&mut buf).await.unwrap();
+            let response = String::from_utf8_lossy(&buf);
+            assert!(response.contains("HTTP/1.1 200 OK"));
+            assert!(response.contains("X-RateLimit-Limit: 2"));
+        }
+
+        // 3 回目は 429
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET /api/v1/status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf);
+        assert!(response.contains("HTTP/1.1 429 Too Many Requests"));
+        assert!(response.contains("Retry-After:"));
+        assert!(response.contains("X-RateLimit-Limit: 2"));
+        assert!(response.contains("X-RateLimit-Remaining: 0"));
+
+        // /api/v1/health はレートリミット対象外
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET /api/v1/health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
         let mut buf = Vec::new();
         stream.read_to_end(&mut buf).await.unwrap();
         let response = String::from_utf8_lossy(&buf);

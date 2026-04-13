@@ -6017,6 +6017,51 @@ pub struct ApiTokenConfig {
     pub role: ApiRole,
 }
 
+/// API レートリミット設定
+#[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
+pub struct ApiRateLimitConfig {
+    /// レートリミットの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// 1秒あたりの最大リクエスト数
+    #[serde(default = "ApiRateLimitConfig::default_max_requests_per_second")]
+    pub max_requests_per_second: f64,
+
+    /// バースト許容数
+    #[serde(default = "ApiRateLimitConfig::default_burst_size")]
+    pub burst_size: u32,
+
+    /// クリーンアップ間隔（秒）
+    #[serde(default = "ApiRateLimitConfig::default_cleanup_interval_secs")]
+    pub cleanup_interval_secs: u64,
+}
+
+impl ApiRateLimitConfig {
+    fn default_max_requests_per_second() -> f64 {
+        10.0
+    }
+
+    fn default_burst_size() -> u32 {
+        20
+    }
+
+    fn default_cleanup_interval_secs() -> u64 {
+        60
+    }
+}
+
+impl Default for ApiRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_requests_per_second: Self::default_max_requests_per_second(),
+            burst_size: Self::default_burst_size(),
+            cleanup_interval_secs: Self::default_cleanup_interval_secs(),
+        }
+    }
+}
+
 /// REST API サーバー設定
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub struct ApiConfig {
@@ -6035,6 +6080,10 @@ pub struct ApiConfig {
     /// API トークン設定（空の場合は認証なしで動作）
     #[serde(default)]
     pub tokens: Vec<ApiTokenConfig>,
+
+    /// レートリミット設定
+    #[serde(default)]
+    pub rate_limit: ApiRateLimitConfig,
 }
 
 impl ApiConfig {
@@ -6054,6 +6103,7 @@ impl Default for ApiConfig {
             bind_address: Self::default_bind_address(),
             port: Self::default_port(),
             tokens: Vec::new(),
+            rate_limit: ApiRateLimitConfig::default(),
         }
     }
 }
@@ -6065,6 +6115,7 @@ impl Clone for ApiConfig {
             bind_address: self.bind_address.clone(),
             port: self.port,
             tokens: self.tokens.clone(),
+            rate_limit: self.rate_limit.clone(),
         }
     }
 }

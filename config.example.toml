@@ -832,6 +832,19 @@ port = 9201
 # token_hash = "sha256:..."
 # role = "admin"
 
+# レートリミット設定
+# クライアント IP ごとにリクエストレートを制限し、DoS 攻撃を防止する
+# SIGHUP でホットリロード可能
+[api.rate_limit]
+# レートリミットの有効/無効
+enabled = false
+# 1秒あたりの最大リクエスト数（トークン補充レート）
+max_requests_per_second = 10.0
+# バースト許容数（トークンバケットの最大容量）
+burst_size = 20
+# 古いクライアントエントリのクリーンアップ間隔（秒）
+cleanup_interval_secs = 60
+
 [correlation]
 # 相関分析エンジンの有効/無効
 # 複数のセキュリティイベントを時系列で相関分析し、多段階攻撃パターンを検知する
