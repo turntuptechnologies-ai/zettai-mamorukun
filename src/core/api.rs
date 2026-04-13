@@ -50,6 +50,8 @@ struct RateLimitResult {
     retry_after: Option<f64>,
 }
 
+const MAX_RATE_LIMIT_ENTRIES: usize = 10000;
+
 /// トークンバケット方式のレートリミッター
 struct RateLimiter {
     buckets: HashMap<IpAddr, TokenBucket>,
@@ -57,6 +59,7 @@ struct RateLimiter {
     refill_rate: f64,
     last_cleanup: Instant,
     cleanup_interval: std::time::Duration,
+    max_entries: usize,
 }
 
 impl RateLimiter {
@@ -67,11 +70,26 @@ impl RateLimiter {
             refill_rate: config.max_requests_per_second,
             last_cleanup: Instant::now(),
             cleanup_interval: std::time::Duration::from_secs(config.cleanup_interval_secs),
+            max_entries: MAX_RATE_LIMIT_ENTRIES,
         }
     }
 
     fn check_rate_limit(&mut self, ip: IpAddr) -> RateLimitResult {
         let now = Instant::now();
+
+        if !self.buckets.contains_key(&ip) && self.buckets.len() >= self.max_entries {
+            self.cleanup();
+            if self.buckets.len() >= self.max_entries {
+                return RateLimitResult {
+                    allowed: false,
+                    limit: self.max_tokens as u32,
+                    remaining: 0,
+                    reset_secs: (self.max_tokens / self.refill_rate).ceil() as u64,
+                    retry_after: Some(1.0),
+                };
+            }
+        }
+
         let bucket = self.buckets.entry(ip).or_insert_with(|| TokenBucket {
             tokens: self.max_tokens,
             last_refill: now,
@@ -1638,6 +1656,45 @@ mod tests {
 
         rl.cleanup();
         assert_eq!(rl.buckets.len(), 0);
+    }
+
+    #[test]
+    fn test_rate_limiter_max_entries() {
+        let config = ApiRateLimitConfig {
+            enabled: true,
+            max_requests_per_second: 10.0,
+            burst_size: 5,
+            cleanup_interval_secs: 60,
+        };
+        let mut rl = RateLimiter::new(&config);
+        rl.max_entries = 3;
+
+        // 3 エントリまでは許可
+        for i in 1..=3u8 {
+            let ip: IpAddr = format!("10.0.0.{}", i).parse().unwrap();
+            let result = rl.check_rate_limit(ip);
+            assert!(result.allowed);
+        }
+        assert_eq!(rl.buckets.len(), 3);
+
+        // 4 番目の新規 IP は上限超過で拒否（クリーンアップしても空かない）
+        let ip4: IpAddr = "10.0.0.4".parse().unwrap();
+        let result = rl.check_rate_limit(ip4);
+        assert!(!result.allowed);
+        assert_eq!(rl.buckets.len(), 3);
+
+        // 既存 IP はまだ使える
+        let ip1: IpAddr = "10.0.0.1".parse().unwrap();
+        let result = rl.check_rate_limit(ip1);
+        assert!(result.allowed);
+
+        // 古いエントリを期限切れにすればクリーンアップで空きができる
+        if let Some(bucket) = rl.buckets.get_mut(&"10.0.0.2".parse::<IpAddr>().unwrap()) {
+            bucket.last_refill = Instant::now() - std::time::Duration::from_secs(300);
+        }
+        let result = rl.check_rate_limit(ip4);
+        assert!(result.allowed);
+        assert_eq!(rl.buckets.len(), 3);
     }
 
     #[tokio::test]
