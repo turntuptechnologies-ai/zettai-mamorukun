@@ -1954,6 +1954,333 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
+    /// WebSocket テスト用のサーバーを作成するヘルパー
+    fn create_ws_server(
+        tokens: Vec<ApiTokenConfig>,
+        ws_config: WebSocketConfig,
+    ) -> (u16, CancellationToken, broadcast::Sender<SecurityEvent>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let (event_tx, _) = broadcast::channel::<SecurityEvent>(64);
+
+        let (reload_tx, _reload_rx) = mpsc::channel::<()>(1);
+        let config = ApiConfig {
+            enabled: true,
+            bind_address: "127.0.0.1".to_string(),
+            port,
+            tokens,
+            rate_limit: ApiRateLimitConfig::default(),
+            websocket: ws_config,
+        };
+        let server = ApiServer::new(
+            &config,
+            Arc::new(StdMutex::new(Vec::new())),
+            None,
+            Arc::new(StdMutex::new(HashMap::new())),
+            Instant::now(),
+            None,
+            reload_tx,
+            Some(event_tx.clone()),
+        );
+        let cancel = server.cancel_token();
+        server.spawn().unwrap();
+        (port, cancel, event_tx)
+    }
+
+    #[tokio::test]
+    async fn test_ws_connect_success() {
+        use tokio_tungstenite::connect_async;
+
+        let ws_config = WebSocketConfig {
+            enabled: true,
+            max_connections: 10,
+            ..WebSocketConfig::default()
+        };
+        let (port, cancel, _event_tx) = create_ws_server(Vec::new(), ws_config);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let url = format!("ws://127.0.0.1:{}/api/v1/events/stream", port);
+        let result = connect_async(&url).await;
+        assert!(result.is_ok(), "WebSocket 接続に成功するべき");
+
+        let (mut ws, _response) = result.unwrap();
+        // クリーンに切断
+        use futures_util::SinkExt;
+        let _ = ws
+            .send(tokio_tungstenite::tungstenite::Message::Close(None))
+            .await;
+
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn test_ws_connect_no_auth_required_when_no_tokens() {
+        use tokio_tungstenite::connect_async;
+
+        let ws_config = WebSocketConfig {
+            enabled: true,
+            max_connections: 10,
+            ..WebSocketConfig::default()
+        };
+        // トークン未設定 → 認証不要
+        let (port, cancel, _event_tx) = create_ws_server(Vec::new(), ws_config);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let url = format!("ws://127.0.0.1:{}/api/v1/events/stream", port);
+        let result = connect_async(&url).await;
+        assert!(result.is_ok(), "トークン未設定時は認証なしで接続可能");
+
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn test_ws_connect_auth_failure() {
+        use tokio_tungstenite::connect_async;
+        use tokio_tungstenite::tungstenite::http::Request;
+
+        let tokens = vec![ApiTokenConfig {
+            name: "admin".to_string(),
+            token_hash: ApiServer::hash_token("correct-token"),
+            role: ApiRole::Admin,
+        }];
+        let ws_config = WebSocketConfig {
+            enabled: true,
+            max_connections: 10,
+            ..WebSocketConfig::default()
+        };
+        let (port, cancel, _event_tx) = create_ws_server(tokens, ws_config);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // 不正トークンでの接続
+        let url = format!("ws://127.0.0.1:{}/api/v1/events/stream", port);
+        let request = Request::builder()
+            .uri(&url)
+            .header("Host", format!("127.0.0.1:{}", port))
+            .header("Authorization", "Bearer wrong-token")
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header(
+                "Sec-WebSocket-Key",
+                tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+            )
+            .body(())
+            .unwrap();
+
+        let result = connect_async(request).await;
+        assert!(result.is_err(), "不正トークンでは接続拒否されるべき");
+
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn test_ws_upgrade_required_without_upgrade_header() {
+        // Upgrade ヘッダーなしで /api/v1/events/stream にアクセス → 426
+        let ws_config = WebSocketConfig {
+            enabled: true,
+            max_connections: 10,
+            ..WebSocketConfig::default()
+        };
+        let (port, cancel, _event_tx) = create_ws_server(Vec::new(), ws_config);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // 通常の HTTP GET リクエスト（Upgrade なし）
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET /api/v1/events/stream HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf);
+
+        assert!(
+            response.contains("426"),
+            "Upgrade なしのリクエストは 426 を返すべき: {}",
+            response
+        );
+        assert!(response.contains("WebSocket Upgrade"));
+
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn test_ws_event_receive() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::connect_async;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let ws_config = WebSocketConfig {
+            enabled: true,
+            max_connections: 10,
+            ping_interval_secs: 60,
+            idle_timeout_secs: 300,
+            buffer_size: 128,
+        };
+        let (port, cancel, event_tx) = create_ws_server(Vec::new(), ws_config);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let url = format!("ws://127.0.0.1:{}/api/v1/events/stream", port);
+        let (mut ws, _) = connect_async(&url).await.unwrap();
+
+        // サーバー側で subscribe が完了するまで少し待つ
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // イベントを送信
+        let event = SecurityEvent::new(
+            "test_event",
+            Severity::Warning,
+            "test_module",
+            "テストイベント",
+        );
+        event_tx.send(event).unwrap();
+
+        // WebSocket でイベントを受信
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(3), ws.next())
+            .await
+            .expect("タイムアウト: イベントを受信できなかった")
+            .expect("ストリームが終了した")
+            .expect("メッセージ受信エラー");
+
+        match msg {
+            Message::Text(text) => {
+                let text_str: &str = &text;
+                assert!(
+                    text_str.contains("test_event"),
+                    "イベントタイプが含まれるべき: {}",
+                    text_str
+                );
+                assert!(
+                    text_str.contains("WARNING"),
+                    "Severity が含まれるべき: {}",
+                    text_str
+                );
+                assert!(
+                    text_str.contains("test_module"),
+                    "モジュール名が含まれるべき: {}",
+                    text_str
+                );
+            }
+            other => panic!("テキストメッセージを期待したが {:?} を受信", other),
+        }
+
+        let _ = ws
+            .send(tokio_tungstenite::tungstenite::Message::Close(None))
+            .await;
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn test_ws_severity_filter() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::connect_async;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let ws_config = WebSocketConfig {
+            enabled: true,
+            max_connections: 10,
+            ping_interval_secs: 60,
+            idle_timeout_secs: 300,
+            buffer_size: 128,
+        };
+        let (port, cancel, event_tx) = create_ws_server(Vec::new(), ws_config);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // severity=critical でフィルタ
+        let url = format!(
+            "ws://127.0.0.1:{}/api/v1/events/stream?severity=critical",
+            port
+        );
+        let (mut ws, _) = connect_async(&url).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Info イベントを送信（フィルタされるべき）
+        let info_event =
+            SecurityEvent::new("info_event", Severity::Info, "test_module", "Info イベント");
+        event_tx.send(info_event).unwrap();
+
+        // Critical イベントを送信（受信されるべき）
+        let critical_event = SecurityEvent::new(
+            "critical_event",
+            Severity::Critical,
+            "test_module",
+            "Critical イベント",
+        );
+        event_tx.send(critical_event).unwrap();
+
+        // Critical イベントのみ受信されることを確認
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(3), ws.next())
+            .await
+            .expect("タイムアウト")
+            .expect("ストリーム終了")
+            .expect("受信エラー");
+
+        match msg {
+            Message::Text(text) => {
+                let text_str: &str = &text;
+                assert!(
+                    text_str.contains("critical_event"),
+                    "Critical イベントが受信されるべき: {}",
+                    text_str
+                );
+                assert!(
+                    !text_str.contains("info_event"),
+                    "Info イベントはフィルタされるべき: {}",
+                    text_str
+                );
+            }
+            other => panic!("テキストメッセージを期待したが {:?} を受信", other),
+        }
+
+        let _ = ws
+            .send(tokio_tungstenite::tungstenite::Message::Close(None))
+            .await;
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn test_ws_max_connections_exceeded() {
+        use tokio_tungstenite::connect_async;
+
+        let ws_config = WebSocketConfig {
+            enabled: true,
+            max_connections: 1, // 最大 1 接続
+            ping_interval_secs: 60,
+            idle_timeout_secs: 300,
+            buffer_size: 128,
+        };
+        let (port, cancel, _event_tx) = create_ws_server(Vec::new(), ws_config);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let url = format!("ws://127.0.0.1:{}/api/v1/events/stream", port);
+
+        // 1 接続目: 成功
+        let first = connect_async(&url).await;
+        assert!(first.is_ok(), "1 接続目は成功するべき");
+        let (_ws1, _) = first.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // 2 接続目: 上限超過で失敗
+        let second = connect_async(&url).await;
+        assert!(second.is_err(), "最大接続数超過時は接続拒否されるべき");
+
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
     #[test]
     fn test_rate_limiter_allows_within_limit() {
         let config = ApiRateLimitConfig {
