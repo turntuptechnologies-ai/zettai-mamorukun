@@ -6146,6 +6146,10 @@ pub struct ApiConfig {
     /// CORS 設定
     #[serde(default)]
     pub cors: CorsConfig,
+
+    /// OpenAPI スキーマエンドポイントの有効/無効
+    #[serde(default = "ApiConfig::default_openapi_enabled")]
+    pub openapi_enabled: bool,
 }
 
 impl ApiConfig {
@@ -6155,6 +6159,10 @@ impl ApiConfig {
 
     fn default_port() -> u16 {
         9201
+    }
+
+    fn default_openapi_enabled() -> bool {
+        true
     }
 }
 
@@ -6168,6 +6176,7 @@ impl Default for ApiConfig {
             rate_limit: ApiRateLimitConfig::default(),
             websocket: WebSocketConfig::default(),
             cors: CorsConfig::default(),
+            openapi_enabled: Self::default_openapi_enabled(),
         }
     }
 }
@@ -6182,6 +6191,7 @@ impl Clone for ApiConfig {
             rate_limit: self.rate_limit.clone(),
             websocket: self.websocket.clone(),
             cors: self.cors.clone(),
+            openapi_enabled: self.openapi_enabled,
         }
     }
 }

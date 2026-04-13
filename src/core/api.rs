@@ -9,6 +9,7 @@ use crate::config::{
 };
 use crate::core::event::{SecurityEvent, Severity};
 use crate::core::metrics::SharedMetrics;
+use crate::core::openapi;
 use crate::core::status::{MetricsSummary, StatusResponse};
 use futures_util::{SinkExt, StreamExt};
 use sha2::{Digest, Sha256};
@@ -186,6 +187,7 @@ pub struct ApiServer {
     ws_config: WebSocketConfig,
     ws_connections: Arc<AtomicUsize>,
     cors_config: Arc<CorsConfig>,
+    openapi_enabled: bool,
 }
 
 impl ApiServer {
@@ -223,6 +225,7 @@ impl ApiServer {
             ws_config: config.websocket.clone(),
             ws_connections: Arc::new(AtomicUsize::new(0)),
             cors_config: Arc::new(config.cors.clone()),
+            openapi_enabled: config.openapi_enabled,
         }
     }
 
@@ -251,6 +254,7 @@ impl ApiServer {
         let ws_config = Arc::new(self.ws_config);
         let ws_connections = self.ws_connections;
         let cors_config = self.cors_config;
+        let openapi_enabled = self.openapi_enabled;
 
         // クリーンアップタスク
         if self.rate_limit_config.enabled {
@@ -296,11 +300,13 @@ impl ApiServer {
                                 let wsc = Arc::clone(&ws_config);
                                 let wsc_count = Arc::clone(&ws_connections);
                                 let cors = Arc::clone(&cors_config);
+                                let oa_enabled = openapi_enabled;
                                 tokio::spawn(async move {
                                     if let Err(e) = Self::handle_connection(
                                         stream, &names, &metrics, &restarts,
                                         started, &db_path, &sender, &toks,
                                         client_ip, &rl, &eb, &wsc, &wsc_count, &cors,
+                                        oa_enabled,
                                     ).await {
                                         tracing::debug!(error = %e, "API 接続の処理に失敗");
                                     }
@@ -454,6 +460,7 @@ impl ApiServer {
         ws_config: &Arc<WebSocketConfig>,
         ws_connections: &Arc<AtomicUsize>,
         cors_config: &Arc<CorsConfig>,
+        openapi_enabled: bool,
     ) -> Result<(), io::Error> {
         // 接続タイムアウト（スローロリス対策）
         let result = tokio::time::timeout(
@@ -478,8 +485,8 @@ impl ApiServer {
         let cors_headers = Self::build_cors_headers(cors_config, origin, is_preflight);
         let cors_headers_for_health = cors_headers.clone();
 
-        // レートリミットチェック（/api/v1/health はスキップ）
-        let rate_limit_check = if path != "/api/v1/health" {
+        // レートリミットチェック（/api/v1/health, /api/v1/openapi.json はスキップ）
+        let rate_limit_check = if path != "/api/v1/health" && path != "/api/v1/openapi.json" {
             // unwrap safety: Mutex が poisoned になるのはパニック時のみ
             let mut rl_guard = rate_limiter.lock().unwrap();
             (*rl_guard)
@@ -687,6 +694,30 @@ impl ApiServer {
                     .await?;
                 }
             },
+            (HttpMethod::Get, "/api/v1/openapi.json") => {
+                if openapi_enabled {
+                    let schema = openapi::generate_openapi_schema();
+                    let body = serde_json::to_string(&schema).unwrap_or_else(|_| {
+                        r#"{"error":"OpenAPI スキーマの生成に失敗しました"}"#.to_string()
+                    });
+                    let cors_only = if cors_headers_for_health.is_empty() {
+                        None
+                    } else {
+                        Some(cors_headers_for_health.as_str())
+                    };
+                    Self::send_json_response_with_headers(&mut stream, 200, "OK", &body, cors_only)
+                        .await?;
+                } else {
+                    Self::send_error_with_headers(
+                        &mut stream,
+                        404,
+                        "Not Found",
+                        "OpenAPI スキーマが無効です",
+                        extra,
+                    )
+                    .await?;
+                }
+            }
             (HttpMethod::Get, _) | (HttpMethod::Options, _) | (HttpMethod::Other, _) => {
                 if matches!(
                     path.as_str(),
@@ -695,6 +726,7 @@ impl ApiServer {
                         | "/api/v1/modules"
                         | "/api/v1/events"
                         | "/api/v1/reload"
+                        | "/api/v1/openapi.json"
                 ) {
                     Self::send_error_with_headers(
                         &mut stream,
@@ -718,7 +750,11 @@ impl ApiServer {
             (HttpMethod::Post, _) => {
                 if matches!(
                     path.as_str(),
-                    "/api/v1/health" | "/api/v1/status" | "/api/v1/modules" | "/api/v1/events"
+                    "/api/v1/health"
+                        | "/api/v1/status"
+                        | "/api/v1/modules"
+                        | "/api/v1/events"
+                        | "/api/v1/openapi.json"
                 ) {
                     Self::send_error_with_headers(
                         &mut stream,
@@ -1453,6 +1489,7 @@ mod tests {
             rate_limit: ApiRateLimitConfig::default(),
             websocket: WebSocketConfig::default(),
             cors: CorsConfig::default(),
+            openapi_enabled: true,
         };
         let server = ApiServer::new(
             &config,
@@ -1503,6 +1540,7 @@ mod tests {
             rate_limit: ApiRateLimitConfig::default(),
             websocket: WebSocketConfig::default(),
             cors: CorsConfig::default(),
+            openapi_enabled: true,
         };
         let modules = Arc::new(StdMutex::new(vec!["test_module".to_string()]));
         let metrics = Arc::new(StdMutex::new(SharedMetrics {
@@ -1563,6 +1601,7 @@ mod tests {
             rate_limit: ApiRateLimitConfig::default(),
             websocket: WebSocketConfig::default(),
             cors: CorsConfig::default(),
+            openapi_enabled: true,
         };
         let modules = Arc::new(StdMutex::new(vec![
             "mod_a".to_string(),
@@ -1622,6 +1661,7 @@ mod tests {
             rate_limit: ApiRateLimitConfig::default(),
             websocket: WebSocketConfig::default(),
             cors: CorsConfig::default(),
+            openapi_enabled: true,
         };
         let server = ApiServer::new(
             &config,
@@ -1676,6 +1716,7 @@ mod tests {
             rate_limit: ApiRateLimitConfig::default(),
             websocket: WebSocketConfig::default(),
             cors: CorsConfig::default(),
+            openapi_enabled: true,
         };
         let server = ApiServer::new(
             &config,
@@ -1726,6 +1767,7 @@ mod tests {
             rate_limit: ApiRateLimitConfig::default(),
             websocket: WebSocketConfig::default(),
             cors: CorsConfig::default(),
+            openapi_enabled: true,
         };
         let server = ApiServer::new(
             &config,
@@ -1776,6 +1818,7 @@ mod tests {
             rate_limit: ApiRateLimitConfig::default(),
             websocket: WebSocketConfig::default(),
             cors: CorsConfig::default(),
+            openapi_enabled: true,
         };
         let server = ApiServer::new(
             &config,
@@ -1914,6 +1957,7 @@ mod tests {
             rate_limit: ApiRateLimitConfig::default(),
             websocket: WebSocketConfig::default(),
             cors: CorsConfig::default(),
+            openapi_enabled: true,
         };
         let server = ApiServer::new(
             &config,
@@ -2088,6 +2132,7 @@ mod tests {
             rate_limit: ApiRateLimitConfig::default(),
             websocket: ws_config,
             cors: CorsConfig::default(),
+            openapi_enabled: true,
         };
         let server = ApiServer::new(
             &config,
@@ -2543,6 +2588,7 @@ mod tests {
             },
             websocket: WebSocketConfig::default(),
             cors: CorsConfig::default(),
+            openapi_enabled: true,
         };
         let server = ApiServer::new(
             &config,
@@ -2766,6 +2812,7 @@ mod tests {
                 allowed_origins: vec!["https://dashboard.example.com".to_string()],
                 ..CorsConfig::default()
             },
+            openapi_enabled: true,
         };
         let server = ApiServer::new(
             &config,
@@ -2825,6 +2872,7 @@ mod tests {
                 allowed_origins: Vec::new(),
                 ..CorsConfig::default()
             },
+            openapi_enabled: true,
         };
         let server = ApiServer::new(
             &config,
@@ -2883,6 +2931,7 @@ mod tests {
                 allowed_origins: vec!["https://allowed.example.com".to_string()],
                 ..CorsConfig::default()
             },
+            openapi_enabled: true,
         };
         let server = ApiServer::new(
             &config,
@@ -2917,6 +2966,108 @@ mod tests {
         let response = String::from_utf8_lossy(&buf);
         assert!(response.contains("HTTP/1.1 200 OK"));
         assert!(!response.contains("Access-Control-Allow-Origin"));
+
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn test_api_server_openapi_endpoint() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let (reload_tx, _reload_rx) = mpsc::channel::<()>(1);
+        let config = ApiConfig {
+            enabled: true,
+            bind_address: "127.0.0.1".to_string(),
+            port,
+            tokens: Vec::new(),
+            rate_limit: ApiRateLimitConfig::default(),
+            websocket: WebSocketConfig::default(),
+            cors: CorsConfig::default(),
+            openapi_enabled: true,
+        };
+        let server = ApiServer::new(
+            &config,
+            Arc::new(StdMutex::new(Vec::new())),
+            None,
+            Arc::new(StdMutex::new(HashMap::new())),
+            Instant::now(),
+            None,
+            reload_tx,
+            None,
+        );
+        let cancel = server.cancel_token();
+        server.spawn().unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET /api/v1/openapi.json HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf);
+        assert!(response.contains("HTTP/1.1 200 OK"));
+        assert!(response.contains("\"openapi\":\"3.0.3\""));
+        assert!(response.contains("\"paths\""));
+        assert!(response.contains("/api/v1/health"));
+
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn test_api_server_openapi_disabled() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let (reload_tx, _reload_rx) = mpsc::channel::<()>(1);
+        let config = ApiConfig {
+            enabled: true,
+            bind_address: "127.0.0.1".to_string(),
+            port,
+            tokens: Vec::new(),
+            rate_limit: ApiRateLimitConfig::default(),
+            websocket: WebSocketConfig::default(),
+            cors: CorsConfig::default(),
+            openapi_enabled: false,
+        };
+        let server = ApiServer::new(
+            &config,
+            Arc::new(StdMutex::new(Vec::new())),
+            None,
+            Arc::new(StdMutex::new(HashMap::new())),
+            Instant::now(),
+            None,
+            reload_tx,
+            None,
+        );
+        let cancel = server.cancel_token();
+        server.spawn().unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET /api/v1/openapi.json HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf);
+        assert!(response.contains("HTTP/1.1 404"));
+        assert!(response.contains("OpenAPI"));
 
         cancel.cancel();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;

@@ -805,7 +805,7 @@ port = 9100
 # REST API サーバーの有効/無効
 # 有効にすると HTTP REST API でデーモンのステータス確認、イベント検索、
 # モジュール一覧、設定リロードをリモートから操作可能にする
-# エンドポイント: /api/v1/health, /api/v1/status, /api/v1/modules, /api/v1/events, /api/v1/reload
+# エンドポイント: /api/v1/health, /api/v1/status, /api/v1/modules, /api/v1/events, /api/v1/reload, /api/v1/openapi.json
 # SIGHUP でホットリロード可能（enabled, bind_address, port, tokens の変更が即時反映される）
 enabled = false
 # バインドアドレス
@@ -859,6 +859,11 @@ max_requests_per_second = 10.0
 burst_size = 20
 # 古いクライアントエントリのクリーンアップ間隔（秒）
 cleanup_interval_secs = 60
+
+# OpenAPI スキーマエンドポイントの有効/無効
+# 有効にすると /api/v1/openapi.json で OpenAPI 3.0.3 仕様書を取得できる
+# 認証不要のエンドポイント
+openapi_enabled = true
 
 [api.cors]
 # CORS の有効/無効
