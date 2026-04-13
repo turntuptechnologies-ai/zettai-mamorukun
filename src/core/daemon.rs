@@ -12,6 +12,7 @@ use crate::core::metrics::{MetricsCollector, SharedMetrics};
 use crate::core::module_manager::ModuleManager;
 use crate::core::prometheus::PrometheusExporter;
 use crate::core::scan_state::{self, DiffKind};
+use crate::core::scoring::{ScoringRuntimeConfig, SecurityScorer, SharedSecurityScore};
 use crate::core::status::{DaemonState, StatusServer};
 use crate::core::syslog::{SyslogForwarder, SyslogRuntimeConfig};
 use crate::error::AppError;
@@ -52,6 +53,8 @@ impl Daemon {
         // ステータスサーバー用の共有状態
         let shared_module_names: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
         let mut shared_metrics: Option<Arc<StdMutex<SharedMetrics>>> = None;
+        let mut shared_scoring: Option<Arc<StdMutex<SharedSecurityScore>>> = None;
+        let mut scoring_config_sender: Option<watch::Sender<ScoringRuntimeConfig>> = None;
         let mut status_cancel_token: Option<CancellationToken> = None;
         let mut prometheus_cancel_token: Option<CancellationToken> = None;
         let mut api_cancel_token: Option<CancellationToken> = None;
@@ -105,6 +108,15 @@ impl Daemon {
                     interval_secs = self.config.metrics.interval_secs,
                     "メトリクスコレクターを起動しました"
                 );
+            }
+
+            // セキュリティスコアラーの起動
+            if self.config.scoring.enabled {
+                let (scorer, sender, shared) = SecurityScorer::new(&self.config.scoring, &bus);
+                scoring_config_sender = Some(sender);
+                shared_scoring = Some(shared);
+                scorer.spawn();
+                tracing::info!("セキュリティスコアラーを起動しました");
             }
 
             // ダイジェストコレクターの起動
@@ -389,7 +401,8 @@ impl Daemon {
                     &self.config.prometheus,
                     Arc::clone(metrics),
                     prometheus_started_at,
-                );
+                )
+                .with_scoring(shared_scoring.clone());
                 prometheus_cancel_token = Some(exporter.cancel_token());
                 match exporter.spawn() {
                     Ok(()) => {}
@@ -420,6 +433,7 @@ impl Daemon {
                 event_store_db_path,
                 reload_sender.clone(),
                 event_bus.as_ref().map(|b| b.sender()),
+                shared_scoring.clone(),
             );
             api_cancel_token = Some(api_server.cancel_token());
             match api_server.spawn() {
@@ -553,6 +567,23 @@ impl Daemon {
                                 } else {
                                     tracing::warn!(
                                         "メトリクスのインターバルリロードに失敗しました（受信側が閉じています）"
+                                    );
+                                }
+                            }
+
+                            // スコアラーのリロード
+                            if let Some(ref sender) = scoring_config_sender {
+                                let new_runtime = ScoringRuntimeConfig {
+                                    interval_secs: new_config.scoring.interval_secs,
+                                    category_weights: new_config.scoring.category_weights.clone(),
+                                };
+                                if sender.send(new_runtime).is_ok() {
+                                    tracing::info!(
+                                        "スコアラーの設定をリロードしました"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        "スコアラーの設定リロードに失敗しました（受信側が閉じています）"
                                     );
                                 }
                             }
@@ -700,7 +731,8 @@ impl Daemon {
                                             &new_config.prometheus,
                                             Arc::clone(metrics),
                                             prometheus_started_at,
-                                        );
+                                        )
+                                        .with_scoring(shared_scoring.clone());
                                         prometheus_cancel_token = Some(exporter.cancel_token());
                                         match exporter.spawn() {
                                             Ok(()) => tracing::info!(
@@ -723,7 +755,8 @@ impl Daemon {
                                             &new_config.prometheus,
                                             Arc::clone(metrics),
                                             prometheus_started_at,
-                                        );
+                                        )
+                                        .with_scoring(shared_scoring.clone());
                                         prometheus_cancel_token = Some(exporter.cancel_token());
                                         match exporter.spawn() {
                                             Ok(()) => tracing::info!(
@@ -740,7 +773,8 @@ impl Daemon {
                                                     &self.config.prometheus,
                                                     Arc::clone(metrics),
                                                     prometheus_started_at,
-                                                );
+                                                )
+                                                .with_scoring(shared_scoring.clone());
                                                 prometheus_cancel_token =
                                                     Some(fallback.cancel_token());
                                                 match fallback.spawn() {
@@ -785,6 +819,7 @@ impl Daemon {
                                         event_store_db_path,
                                         reload_sender.clone(),
                                         event_bus.as_ref().map(|b| b.sender()),
+                                        shared_scoring.clone(),
                                     );
                                     api_cancel_token = Some(api_server.cancel_token());
                                     match api_server.spawn() {
@@ -816,6 +851,7 @@ impl Daemon {
                                         event_store_db_path,
                                         reload_sender.clone(),
                                         event_bus.as_ref().map(|b| b.sender()),
+                                        shared_scoring.clone(),
                                     );
                                     api_cancel_token = Some(api_server.cancel_token());
                                     match api_server.spawn() {
@@ -843,6 +879,7 @@ impl Daemon {
                                                 fallback_db_path,
                                                 reload_sender.clone(),
                                                 event_bus.as_ref().map(|b| b.sender()),
+                                                shared_scoring.clone(),
                                             );
                                             api_cancel_token =
                                                 Some(fallback.cancel_token());

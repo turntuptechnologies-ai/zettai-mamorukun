@@ -1397,6 +1397,19 @@ enabled = false
 # field = "source_module"
 # pattern = "file_integrity"
 
+[scoring]
+# セキュリティスコアリングの有効/無効
+# 有効にするとイベントの Severity を基にシステム全体のセキュリティ状態を
+# 0〜100 のスコアで評価し、カテゴリ別（network, filesystem, process, auth, kernel, system）に
+# グレード（A〜F）を付与する。REST API の /api/v1/score で取得可能
+enabled = false
+# スコア更新インターバル（秒）
+interval_secs = 300
+# カテゴリ別重み付け（デフォルト: 1.0）
+# [scoring.category_weights]
+# network = 1.5
+# auth = 2.0
+
 [modules.dynamic_library_monitor]
 # 動的ライブラリインジェクション検知モジュール — /proc/[pid]/maps のベースライン差分で不審な .so ロードを検知
 enabled = false

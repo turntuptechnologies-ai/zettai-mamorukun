@@ -5,6 +5,7 @@
 
 use crate::config::PrometheusConfig;
 use crate::core::metrics::SharedMetrics;
+use crate::core::scoring::SharedSecurityScore;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -16,6 +17,7 @@ pub struct PrometheusExporter {
     bind_address: String,
     port: u16,
     shared_metrics: Arc<StdMutex<SharedMetrics>>,
+    shared_scoring: Option<Arc<StdMutex<SharedSecurityScore>>>,
     started_at: Instant,
     cancel_token: CancellationToken,
 }
@@ -31,9 +33,16 @@ impl PrometheusExporter {
             bind_address: config.bind_address.clone(),
             port: config.port,
             shared_metrics,
+            shared_scoring: None,
             started_at,
             cancel_token: CancellationToken::new(),
         }
+    }
+
+    /// セキュリティスコアリングデータを設定する
+    pub fn with_scoring(mut self, scoring: Option<Arc<StdMutex<SharedSecurityScore>>>) -> Self {
+        self.shared_scoring = scoring;
+        self
     }
 
     /// キャンセルトークンを取得する
@@ -49,6 +58,7 @@ impl PrometheusExporter {
         let listener = TcpListener::from_std(listener)?;
 
         let shared_metrics = self.shared_metrics;
+        let shared_scoring = self.shared_scoring;
         let started_at = self.started_at;
         let cancel_token = self.cancel_token;
 
@@ -59,9 +69,10 @@ impl PrometheusExporter {
                         match result {
                             Ok((stream, _)) => {
                                 let metrics = Arc::clone(&shared_metrics);
+                                let scoring = shared_scoring.clone();
                                 let started = started_at;
                                 tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_connection(stream, &metrics, started).await {
+                                    if let Err(e) = Self::handle_connection(stream, &metrics, &scoring, started).await {
                                         tracing::debug!(error = %e, "Prometheus 接続の処理に失敗");
                                     }
                                 });
@@ -89,6 +100,7 @@ impl PrometheusExporter {
     async fn handle_connection(
         mut stream: tokio::net::TcpStream,
         shared_metrics: &Arc<StdMutex<SharedMetrics>>,
+        shared_scoring: &Option<Arc<StdMutex<SharedSecurityScore>>>,
         started_at: Instant,
     ) -> Result<(), std::io::Error> {
         // 接続タイムアウト（スローロリス対策）
@@ -113,7 +125,7 @@ impl PrometheusExporter {
 
         match path {
             "/metrics" => {
-                let body = Self::format_metrics(shared_metrics, started_at);
+                let body = Self::format_metrics(shared_metrics, shared_scoring, started_at);
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),
@@ -166,6 +178,7 @@ impl PrometheusExporter {
 
     fn format_metrics(
         shared_metrics: &Arc<StdMutex<SharedMetrics>>,
+        shared_scoring: &Option<Arc<StdMutex<SharedSecurityScore>>>,
         started_at: Instant,
     ) -> String {
         let mut output = String::new();
@@ -224,6 +237,39 @@ impl PrometheusExporter {
             output.push('\n');
         }
 
+        // security score
+        if let Some(scoring) = shared_scoring {
+            let score_data = match scoring.lock() {
+                Ok(s) => Some(s.clone()),
+                Err(_) => None,
+            };
+            if let Some(data) = score_data {
+                output.push_str(
+                    "# HELP zettai_security_score_overall Overall security score (0-100)\n",
+                );
+                output.push_str("# TYPE zettai_security_score_overall gauge\n");
+                output.push_str(&format!(
+                    "zettai_security_score_overall {}\n",
+                    data.overall_score
+                ));
+                output.push('\n');
+
+                if !data.categories.is_empty() {
+                    output.push_str("# HELP zettai_security_score_category Security score by category (0-100)\n");
+                    output.push_str("# TYPE zettai_security_score_category gauge\n");
+                    let mut cats: Vec<_> = data.categories.iter().collect();
+                    cats.sort_by_key(|(k, _)| (*k).clone());
+                    for (category, cat_score) in cats {
+                        output.push_str(&format!(
+                            "zettai_security_score_category{{category=\"{}\"}} {}\n",
+                            category, cat_score.score
+                        ));
+                    }
+                    output.push('\n');
+                }
+            }
+        }
+
         output
     }
 }
@@ -266,7 +312,7 @@ mod tests {
     fn test_format_metrics_default() {
         let shared = Arc::new(StdMutex::new(SharedMetrics::default()));
         let started_at = Instant::now();
-        let output = PrometheusExporter::format_metrics(&shared, started_at);
+        let output = PrometheusExporter::format_metrics(&shared, &None, started_at);
 
         assert!(output.contains("# HELP zettai_uptime_seconds"));
         assert!(output.contains("# TYPE zettai_uptime_seconds gauge"));
@@ -294,7 +340,7 @@ mod tests {
             module_counts,
         }));
         let started_at = Instant::now();
-        let output = PrometheusExporter::format_metrics(&shared, started_at);
+        let output = PrometheusExporter::format_metrics(&shared, &None, started_at);
 
         assert!(output.contains("zettai_events_total 23"));
         assert!(output.contains("zettai_events_by_severity_total{severity=\"info\"} 10"));
@@ -318,7 +364,7 @@ mod tests {
             module_counts,
         }));
         let started_at = Instant::now();
-        let output = PrometheusExporter::format_metrics(&shared, started_at);
+        let output = PrometheusExporter::format_metrics(&shared, &None, started_at);
 
         // a_module が z_module より前に出力される
         let a_pos = output.find("a_module").unwrap();
@@ -443,8 +489,11 @@ mod tests {
         let shared = Arc::new(StdMutex::new(SharedMetrics::default()));
         let exporter = PrometheusExporter::new(&config, shared, past);
 
-        let output =
-            PrometheusExporter::format_metrics(&exporter.shared_metrics, exporter.started_at);
+        let output = PrometheusExporter::format_metrics(
+            &exporter.shared_metrics,
+            &None,
+            exporter.started_at,
+        );
         assert!(output.contains("zettai_uptime_seconds"));
         let uptime = parse_uptime_from_metrics(&output);
         assert!(uptime >= 5.0, "uptime should be >= 5.0, got {uptime}");

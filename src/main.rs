@@ -156,6 +156,18 @@ enum Commands {
         #[arg(long, value_name = "PATH")]
         db: Option<String>,
     },
+    /// セキュリティスコアを表示する
+    Score {
+        /// API サーバーの URL
+        #[arg(long, default_value = "http://127.0.0.1:9200")]
+        api_url: String,
+        /// API トークン
+        #[arg(long)]
+        api_token: Option<String>,
+        /// JSON 形式で出力
+        #[arg(long)]
+        json: bool,
+    },
     /// API トークンの SHA-256 ハッシュを生成する
     HashToken {
         /// ハッシュ化するトークン文字列（省略時は標準入力から読み取る）
@@ -773,6 +785,117 @@ fn format_number(n: u64) -> String {
 }
 
 /// イベント統計を実行する
+/// セキュリティスコアを REST API 経由で取得・表示する
+fn run_score_command(api_url: &str, api_token: Option<&str>, json: bool) {
+    use std::io::Read as _;
+    use std::net::TcpStream;
+
+    let url = api_url.trim_end_matches('/');
+    let stripped = url.strip_prefix("http://").unwrap_or_else(|| {
+        eprintln!("エラー: http:// で始まる URL を指定してください");
+        process::exit(1);
+    });
+
+    let (host_port, _) = stripped.split_once('/').unwrap_or((stripped, ""));
+
+    let mut stream = match TcpStream::connect(host_port) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "エラー: API サーバーに接続できません ({}): {}",
+                host_port, e
+            );
+            process::exit(1);
+        }
+    };
+
+    let mut request = format!(
+        "GET /api/v1/score HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n",
+        host_port
+    );
+    if let Some(token) = api_token {
+        request.push_str(&format!("Authorization: Bearer {}\r\n", token));
+    }
+    request.push_str("\r\n");
+
+    if let Err(e) = std::io::Write::write_all(&mut stream, request.as_bytes()) {
+        eprintln!("エラー: リクエストの送信に失敗しました: {}", e);
+        process::exit(1);
+    }
+
+    let mut response = String::new();
+    if let Err(e) = stream.read_to_string(&mut response) {
+        eprintln!("エラー: レスポンスの読み取りに失敗しました: {}", e);
+        process::exit(1);
+    }
+
+    let body = response
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b)
+        .unwrap_or(&response);
+
+    let first_line = response.lines().next().unwrap_or("");
+    if !first_line.contains("200") {
+        eprintln!("エラー: API エラー: {}", first_line);
+        if !body.is_empty() {
+            eprintln!("{}", body);
+        }
+        process::exit(1);
+    }
+
+    if json {
+        println!("{}", body);
+    } else {
+        match serde_json::from_str::<serde_json::Value>(body) {
+            Ok(v) => {
+                eprintln!(
+                    "セキュリティスコア: {} (グレード: {})",
+                    v.get("overall_score").and_then(|s| s.as_u64()).unwrap_or(0),
+                    v.get("grade").and_then(|s| s.as_str()).unwrap_or("?"),
+                );
+                if let Some(cats) = v.get("categories").and_then(|c| c.as_object()) {
+                    eprintln!("\nカテゴリ別:");
+                    let mut sorted: Vec<_> = cats.iter().collect();
+                    sorted.sort_by_key(|(k, _)| k.to_string());
+                    for (cat, data) in sorted {
+                        let score = data.get("score").and_then(|s| s.as_u64()).unwrap_or(0);
+                        let grade = data.get("grade").and_then(|s| s.as_str()).unwrap_or("?");
+                        let issues = data.get("issues").and_then(|s| s.as_u64()).unwrap_or(0);
+                        eprintln!(
+                            "  {:<12} スコア: {:>3} ({}) 問題: {}",
+                            cat, score, grade, issues
+                        );
+                    }
+                }
+                if let Some(summary) = v.get("summary") {
+                    eprintln!("\nサマリー:");
+                    eprintln!(
+                        "  総イベント: {}  CRITICAL: {}  HIGH: {}  INFO: {}",
+                        summary
+                            .get("total_events")
+                            .and_then(|s| s.as_u64())
+                            .unwrap_or(0),
+                        summary
+                            .get("critical")
+                            .and_then(|s| s.as_u64())
+                            .unwrap_or(0),
+                        summary.get("high").and_then(|s| s.as_u64()).unwrap_or(0),
+                        summary.get("info").and_then(|s| s.as_u64()).unwrap_or(0),
+                    );
+                }
+                if let Some(ts) = v.get("evaluated_at").and_then(|s| s.as_str()) {
+                    eprintln!("\n評価日時: {}", ts);
+                }
+            }
+            Err(e) => {
+                eprintln!("エラー: レスポンスの解析に失敗しました: {}", e);
+                println!("{}", body);
+                process::exit(1);
+            }
+        }
+    }
+}
+
 fn run_event_stats(config_path: &Path, db: &Option<String>, days: u32, json: bool) {
     if days < 1 {
         eprintln!("エラー: --days は 1 以上を指定してください");
@@ -1042,6 +1165,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             force,
         }) => {
             run_init(profile.as_deref(), *list_profiles, output, *force);
+            return Ok(());
+        }
+        Some(Commands::Score {
+            api_url,
+            api_token,
+            json,
+        }) => {
+            run_score_command(api_url, api_token.as_deref(), *json);
             return Ok(());
         }
         Some(Commands::HashToken { token }) => {

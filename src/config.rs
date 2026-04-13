@@ -73,6 +73,10 @@ pub struct AppConfig {
     /// REST API サーバー設定
     #[serde(default)]
     pub api: ApiConfig,
+
+    /// セキュリティスコアリング設定
+    #[serde(default)]
+    pub scoring: ScoringConfig,
 }
 
 /// デーモン動作設定
@@ -6232,6 +6236,38 @@ impl Clone for ApiConfig {
             max_page_size: self.max_page_size,
             batch_max_size: self.batch_max_size,
             max_request_body_size: self.max_request_body_size,
+        }
+    }
+}
+
+/// セキュリティスコアリング設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct ScoringConfig {
+    /// スコアリングの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スコア更新インターバル（秒）
+    #[serde(default = "ScoringConfig::default_interval_secs")]
+    pub interval_secs: u64,
+
+    /// カテゴリ別の重み付け（デフォルト: 各1.0）
+    #[serde(default)]
+    pub category_weights: HashMap<String, f64>,
+}
+
+impl ScoringConfig {
+    fn default_interval_secs() -> u64 {
+        300
+    }
+}
+
+impl Default for ScoringConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: Self::default_interval_secs(),
+            category_weights: HashMap::new(),
         }
     }
 }

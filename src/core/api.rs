@@ -10,6 +10,7 @@ use crate::config::{
 use crate::core::event::{SecurityEvent, Severity};
 use crate::core::metrics::SharedMetrics;
 use crate::core::openapi;
+use crate::core::scoring::SharedSecurityScore;
 use crate::core::status::{MetricsSummary, StatusResponse};
 use futures_util::{SinkExt, StreamExt};
 use sha2::{Digest, Sha256};
@@ -192,6 +193,7 @@ pub struct ApiServer {
     max_page_size: u32,
     batch_max_size: u32,
     max_request_body_size: usize,
+    shared_scoring: Option<Arc<StdMutex<SharedSecurityScore>>>,
 }
 
 impl ApiServer {
@@ -206,6 +208,7 @@ impl ApiServer {
         event_store_db_path: Option<String>,
         reload_sender: mpsc::Sender<()>,
         event_bus: Option<broadcast::Sender<SecurityEvent>>,
+        shared_scoring: Option<Arc<StdMutex<SharedSecurityScore>>>,
     ) -> Self {
         let rate_limiter = if config.rate_limit.enabled {
             Some(RateLimiter::new(&config.rate_limit))
@@ -234,6 +237,7 @@ impl ApiServer {
             max_page_size: config.max_page_size,
             batch_max_size: config.batch_max_size,
             max_request_body_size: config.max_request_body_size,
+            shared_scoring,
         }
     }
 
@@ -267,6 +271,7 @@ impl ApiServer {
         let max_page_size = self.max_page_size;
         let batch_max_size = self.batch_max_size;
         let max_request_body_size = self.max_request_body_size;
+        let shared_scoring = self.shared_scoring;
 
         // クリーンアップタスク
         if self.rate_limit_config.enabled {
@@ -317,12 +322,13 @@ impl ApiServer {
                                 let mps = max_page_size;
                                 let bms = batch_max_size;
                                 let mrbs = max_request_body_size;
+                                let scoring = shared_scoring.clone();
                                 tokio::spawn(async move {
                                     if let Err(e) = Self::handle_connection(
                                         stream, &names, &metrics, &restarts,
                                         started, &db_path, &sender, &toks,
                                         client_ip, &rl, &eb, &wsc, &wsc_count, &cors,
-                                        oa_enabled, dps, mps, bms, mrbs,
+                                        oa_enabled, dps, mps, bms, mrbs, &scoring,
                                     ).await {
                                         tracing::debug!(error = %e, "API 接続の処理に失敗");
                                     }
@@ -398,7 +404,8 @@ impl ApiServer {
             (HttpMethod::Get, "/api/v1/status")
             | (HttpMethod::Get, "/api/v1/modules")
             | (HttpMethod::Get, "/api/v1/events")
-            | (HttpMethod::Get, "/api/v1/events/stream") => Some(ApiRole::ReadOnly),
+            | (HttpMethod::Get, "/api/v1/events/stream")
+            | (HttpMethod::Get, "/api/v1/score") => Some(ApiRole::ReadOnly),
             (HttpMethod::Post, "/api/v1/reload") => Some(ApiRole::Admin),
             (HttpMethod::Post, "/api/v1/events/batch/delete") => Some(ApiRole::Admin),
             (HttpMethod::Post, "/api/v1/events/batch/export") => Some(ApiRole::ReadOnly),
@@ -484,6 +491,7 @@ impl ApiServer {
         max_page_size: u32,
         batch_max_size: u32,
         max_request_body_size: usize,
+        shared_scoring: &Option<Arc<StdMutex<SharedSecurityScore>>>,
     ) -> Result<(), io::Error> {
         // 接続タイムアウト（スローロリス対策）
         let result = tokio::time::timeout(
@@ -694,6 +702,28 @@ impl ApiServer {
                         503,
                         "Service Unavailable",
                         "イベントストアが無効です",
+                        extra,
+                    )
+                    .await?;
+                }
+            },
+            (HttpMethod::Get, "/api/v1/score") => match shared_scoring {
+                Some(scoring) => {
+                    let body = if let Ok(s) = scoring.lock() {
+                        serde_json::to_string(&*s)
+                            .unwrap_or_else(|_| r#"{"error":"serialize failed"}"#.to_string())
+                    } else {
+                        r#"{"error":"lock failed"}"#.to_string()
+                    };
+                    Self::send_json_response_with_headers(&mut stream, 200, "OK", &body, extra)
+                        .await?;
+                }
+                None => {
+                    Self::send_error_with_headers(
+                        &mut stream,
+                        503,
+                        "Service Unavailable",
+                        "スコアリングが無効です",
                         extra,
                     )
                     .await?;
@@ -2047,6 +2077,7 @@ mod tests {
             None,
             reload_tx,
             None,
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -2109,6 +2140,7 @@ mod tests {
             Instant::now(),
             None,
             reload_tx,
+            None,
             None,
         );
         let cancel = server.cancel_token();
@@ -2173,6 +2205,7 @@ mod tests {
             None,
             reload_tx,
             None,
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -2230,6 +2263,7 @@ mod tests {
             Instant::now(),
             None,
             reload_tx,
+            None,
             None,
         );
         let cancel = server.cancel_token();
@@ -2290,6 +2324,7 @@ mod tests {
             None, // event_store_db_path is None
             reload_tx,
             None,
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -2345,6 +2380,7 @@ mod tests {
             None,
             reload_tx,
             None,
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -2399,6 +2435,7 @@ mod tests {
             Instant::now(),
             None,
             reload_tx,
+            None,
             None,
         );
         let cancel = server.cancel_token();
@@ -2542,6 +2579,7 @@ mod tests {
             Instant::now(),
             None,
             reload_tx,
+            None,
             None,
         );
         let cancel = server.cancel_token();
@@ -2722,6 +2760,7 @@ mod tests {
             None,
             reload_tx,
             Some(event_tx.clone()),
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -3182,6 +3221,7 @@ mod tests {
             None,
             reload_tx,
             None,
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -3410,6 +3450,7 @@ mod tests {
             None,
             reload_tx,
             None,
+            None,
         );
         let server_cancel = server.cancel_token();
         let cancel_clone = cancel.clone();
@@ -3474,6 +3515,7 @@ mod tests {
             None,
             reload_tx,
             None,
+            None,
         );
         let server_cancel = server.cancel_token();
         let cancel_clone = cancel.clone();
@@ -3537,6 +3579,7 @@ mod tests {
             None,
             reload_tx,
             None,
+            None,
         );
         let server_cancel = server.cancel_token();
         let cancel_clone = cancel.clone();
@@ -3596,6 +3639,7 @@ mod tests {
             None,
             reload_tx,
             None,
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -3651,6 +3695,7 @@ mod tests {
             Instant::now(),
             None,
             reload_tx,
+            None,
             None,
         );
         let cancel = server.cancel_token();
