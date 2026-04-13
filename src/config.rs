@@ -6062,6 +6062,60 @@ impl Default for ApiRateLimitConfig {
     }
 }
 
+/// WebSocket イベントストリーミング設定
+#[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
+pub struct WebSocketConfig {
+    /// WebSocket の有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// 最大同時接続数
+    #[serde(default = "WebSocketConfig::default_max_connections")]
+    pub max_connections: usize,
+
+    /// Ping 送信間隔（秒）
+    #[serde(default = "WebSocketConfig::default_ping_interval_secs")]
+    pub ping_interval_secs: u64,
+
+    /// アイドルタイムアウト（秒）
+    #[serde(default = "WebSocketConfig::default_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+
+    /// イベントバッファサイズ
+    #[serde(default = "WebSocketConfig::default_buffer_size")]
+    pub buffer_size: usize,
+}
+
+impl WebSocketConfig {
+    fn default_max_connections() -> usize {
+        10
+    }
+
+    fn default_ping_interval_secs() -> u64 {
+        30
+    }
+
+    fn default_idle_timeout_secs() -> u64 {
+        300
+    }
+
+    fn default_buffer_size() -> usize {
+        128
+    }
+}
+
+impl Default for WebSocketConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_connections: Self::default_max_connections(),
+            ping_interval_secs: Self::default_ping_interval_secs(),
+            idle_timeout_secs: Self::default_idle_timeout_secs(),
+            buffer_size: Self::default_buffer_size(),
+        }
+    }
+}
+
 /// REST API サーバー設定
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub struct ApiConfig {
@@ -6084,6 +6138,10 @@ pub struct ApiConfig {
     /// レートリミット設定
     #[serde(default)]
     pub rate_limit: ApiRateLimitConfig,
+
+    /// WebSocket イベントストリーミング設定
+    #[serde(default)]
+    pub websocket: WebSocketConfig,
 }
 
 impl ApiConfig {
@@ -6104,6 +6162,7 @@ impl Default for ApiConfig {
             port: Self::default_port(),
             tokens: Vec::new(),
             rate_limit: ApiRateLimitConfig::default(),
+            websocket: WebSocketConfig::default(),
         }
     }
 }
@@ -6116,6 +6175,7 @@ impl Clone for ApiConfig {
             port: self.port,
             tokens: self.tokens.clone(),
             rate_limit: self.rate_limit.clone(),
+            websocket: self.websocket.clone(),
         }
     }
 }

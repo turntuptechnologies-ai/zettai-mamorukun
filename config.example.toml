@@ -832,6 +832,21 @@ port = 9201
 # token_hash = "sha256:..."
 # role = "admin"
 
+# WebSocket イベントストリーミング設定
+# /api/v1/events/stream で SecurityEvent をリアルタイムにストリーミングする
+# 認証: Authorization ヘッダー or ?token=xxx クエリパラメータ
+# フィルタ: ?module=xxx,yyy&severity=warning でフィルタリング可能
+[api.websocket]
+enabled = false
+# 最大同時接続数
+max_connections = 10
+# Ping 送信間隔（秒）
+ping_interval_secs = 30
+# アイドルタイムアウト（秒）
+idle_timeout_secs = 300
+# イベント送信バッファサイズ
+buffer_size = 128
+
 # レートリミット設定
 # クライアント IP ごとにリクエストレートを制限し、DoS 攻撃を防止する
 # SIGHUP でホットリロード可能

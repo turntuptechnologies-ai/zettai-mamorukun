@@ -419,6 +419,7 @@ impl Daemon {
                 prometheus_started_at,
                 event_store_db_path,
                 reload_sender.clone(),
+                event_bus.as_ref().map(|b| b.sender()),
             );
             api_cancel_token = Some(api_server.cancel_token());
             match api_server.spawn() {
@@ -783,6 +784,7 @@ impl Daemon {
                                         prometheus_started_at,
                                         event_store_db_path,
                                         reload_sender.clone(),
+                                        event_bus.as_ref().map(|b| b.sender()),
                                     );
                                     api_cancel_token = Some(api_server.cancel_token());
                                     match api_server.spawn() {
@@ -813,6 +815,7 @@ impl Daemon {
                                         prometheus_started_at,
                                         event_store_db_path,
                                         reload_sender.clone(),
+                                        event_bus.as_ref().map(|b| b.sender()),
                                     );
                                     api_cancel_token = Some(api_server.cancel_token());
                                     match api_server.spawn() {
@@ -839,6 +842,7 @@ impl Daemon {
                                                 prometheus_started_at,
                                                 fallback_db_path,
                                                 reload_sender.clone(),
+                                                event_bus.as_ref().map(|b| b.sender()),
                                             );
                                             api_cancel_token =
                                                 Some(fallback.cancel_token());
