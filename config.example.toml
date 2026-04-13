@@ -860,6 +860,10 @@ burst_size = 20
 # 古いクライアントエントリのクリーンアップ間隔（秒）
 cleanup_interval_secs = 60
 
+# ページネーション設定
+# default_page_size = 50
+# max_page_size = 200
+
 # OpenAPI スキーマエンドポイントの有効/無効
 # 有効にすると /api/v1/openapi.json で OpenAPI 3.0.3 仕様書を取得できる
 # 認証不要のエンドポイント

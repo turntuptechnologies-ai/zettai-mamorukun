@@ -170,13 +170,23 @@ fn events_path() -> Value {
                 {
                     "name": "limit",
                     "in": "query",
-                    "description": "最大取得件数（デフォルト: 100、上限: 1000）",
+                    "description": "最大取得件数（デフォルト: 50、上限: 200）",
                     "required": false,
                     "schema": {
                         "type": "integer",
-                        "default": 100,
+                        "default": 50,
                         "minimum": 1,
-                        "maximum": 1000
+                        "maximum": 200
+                    }
+                },
+                {
+                    "name": "cursor",
+                    "in": "query",
+                    "description": "ページネーションカーソル（イベント ID）。指定した ID より古いイベントを取得する",
+                    "required": false,
+                    "schema": {
+                        "type": "integer",
+                        "format": "int64"
                     }
                 }
             ],
@@ -186,7 +196,7 @@ fn events_path() -> Value {
                     "content": {
                         "application/json": {
                             "schema": {
-                                "$ref": "#/components/schemas/EventsResponse"
+                                "$ref": "#/components/schemas/PaginatedEventsResponse"
                             }
                         }
                     }
@@ -435,20 +445,28 @@ fn component_schemas() -> Value {
             },
             "required": ["name", "restarts"]
         },
-        "EventsResponse": {
+        "PaginatedEventsResponse": {
             "type": "object",
             "properties": {
-                "events": {
+                "items": {
                     "type": "array",
                     "items": { "$ref": "#/components/schemas/EventRecord" },
                     "description": "イベント一覧"
+                },
+                "next_cursor": {
+                    "type": ["integer", "null"],
+                    "description": "次ページのカーソル値（最終ページの場合は null）"
+                },
+                "has_more": {
+                    "type": "boolean",
+                    "description": "次のページが存在するか"
                 },
                 "count": {
                     "type": "integer",
                     "description": "返却件数"
                 }
             },
-            "required": ["events", "count"]
+            "required": ["items", "next_cursor", "has_more", "count"]
         },
         "EventRecord": {
             "type": "object",
@@ -564,7 +582,7 @@ mod tests {
         assert!(schemas["StatusResponse"].is_object());
         assert!(schemas["MetricsSummary"].is_object());
         assert!(schemas["ModulesResponse"].is_object());
-        assert!(schemas["EventsResponse"].is_object());
+        assert!(schemas["PaginatedEventsResponse"].is_object());
         assert!(schemas["EventRecord"].is_object());
         assert!(schemas["SecurityEvent"].is_object());
         assert!(schemas["ErrorResponse"].is_object());
@@ -589,13 +607,14 @@ mod tests {
         let schema = generate_openapi_schema();
         let events = &schema["paths"]["/api/v1/events"]["get"];
         let params = events["parameters"].as_array().unwrap();
-        assert_eq!(params.len(), 5);
+        assert_eq!(params.len(), 6);
         let param_names: Vec<&str> = params.iter().map(|p| p["name"].as_str().unwrap()).collect();
         assert!(param_names.contains(&"severity"));
         assert!(param_names.contains(&"module"));
         assert!(param_names.contains(&"since"));
         assert!(param_names.contains(&"until"));
         assert!(param_names.contains(&"limit"));
+        assert!(param_names.contains(&"cursor"));
     }
 
     #[test]
@@ -603,6 +622,26 @@ mod tests {
         let schema = generate_openapi_schema();
         assert!(schema["paths"]["/api/v1/reload"]["post"].is_object());
         assert!(schema["paths"]["/api/v1/reload"]["get"].is_null());
+    }
+
+    #[test]
+    fn test_paginated_events_response_schema() {
+        let schema = generate_openapi_schema();
+        let paginated = &schema["components"]["schemas"]["PaginatedEventsResponse"];
+        assert!(paginated.is_object());
+
+        let props = paginated["properties"].as_object().unwrap();
+        assert!(props.contains_key("items"));
+        assert!(props.contains_key("next_cursor"));
+        assert!(props.contains_key("has_more"));
+        assert!(props.contains_key("count"));
+
+        let required = paginated["required"].as_array().unwrap();
+        let required_names: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(required_names.contains(&"items"));
+        assert!(required_names.contains(&"next_cursor"));
+        assert!(required_names.contains(&"has_more"));
+        assert!(required_names.contains(&"count"));
     }
 
     #[test]
