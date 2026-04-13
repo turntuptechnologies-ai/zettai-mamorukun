@@ -860,6 +860,23 @@ burst_size = 20
 # 古いクライアントエントリのクリーンアップ間隔（秒）
 cleanup_interval_secs = 60
 
+[api.cors]
+# CORS の有効/無効
+# ブラウザからの API 呼び出しを許可する場合に有効にする
+enabled = false
+# 許可するオリジン（空の場合は全オリジン "*" を許可）
+# 例: ["https://dashboard.example.com", "https://grafana.internal"]
+allowed_origins = []
+# 許可する HTTP メソッド
+allowed_methods = ["GET", "POST", "OPTIONS"]
+# 許可するリクエストヘッダー
+allowed_headers = ["Content-Type", "Authorization", "X-API-Token"]
+# クレデンシャル（Cookie 等）の送信を許可するか
+# true の場合、allowed_origins が空でもワイルドカード "*" ではなくリクエストの Origin を返す
+allow_credentials = false
+# プリフライトレスポンスのキャッシュ秒数
+max_age = 86400
+
 [correlation]
 # 相関分析エンジンの有効/無効
 # 複数のセキュリティイベントを時系列で相関分析し、多段階攻撃パターンを検知する
