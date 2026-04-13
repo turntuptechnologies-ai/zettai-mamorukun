@@ -832,6 +832,12 @@ port = 9201
 # token_hash = "sha256:..."
 # role = "admin"
 
+# バッチ操作の最大件数
+# batch_max_size = 1000
+
+# リクエストボディの最大サイズ（バイト）
+# max_request_body_size = 1048576
+
 # WebSocket イベントストリーミング設定
 # /api/v1/events/stream で SecurityEvent をリアルタイムにストリーミングする
 # 認証: Authorization ヘッダー or ?token=xxx クエリパラメータ

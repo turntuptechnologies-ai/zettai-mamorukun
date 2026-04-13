@@ -30,6 +30,9 @@ pub fn generate_openapi_schema() -> Value {
             "/api/v1/reload": reload_path(),
             "/api/v1/events/stream": events_stream_path(),
             "/api/v1/openapi.json": openapi_path(),
+            "/api/v1/events/batch/delete": batch_delete_path(),
+            "/api/v1/events/batch/export": batch_export_path(),
+            "/api/v1/events/batch/acknowledge": batch_acknowledge_path(),
         },
         "components": {
             "securitySchemes": {
@@ -348,6 +351,129 @@ fn openapi_path() -> Value {
     })
 }
 
+fn batch_delete_path() -> Value {
+    json!({
+        "post": {
+            "summary": "イベント一括削除",
+            "description": "ID 指定またはフィルタ条件でイベントを一括削除する。admin ロールが必要。",
+            "operationId": "postBatchDelete",
+            "tags": ["events"],
+            "security": [{"BearerAuth": []}],
+            "requestBody": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": { "$ref": "#/components/schemas/BatchDeleteRequest" }
+                    }
+                }
+            },
+            "responses": {
+                "200": {
+                    "description": "削除成功",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/BatchDeleteResponse" }
+                        }
+                    }
+                },
+                "400": { "$ref": "#/components/schemas/ErrorResponse" },
+                "401": { "$ref": "#/components/schemas/ErrorResponse" },
+                "403": { "$ref": "#/components/schemas/ErrorResponse" },
+                "503": {
+                    "description": "イベントストアが無効",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn batch_export_path() -> Value {
+    json!({
+        "post": {
+            "summary": "イベント一括エクスポート",
+            "description": "フィルタ条件でイベントを一括エクスポートする。read_only ロール以上が必要。",
+            "operationId": "postBatchExport",
+            "tags": ["events"],
+            "security": [{"BearerAuth": []}],
+            "requestBody": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": { "$ref": "#/components/schemas/BatchExportRequest" }
+                    }
+                }
+            },
+            "responses": {
+                "200": {
+                    "description": "エクスポート成功",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/BatchExportResponse" }
+                        }
+                    }
+                },
+                "400": { "$ref": "#/components/schemas/ErrorResponse" },
+                "401": { "$ref": "#/components/schemas/ErrorResponse" },
+                "403": { "$ref": "#/components/schemas/ErrorResponse" },
+                "503": {
+                    "description": "イベントストアが無効",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn batch_acknowledge_path() -> Value {
+    json!({
+        "post": {
+            "summary": "イベント一括確認済みマーク",
+            "description": "ID 指定でイベントを一括確認済みにする。admin ロールが必要。",
+            "operationId": "postBatchAcknowledge",
+            "tags": ["events"],
+            "security": [{"BearerAuth": []}],
+            "requestBody": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": { "$ref": "#/components/schemas/BatchAcknowledgeRequest" }
+                    }
+                }
+            },
+            "responses": {
+                "200": {
+                    "description": "確認済みマーク成功",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/BatchAcknowledgeResponse" }
+                        }
+                    }
+                },
+                "400": { "$ref": "#/components/schemas/ErrorResponse" },
+                "401": { "$ref": "#/components/schemas/ErrorResponse" },
+                "403": { "$ref": "#/components/schemas/ErrorResponse" },
+                "503": {
+                    "description": "イベントストアが無効",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
 fn component_schemas() -> Value {
     json!({
         "ErrorResponse": {
@@ -500,6 +626,10 @@ fn component_schemas() -> Value {
                 "details": {
                     "type": ["string", "null"],
                     "description": "詳細情報"
+                },
+                "acknowledged": {
+                    "type": "boolean",
+                    "description": "確認済みフラグ"
                 }
             },
             "required": ["id", "timestamp", "severity", "source_module", "event_type", "message"]
@@ -535,6 +665,101 @@ fn component_schemas() -> Value {
                 }
             },
             "required": ["event_type", "severity", "source_module", "timestamp", "message"]
+        },
+        "BatchDeleteRequest": {
+            "type": "object",
+            "description": "バッチ削除リクエスト。ids または filter のいずれかを指定する",
+            "properties": {
+                "ids": {
+                    "type": "array",
+                    "items": { "type": "integer", "format": "int64" },
+                    "description": "削除対象のイベント ID 一覧"
+                },
+                "filter": { "$ref": "#/components/schemas/BatchDeleteFilter" }
+            }
+        },
+        "BatchDeleteFilter": {
+            "type": "object",
+            "description": "バッチ削除フィルタ条件",
+            "properties": {
+                "severity": {
+                    "type": "string",
+                    "enum": ["info", "warning", "critical"],
+                    "description": "Severity でフィルタリング"
+                },
+                "module": {
+                    "type": "string",
+                    "description": "ソースモジュール名でフィルタリング"
+                },
+                "since": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "開始日時（ISO 8601 形式）"
+                },
+                "until": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "終了日時（ISO 8601 形式）"
+                }
+            }
+        },
+        "BatchDeleteResponse": {
+            "type": "object",
+            "properties": {
+                "deleted": {
+                    "type": "integer",
+                    "description": "削除された件数"
+                }
+            },
+            "required": ["deleted"]
+        },
+        "BatchExportRequest": {
+            "type": "object",
+            "description": "バッチエクスポートリクエスト",
+            "properties": {
+                "filter": { "$ref": "#/components/schemas/BatchDeleteFilter" },
+                "limit": {
+                    "type": "integer",
+                    "description": "最大取得件数（デフォルト: batch_max_size）",
+                    "minimum": 1
+                }
+            }
+        },
+        "BatchExportResponse": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": { "$ref": "#/components/schemas/EventRecord" },
+                    "description": "エクスポートされたイベント一覧"
+                },
+                "count": {
+                    "type": "integer",
+                    "description": "エクスポートされた件数"
+                }
+            },
+            "required": ["items", "count"]
+        },
+        "BatchAcknowledgeRequest": {
+            "type": "object",
+            "properties": {
+                "ids": {
+                    "type": "array",
+                    "items": { "type": "integer", "format": "int64" },
+                    "description": "確認済みにするイベント ID 一覧"
+                }
+            },
+            "required": ["ids"]
+        },
+        "BatchAcknowledgeResponse": {
+            "type": "object",
+            "properties": {
+                "acknowledged": {
+                    "type": "integer",
+                    "description": "確認済みにした件数"
+                }
+            },
+            "required": ["acknowledged"]
         }
     })
 }
@@ -642,6 +867,28 @@ mod tests {
         assert!(required_names.contains(&"next_cursor"));
         assert!(required_names.contains(&"has_more"));
         assert!(required_names.contains(&"count"));
+    }
+
+    #[test]
+    fn test_batch_endpoints_present() {
+        let schema = generate_openapi_schema();
+        let paths = schema["paths"].as_object().unwrap();
+        assert!(paths.contains_key("/api/v1/events/batch/delete"));
+        assert!(paths.contains_key("/api/v1/events/batch/export"));
+        assert!(paths.contains_key("/api/v1/events/batch/acknowledge"));
+    }
+
+    #[test]
+    fn test_batch_schemas_defined() {
+        let schema = generate_openapi_schema();
+        let schemas = &schema["components"]["schemas"];
+        assert!(schemas["BatchDeleteRequest"].is_object());
+        assert!(schemas["BatchDeleteFilter"].is_object());
+        assert!(schemas["BatchDeleteResponse"].is_object());
+        assert!(schemas["BatchExportRequest"].is_object());
+        assert!(schemas["BatchExportResponse"].is_object());
+        assert!(schemas["BatchAcknowledgeRequest"].is_object());
+        assert!(schemas["BatchAcknowledgeResponse"].is_object());
     }
 
     #[test]

@@ -1104,6 +1104,7 @@ mod tests {
                 event_type: "file_modified".to_string(),
                 message: "ファイルが変更されました".to_string(),
                 details: Some("/etc/passwd".to_string()),
+                acknowledged: false,
             },
             event_store::EventRecord {
                 id: 2,
@@ -1113,6 +1114,7 @@ mod tests {
                 event_type: "brute_force_detected".to_string(),
                 message: "SSH ブルートフォース攻撃を検知".to_string(),
                 details: None,
+                acknowledged: false,
             },
         ]
     }
@@ -1224,6 +1226,7 @@ mod tests {
             event_type: "test".to_string(),
             message: "カンマ,を含む\"メッセージ\"\n改行も".to_string(),
             details: Some("details with, commas".to_string()),
+            acknowledged: false,
         }];
         let mut buf = Vec::new();
         export_csv(&records, &mut buf).unwrap();
