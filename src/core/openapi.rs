@@ -1,0 +1,616 @@
+//! OpenAPI 3.0 スキーマ生成
+//!
+//! REST API のエンドポイント定義から OpenAPI 3.0.3 仕様書を生成する。
+
+use serde_json::{Value, json};
+
+/// OpenAPI 3.0.3 仕様書を JSON として生成する
+pub fn generate_openapi_schema() -> Value {
+    json!({
+        "openapi": "3.0.3",
+        "info": {
+            "title": "zettai-mamorukun REST API",
+            "description": "Linux セキュリティ監視デーモン zettai-mamorukun の REST API",
+            "version": env!("CARGO_PKG_VERSION"),
+            "license": {
+                "name": "MIT"
+            }
+        },
+        "servers": [
+            {
+                "url": "/api/v1",
+                "description": "API v1"
+            }
+        ],
+        "paths": {
+            "/api/v1/health": health_path(),
+            "/api/v1/status": status_path(),
+            "/api/v1/modules": modules_path(),
+            "/api/v1/events": events_path(),
+            "/api/v1/reload": reload_path(),
+            "/api/v1/events/stream": events_stream_path(),
+            "/api/v1/openapi.json": openapi_path(),
+        },
+        "components": {
+            "securitySchemes": {
+                "BearerAuth": {
+                    "type": "http",
+                    "scheme": "bearer",
+                    "description": "API トークン認証。`zettai-mamorukun hash-token <TOKEN>` でハッシュを生成し、設定ファイルに登録する"
+                }
+            },
+            "schemas": component_schemas(),
+        }
+    })
+}
+
+fn health_path() -> Value {
+    json!({
+        "get": {
+            "summary": "ヘルスチェック",
+            "description": "API サーバーの稼働状態を返す。認証不要。",
+            "operationId": "getHealth",
+            "tags": ["system"],
+            "responses": {
+                "200": {
+                    "description": "正常稼働中",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "status": {
+                                        "type": "string",
+                                        "enum": ["ok"],
+                                        "example": "ok"
+                                    }
+                                },
+                                "required": ["status"]
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn status_path() -> Value {
+    json!({
+        "get": {
+            "summary": "デーモンステータス",
+            "description": "デーモンのバージョン、稼働時間、有効モジュール、メトリクスサマリーを返す。",
+            "operationId": "getStatus",
+            "tags": ["system"],
+            "security": [{"BearerAuth": []}],
+            "responses": {
+                "200": {
+                    "description": "ステータス情報",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/StatusResponse"
+                            }
+                        }
+                    }
+                },
+                "401": { "$ref": "#/components/schemas/ErrorResponse" },
+                "403": { "$ref": "#/components/schemas/ErrorResponse" }
+            }
+        }
+    })
+}
+
+fn modules_path() -> Value {
+    json!({
+        "get": {
+            "summary": "モジュール一覧",
+            "description": "有効な監視モジュールの一覧とリスタート回数を返す。",
+            "operationId": "getModules",
+            "tags": ["modules"],
+            "security": [{"BearerAuth": []}],
+            "responses": {
+                "200": {
+                    "description": "モジュール一覧",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ModulesResponse"
+                            }
+                        }
+                    }
+                },
+                "401": { "$ref": "#/components/schemas/ErrorResponse" },
+                "403": { "$ref": "#/components/schemas/ErrorResponse" }
+            }
+        }
+    })
+}
+
+fn events_path() -> Value {
+    json!({
+        "get": {
+            "summary": "イベント検索",
+            "description": "SQLite イベントストアからセキュリティイベントを検索する。",
+            "operationId": "getEvents",
+            "tags": ["events"],
+            "security": [{"BearerAuth": []}],
+            "parameters": [
+                {
+                    "name": "severity",
+                    "in": "query",
+                    "description": "Severity でフィルタリング（info, warning, critical）",
+                    "required": false,
+                    "schema": {
+                        "type": "string",
+                        "enum": ["info", "warning", "critical"]
+                    }
+                },
+                {
+                    "name": "module",
+                    "in": "query",
+                    "description": "ソースモジュール名でフィルタリング",
+                    "required": false,
+                    "schema": { "type": "string" }
+                },
+                {
+                    "name": "since",
+                    "in": "query",
+                    "description": "開始日時（ISO 8601 形式: YYYY-MM-DDTHH:MM:SSZ または YYYY-MM-DD）",
+                    "required": false,
+                    "schema": { "type": "string", "format": "date-time" }
+                },
+                {
+                    "name": "until",
+                    "in": "query",
+                    "description": "終了日時（ISO 8601 形式）",
+                    "required": false,
+                    "schema": { "type": "string", "format": "date-time" }
+                },
+                {
+                    "name": "limit",
+                    "in": "query",
+                    "description": "最大取得件数（デフォルト: 100、上限: 1000）",
+                    "required": false,
+                    "schema": {
+                        "type": "integer",
+                        "default": 100,
+                        "minimum": 1,
+                        "maximum": 1000
+                    }
+                }
+            ],
+            "responses": {
+                "200": {
+                    "description": "イベント一覧",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/EventsResponse"
+                            }
+                        }
+                    }
+                },
+                "401": { "$ref": "#/components/schemas/ErrorResponse" },
+                "403": { "$ref": "#/components/schemas/ErrorResponse" },
+                "503": {
+                    "description": "イベントストアが無効",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn reload_path() -> Value {
+    json!({
+        "post": {
+            "summary": "設定リロード",
+            "description": "設定ファイルを再読み込みし、変更のあったモジュールを再起動する。admin ロールが必要。",
+            "operationId": "postReload",
+            "tags": ["system"],
+            "security": [{"BearerAuth": []}],
+            "responses": {
+                "200": {
+                    "description": "リロード成功",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "message": {
+                                        "type": "string",
+                                        "example": "リロードをトリガーしました"
+                                    }
+                                },
+                                "required": ["message"]
+                            }
+                        }
+                    }
+                },
+                "401": { "$ref": "#/components/schemas/ErrorResponse" },
+                "403": { "$ref": "#/components/schemas/ErrorResponse" },
+                "500": {
+                    "description": "リロード失敗",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn events_stream_path() -> Value {
+    json!({
+        "get": {
+            "summary": "イベントストリーミング（WebSocket）",
+            "description": "WebSocket でセキュリティイベントをリアルタイムにストリーミングする。Upgrade: websocket ヘッダーが必要。認証は Authorization ヘッダーまたは token クエリパラメータで行う。",
+            "operationId": "getEventsStream",
+            "tags": ["events"],
+            "security": [{"BearerAuth": []}],
+            "parameters": [
+                {
+                    "name": "module",
+                    "in": "query",
+                    "description": "モジュール名フィルタ（カンマ区切りで複数指定可能）",
+                    "required": false,
+                    "schema": { "type": "string" }
+                },
+                {
+                    "name": "severity",
+                    "in": "query",
+                    "description": "最小 Severity フィルタ",
+                    "required": false,
+                    "schema": {
+                        "type": "string",
+                        "enum": ["info", "warning", "critical"]
+                    }
+                },
+                {
+                    "name": "token",
+                    "in": "query",
+                    "description": "Bearer トークン（Authorization ヘッダーの代替）",
+                    "required": false,
+                    "schema": { "type": "string" }
+                }
+            ],
+            "responses": {
+                "101": {
+                    "description": "WebSocket Upgrade 成功。各メッセージは SecurityEvent の JSON。",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/SecurityEvent"
+                            }
+                        }
+                    }
+                },
+                "401": { "$ref": "#/components/schemas/ErrorResponse" },
+                "426": {
+                    "description": "WebSocket Upgrade が必要",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+                        }
+                    }
+                },
+                "503": {
+                    "description": "WebSocket が無効または接続数上限",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn openapi_path() -> Value {
+    json!({
+        "get": {
+            "summary": "OpenAPI スキーマ",
+            "description": "この API の OpenAPI 3.0.3 仕様書を JSON 形式で返す。認証不要。",
+            "operationId": "getOpenApiSchema",
+            "tags": ["system"],
+            "responses": {
+                "200": {
+                    "description": "OpenAPI 3.0.3 仕様書",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "description": "OpenAPI 3.0.3 仕様書"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn component_schemas() -> Value {
+    json!({
+        "ErrorResponse": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "type": "string",
+                    "description": "エラーメッセージ"
+                }
+            },
+            "required": ["error"]
+        },
+        "StatusResponse": {
+            "type": "object",
+            "properties": {
+                "version": {
+                    "type": "string",
+                    "description": "デーモンバージョン",
+                    "example": "1.26.0"
+                },
+                "uptime_secs": {
+                    "type": "integer",
+                    "description": "稼働時間（秒）",
+                    "example": 3600
+                },
+                "modules": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "有効モジュール名の一覧"
+                },
+                "metrics": {
+                    "oneOf": [
+                        { "$ref": "#/components/schemas/MetricsSummary" },
+                        { "type": "null" }
+                    ],
+                    "description": "メトリクスサマリー（メトリクスが無効の場合は null）"
+                },
+                "module_restarts": {
+                    "type": "object",
+                    "additionalProperties": { "type": "integer" },
+                    "description": "モジュールごとのリスタート回数"
+                }
+            },
+            "required": ["version", "uptime_secs", "modules", "metrics", "module_restarts"]
+        },
+        "MetricsSummary": {
+            "type": "object",
+            "properties": {
+                "total_events": {
+                    "type": "integer",
+                    "description": "イベント総数"
+                },
+                "info_count": {
+                    "type": "integer",
+                    "description": "Info イベント数"
+                },
+                "warning_count": {
+                    "type": "integer",
+                    "description": "Warning イベント数"
+                },
+                "critical_count": {
+                    "type": "integer",
+                    "description": "Critical イベント数"
+                },
+                "module_counts": {
+                    "type": "object",
+                    "additionalProperties": { "type": "integer" },
+                    "description": "モジュールごとのイベント数"
+                }
+            },
+            "required": ["total_events", "info_count", "warning_count", "critical_count", "module_counts"]
+        },
+        "ModulesResponse": {
+            "type": "object",
+            "properties": {
+                "modules": {
+                    "type": "array",
+                    "items": { "$ref": "#/components/schemas/ModuleInfo" },
+                    "description": "モジュール一覧"
+                }
+            },
+            "required": ["modules"]
+        },
+        "ModuleInfo": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "モジュール名"
+                },
+                "restarts": {
+                    "type": "integer",
+                    "description": "リスタート回数"
+                }
+            },
+            "required": ["name", "restarts"]
+        },
+        "EventsResponse": {
+            "type": "object",
+            "properties": {
+                "events": {
+                    "type": "array",
+                    "items": { "$ref": "#/components/schemas/EventRecord" },
+                    "description": "イベント一覧"
+                },
+                "count": {
+                    "type": "integer",
+                    "description": "返却件数"
+                }
+            },
+            "required": ["events", "count"]
+        },
+        "EventRecord": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "integer",
+                    "description": "イベント ID"
+                },
+                "timestamp": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "タイムスタンプ"
+                },
+                "severity": {
+                    "type": "string",
+                    "enum": ["info", "warning", "critical"],
+                    "description": "重要度"
+                },
+                "source_module": {
+                    "type": "string",
+                    "description": "ソースモジュール名"
+                },
+                "event_type": {
+                    "type": "string",
+                    "description": "イベントタイプ"
+                },
+                "message": {
+                    "type": "string",
+                    "description": "メッセージ"
+                },
+                "details": {
+                    "type": ["string", "null"],
+                    "description": "詳細情報"
+                }
+            },
+            "required": ["id", "timestamp", "severity", "source_module", "event_type", "message"]
+        },
+        "SecurityEvent": {
+            "type": "object",
+            "description": "WebSocket で送信されるセキュリティイベント",
+            "properties": {
+                "event_type": {
+                    "type": "string",
+                    "description": "イベントタイプ"
+                },
+                "severity": {
+                    "type": "string",
+                    "enum": ["info", "warning", "critical"],
+                    "description": "重要度"
+                },
+                "source_module": {
+                    "type": "string",
+                    "description": "ソースモジュール名"
+                },
+                "timestamp": {
+                    "type": "integer",
+                    "description": "UNIX タイムスタンプ（秒）"
+                },
+                "message": {
+                    "type": "string",
+                    "description": "メッセージ"
+                },
+                "details": {
+                    "type": ["string", "null"],
+                    "description": "詳細情報"
+                }
+            },
+            "required": ["event_type", "severity", "source_module", "timestamp", "message"]
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_openapi_schema_has_required_fields() {
+        let schema = generate_openapi_schema();
+        assert_eq!(schema["openapi"], "3.0.3");
+        assert!(schema["info"]["title"].is_string());
+        assert!(schema["info"]["version"].is_string());
+        assert!(schema["paths"].is_object());
+        assert!(schema["components"].is_object());
+    }
+
+    #[test]
+    fn test_all_endpoints_present() {
+        let schema = generate_openapi_schema();
+        let paths = schema["paths"].as_object().unwrap();
+        assert!(paths.contains_key("/api/v1/health"));
+        assert!(paths.contains_key("/api/v1/status"));
+        assert!(paths.contains_key("/api/v1/modules"));
+        assert!(paths.contains_key("/api/v1/events"));
+        assert!(paths.contains_key("/api/v1/reload"));
+        assert!(paths.contains_key("/api/v1/events/stream"));
+        assert!(paths.contains_key("/api/v1/openapi.json"));
+    }
+
+    #[test]
+    fn test_security_scheme_defined() {
+        let schema = generate_openapi_schema();
+        let schemes = &schema["components"]["securitySchemes"];
+        assert!(schemes["BearerAuth"].is_object());
+        assert_eq!(schemes["BearerAuth"]["type"], "http");
+        assert_eq!(schemes["BearerAuth"]["scheme"], "bearer");
+    }
+
+    #[test]
+    fn test_component_schemas_defined() {
+        let schema = generate_openapi_schema();
+        let schemas = &schema["components"]["schemas"];
+        assert!(schemas["StatusResponse"].is_object());
+        assert!(schemas["MetricsSummary"].is_object());
+        assert!(schemas["ModulesResponse"].is_object());
+        assert!(schemas["EventsResponse"].is_object());
+        assert!(schemas["EventRecord"].is_object());
+        assert!(schemas["SecurityEvent"].is_object());
+        assert!(schemas["ErrorResponse"].is_object());
+    }
+
+    #[test]
+    fn test_health_endpoint_no_auth() {
+        let schema = generate_openapi_schema();
+        let health = &schema["paths"]["/api/v1/health"]["get"];
+        assert!(health["security"].is_null());
+    }
+
+    #[test]
+    fn test_status_endpoint_requires_auth() {
+        let schema = generate_openapi_schema();
+        let status = &schema["paths"]["/api/v1/status"]["get"];
+        assert!(status["security"].is_array());
+    }
+
+    #[test]
+    fn test_events_query_parameters() {
+        let schema = generate_openapi_schema();
+        let events = &schema["paths"]["/api/v1/events"]["get"];
+        let params = events["parameters"].as_array().unwrap();
+        assert_eq!(params.len(), 5);
+        let param_names: Vec<&str> = params.iter().map(|p| p["name"].as_str().unwrap()).collect();
+        assert!(param_names.contains(&"severity"));
+        assert!(param_names.contains(&"module"));
+        assert!(param_names.contains(&"since"));
+        assert!(param_names.contains(&"until"));
+        assert!(param_names.contains(&"limit"));
+    }
+
+    #[test]
+    fn test_reload_is_post() {
+        let schema = generate_openapi_schema();
+        assert!(schema["paths"]["/api/v1/reload"]["post"].is_object());
+        assert!(schema["paths"]["/api/v1/reload"]["get"].is_null());
+    }
+
+    #[test]
+    fn test_openapi_schema_is_valid_json() {
+        let schema = generate_openapi_schema();
+        let json_str = serde_json::to_string(&schema).unwrap();
+        assert!(!json_str.is_empty());
+        let reparsed: Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(schema, reparsed);
+    }
+}

@@ -1,6 +1,6 @@
 [package]
 name = "zettai-mamorukun"
-version = "1.25.0"
+version = "1.26.0"
 edition = "2024"
 description = "Linux サーバ向けサイバー攻撃防御デーモン"
 license = "MIT"
