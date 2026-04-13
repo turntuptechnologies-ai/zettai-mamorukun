@@ -5985,6 +5985,38 @@ impl Default for PrometheusConfig {
     }
 }
 
+/// API トークンのロール
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiRole {
+    /// 参照系エンドポイントのみアクセス可能
+    ReadOnly,
+    /// 全エンドポイントにアクセス可能
+    Admin,
+}
+
+impl ApiRole {
+    /// このロールが要求されたロール以上の権限を持つか判定する
+    pub fn has_permission(&self, required: &ApiRole) -> bool {
+        match (self, required) {
+            (ApiRole::Admin, _) => true,
+            (ApiRole::ReadOnly, ApiRole::ReadOnly) => true,
+            (ApiRole::ReadOnly, ApiRole::Admin) => false,
+        }
+    }
+}
+
+/// API トークン設定
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct ApiTokenConfig {
+    /// トークン名（識別用）
+    pub name: String,
+    /// SHA-256 ハッシュ（`sha256:` プレフィックス付き hex 文字列）
+    pub token_hash: String,
+    /// ロール
+    pub role: ApiRole,
+}
+
 /// REST API サーバー設定
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub struct ApiConfig {
@@ -5999,6 +6031,10 @@ pub struct ApiConfig {
     /// リスニングポート
     #[serde(default = "ApiConfig::default_port")]
     pub port: u16,
+
+    /// API トークン設定（空の場合は認証なしで動作）
+    #[serde(default)]
+    pub tokens: Vec<ApiTokenConfig>,
 }
 
 impl ApiConfig {
@@ -6017,6 +6053,18 @@ impl Default for ApiConfig {
             enabled: false,
             bind_address: Self::default_bind_address(),
             port: Self::default_port(),
+            tokens: Vec::new(),
+        }
+    }
+}
+
+impl Clone for ApiConfig {
+    fn clone(&self) -> Self {
+        Self {
+            enabled: self.enabled,
+            bind_address: self.bind_address.clone(),
+            port: self.port,
+            tokens: self.tokens.clone(),
         }
     }
 }
