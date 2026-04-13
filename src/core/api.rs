@@ -4,18 +4,21 @@
 //! 設定リロードをリモートから操作可能にする。
 //! JSON レスポンス形式で `/api/v1/` プレフィックスのエンドポイントを提供する。
 
-use crate::config::{ApiConfig, ApiRateLimitConfig, ApiRole, ApiTokenConfig};
+use crate::config::{ApiConfig, ApiRateLimitConfig, ApiRole, ApiTokenConfig, WebSocketConfig};
+use crate::core::event::{SecurityEvent, Severity};
 use crate::core::metrics::SharedMetrics;
 use crate::core::status::{MetricsSummary, StatusResponse};
+use futures_util::{SinkExt, StreamExt};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
 /// HTTP メソッド
@@ -51,6 +54,31 @@ struct RateLimitResult {
 }
 
 const MAX_RATE_LIMIT_ENTRIES: usize = 10000;
+
+const BASE64_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn base64_encode(data: &[u8]) -> String {
+    let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        result.push(BASE64_CHARS[((triple >> 18) & 0x3F) as usize] as char);
+        result.push(BASE64_CHARS[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            result.push(BASE64_CHARS[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
+        if chunk.len() > 2 {
+            result.push(BASE64_CHARS[(triple & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
+    }
+    result
+}
 
 /// トークンバケット方式のレートリミッター
 struct RateLimiter {
@@ -151,6 +179,9 @@ pub struct ApiServer {
     tokens: Arc<StdMutex<Vec<ApiTokenConfig>>>,
     rate_limiter: Arc<StdMutex<Option<RateLimiter>>>,
     rate_limit_config: ApiRateLimitConfig,
+    event_bus: Option<broadcast::Sender<SecurityEvent>>,
+    ws_config: WebSocketConfig,
+    ws_connections: Arc<AtomicUsize>,
 }
 
 impl ApiServer {
@@ -164,6 +195,7 @@ impl ApiServer {
         started_at: Instant,
         event_store_db_path: Option<String>,
         reload_sender: mpsc::Sender<()>,
+        event_bus: Option<broadcast::Sender<SecurityEvent>>,
     ) -> Self {
         let rate_limiter = if config.rate_limit.enabled {
             Some(RateLimiter::new(&config.rate_limit))
@@ -183,6 +215,9 @@ impl ApiServer {
             tokens: Arc::new(StdMutex::new(config.tokens.clone())),
             rate_limiter: Arc::new(StdMutex::new(rate_limiter)),
             rate_limit_config: config.rate_limit.clone(),
+            event_bus,
+            ws_config: config.websocket.clone(),
+            ws_connections: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -207,6 +242,9 @@ impl ApiServer {
         let cancel_token = self.cancel_token;
         let tokens = self.tokens;
         let rate_limiter = self.rate_limiter;
+        let event_bus = self.event_bus;
+        let ws_config = Arc::new(self.ws_config);
+        let ws_connections = self.ws_connections;
 
         // クリーンアップタスク
         if self.rate_limit_config.enabled {
@@ -248,11 +286,14 @@ impl ApiServer {
                                 let toks = Arc::clone(&tokens);
                                 let rl = Arc::clone(&rate_limiter);
                                 let client_ip = addr.ip();
+                                let eb = event_bus.clone();
+                                let wsc = Arc::clone(&ws_config);
+                                let wsc_count = Arc::clone(&ws_connections);
                                 tokio::spawn(async move {
                                     if let Err(e) = Self::handle_connection(
                                         stream, &names, &metrics, &restarts,
                                         started, &db_path, &sender, &toks,
-                                        client_ip, &rl,
+                                        client_ip, &rl, &eb, &wsc, &wsc_count,
                                     ).await {
                                         tracing::debug!(error = %e, "API 接続の処理に失敗");
                                     }
@@ -327,7 +368,8 @@ impl ApiServer {
             (HttpMethod::Get, "/api/v1/health") => None,
             (HttpMethod::Get, "/api/v1/status")
             | (HttpMethod::Get, "/api/v1/modules")
-            | (HttpMethod::Get, "/api/v1/events") => Some(ApiRole::ReadOnly),
+            | (HttpMethod::Get, "/api/v1/events")
+            | (HttpMethod::Get, "/api/v1/events/stream") => Some(ApiRole::ReadOnly),
             (HttpMethod::Post, "/api/v1/reload") => Some(ApiRole::Admin),
             _ => None,
         }
@@ -345,6 +387,9 @@ impl ApiServer {
         tokens: &Arc<StdMutex<Vec<ApiTokenConfig>>>,
         client_ip: IpAddr,
         rate_limiter: &Arc<StdMutex<Option<RateLimiter>>>,
+        event_bus: &Option<broadcast::Sender<SecurityEvent>>,
+        ws_config: &Arc<WebSocketConfig>,
+        ws_connections: &Arc<AtomicUsize>,
     ) -> Result<(), io::Error> {
         // 接続タイムアウト（スローロリス対策）
         let result = tokio::time::timeout(
@@ -444,6 +489,20 @@ impl ApiServer {
                     return Ok(());
                 }
             }
+        }
+
+        // WebSocket イベントストリーミング
+        if path == "/api/v1/events/stream" {
+            return Self::handle_websocket(
+                stream,
+                &raw,
+                &query_params,
+                tokens,
+                event_bus,
+                ws_config,
+                ws_connections,
+            )
+            .await;
         }
 
         let extra = rate_limit_headers.as_deref();
@@ -579,6 +638,315 @@ impl ApiServer {
 
         stream.shutdown().await?;
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_websocket(
+        mut stream: tokio::net::TcpStream,
+        raw: &str,
+        query_params: &HashMap<String, String>,
+        tokens: &Arc<StdMutex<Vec<ApiTokenConfig>>>,
+        event_bus: &Option<broadcast::Sender<SecurityEvent>>,
+        ws_config: &Arc<WebSocketConfig>,
+        ws_connections: &Arc<AtomicUsize>,
+    ) -> Result<(), io::Error> {
+        if !ws_config.enabled {
+            Self::send_error_with_headers(
+                &mut stream,
+                503,
+                "Service Unavailable",
+                "WebSocket ストリーミングが無効です",
+                None,
+            )
+            .await?;
+            stream.shutdown().await?;
+            return Ok(());
+        }
+
+        // Upgrade ヘッダーの確認
+        let has_upgrade = raw.lines().any(|line| {
+            line.to_ascii_lowercase().starts_with("upgrade:")
+                && line.to_ascii_lowercase().contains("websocket")
+        });
+        if !has_upgrade {
+            let body = r#"{"error":"WebSocket Upgrade が必要です"}"#;
+            let response = format!(
+                "HTTP/1.1 426 Upgrade Required\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nUpgrade: websocket\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await?;
+            stream.shutdown().await?;
+            return Ok(());
+        }
+
+        // 認証チェック（Authorization ヘッダーまたは token クエリパラメータ）
+        // unwrap safety: Mutex が poisoned になるのはパニック時のみ
+        let token_list = tokens.lock().unwrap().clone();
+        if !token_list.is_empty() {
+            let auth_from_header = Self::authenticate(raw, &token_list);
+            let authenticated = match auth_from_header {
+                AuthResult::Authenticated(ref role) => role.has_permission(&ApiRole::ReadOnly),
+                AuthResult::NoAuthRequired => true,
+                AuthResult::Unauthorized => {
+                    // Authorization ヘッダーがない場合、クエリパラメータを試す
+                    if let Some(token_value) = query_params.get("token") {
+                        let hash = Self::hash_token(token_value);
+                        token_list.iter().any(|tc| {
+                            tc.token_hash == hash && tc.role.has_permission(&ApiRole::ReadOnly)
+                        })
+                    } else {
+                        false
+                    }
+                }
+            };
+
+            if !authenticated {
+                Self::send_error_with_headers(
+                    &mut stream,
+                    401,
+                    "Unauthorized",
+                    "認証が必要です",
+                    None,
+                )
+                .await?;
+                stream.shutdown().await?;
+                return Ok(());
+            }
+        }
+
+        // 同時接続数チェック
+        let current = ws_connections.fetch_add(1, Ordering::SeqCst);
+        if current >= ws_config.max_connections {
+            ws_connections.fetch_sub(1, Ordering::SeqCst);
+            Self::send_error_with_headers(
+                &mut stream,
+                503,
+                "Service Unavailable",
+                "WebSocket 接続数が上限に達しています",
+                None,
+            )
+            .await?;
+            stream.shutdown().await?;
+            return Ok(());
+        }
+
+        let event_sender = match event_bus {
+            Some(sender) => sender.clone(),
+            None => {
+                ws_connections.fetch_sub(1, Ordering::SeqCst);
+                Self::send_error_with_headers(
+                    &mut stream,
+                    503,
+                    "Service Unavailable",
+                    "イベントバスが無効です",
+                    None,
+                )
+                .await?;
+                stream.shutdown().await?;
+                return Ok(());
+            }
+        };
+
+        // フィルタ条件のパース
+        let filter_modules: Option<Vec<String>> = query_params.get("module").map(|m| {
+            m.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        });
+        let filter_severity: Option<Severity> = query_params
+            .get("severity")
+            .and_then(|s| Severity::parse(s));
+
+        // Sec-WebSocket-Key の取得
+        let ws_key = raw.lines().find_map(|line| {
+            let lower = line.to_ascii_lowercase();
+            if lower.starts_with("sec-websocket-key:") {
+                Some(line["sec-websocket-key:".len()..].trim().to_string())
+            } else {
+                None
+            }
+        });
+        let ws_key = match ws_key {
+            Some(k) => k,
+            None => {
+                ws_connections.fetch_sub(1, Ordering::SeqCst);
+                Self::send_error_with_headers(
+                    &mut stream,
+                    400,
+                    "Bad Request",
+                    "Sec-WebSocket-Key が見つかりません",
+                    None,
+                )
+                .await?;
+                stream.shutdown().await?;
+                return Ok(());
+            }
+        };
+
+        // WebSocket ハンドシェイク応答を生成
+        let accept_key = Self::compute_ws_accept_key(&ws_key);
+        let handshake_response = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
+            accept_key
+        );
+        stream.write_all(handshake_response.as_bytes()).await?;
+
+        tracing::info!("WebSocket 接続を確立しました");
+
+        // tokio-tungstenite で WebSocket ストリームに変換
+        let ws_stream = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            stream,
+            tokio_tungstenite::tungstenite::protocol::Role::Server,
+            None,
+        )
+        .await;
+
+        let ws_conns = Arc::clone(ws_connections);
+        let ping_interval_secs = ws_config.ping_interval_secs;
+        let idle_timeout_secs = ws_config.idle_timeout_secs;
+        let buffer_size = ws_config.buffer_size;
+
+        tokio::spawn(async move {
+            Self::run_websocket_session(
+                ws_stream,
+                event_sender,
+                filter_modules,
+                filter_severity,
+                ping_interval_secs,
+                idle_timeout_secs,
+                buffer_size,
+            )
+            .await;
+            ws_conns.fetch_sub(1, Ordering::SeqCst);
+            tracing::info!("WebSocket 接続を切断しました");
+        });
+
+        Ok(())
+    }
+
+    async fn run_websocket_session(
+        ws_stream: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+        event_sender: broadcast::Sender<SecurityEvent>,
+        filter_modules: Option<Vec<String>>,
+        filter_severity: Option<Severity>,
+        ping_interval_secs: u64,
+        idle_timeout_secs: u64,
+        buffer_size: usize,
+    ) {
+        use tokio_tungstenite::tungstenite::Message;
+
+        let mut event_rx = event_sender.subscribe();
+        let (mut ws_tx, mut ws_rx) = ws_stream.split();
+        let mut ping_interval =
+            tokio::time::interval(std::time::Duration::from_secs(ping_interval_secs));
+        ping_interval.tick().await;
+        let mut last_activity = Instant::now();
+
+        // 送信バッファ
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(buffer_size);
+
+        // 送信タスク
+        let send_task = tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                if ws_tx.send(msg).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        loop {
+            tokio::select! {
+                result = event_rx.recv() => {
+                    match result {
+                        Ok(event) => {
+                            if let Some(ref modules) = filter_modules
+                                && !modules.iter().any(|m| m == &event.source_module)
+                            {
+                                continue;
+                            }
+                            if let Some(ref sev) = filter_severity
+                                && event.severity < *sev
+                            {
+                                continue;
+                            }
+                            let json = Self::event_to_json(&event);
+                            if tx.try_send(Message::Text(json.into())).is_err() {
+                                tracing::debug!("WebSocket 送信バッファが満杯です");
+                                break;
+                            }
+                            last_activity = Instant::now();
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!(lagged = n, "WebSocket イベント受信が遅延しています");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            break;
+                        }
+                    }
+                }
+                msg = ws_rx.next() => {
+                    match msg {
+                        Some(Ok(Message::Pong(_))) => {
+                            last_activity = Instant::now();
+                        }
+                        Some(Ok(Message::Close(_))) | None => {
+                            break;
+                        }
+                        Some(Ok(_)) => {
+                            last_activity = Instant::now();
+                        }
+                        Some(Err(_)) => {
+                            break;
+                        }
+                    }
+                }
+                _ = ping_interval.tick() => {
+                    if last_activity.elapsed() > std::time::Duration::from_secs(idle_timeout_secs) {
+                        tracing::info!("WebSocket アイドルタイムアウト");
+                        let _ = tx.send(Message::Close(None)).await;
+                        break;
+                    }
+                    if tx.try_send(Message::Ping(Vec::new().into())).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        send_task.abort();
+    }
+
+    fn event_to_json(event: &SecurityEvent) -> String {
+        let timestamp = event
+            .timestamp
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let details_part = match &event.details {
+            Some(d) => format!(r#","details":"{}""#, Self::escape_json_string(d)),
+            None => String::new(),
+        };
+        format!(
+            r#"{{"event_type":"{}","severity":"{}","source_module":"{}","timestamp":{},"message":"{}"{}}}"#,
+            Self::escape_json_string(&event.event_type),
+            event.severity,
+            Self::escape_json_string(&event.source_module),
+            timestamp,
+            Self::escape_json_string(&event.message),
+            details_part
+        )
+    }
+
+    fn compute_ws_accept_key(key: &str) -> String {
+        use sha1::{Digest as Sha1Digest, Sha1};
+
+        let mut hasher = Sha1::new();
+        hasher.update(key.as_bytes());
+        hasher.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+        let result = hasher.finalize();
+        base64_encode(&result)
     }
 
     async fn read_request(stream: &mut tokio::net::TcpStream) -> Result<String, io::Error> {
@@ -977,6 +1345,7 @@ mod tests {
             port,
             tokens: Vec::new(),
             rate_limit: ApiRateLimitConfig::default(),
+            websocket: WebSocketConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -986,6 +1355,7 @@ mod tests {
             Instant::now(),
             None,
             reload_tx,
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -1024,6 +1394,7 @@ mod tests {
             port,
             tokens: Vec::new(),
             rate_limit: ApiRateLimitConfig::default(),
+            websocket: WebSocketConfig::default(),
         };
         let modules = Arc::new(StdMutex::new(vec!["test_module".to_string()]));
         let metrics = Arc::new(StdMutex::new(SharedMetrics {
@@ -1041,6 +1412,7 @@ mod tests {
             Instant::now(),
             None,
             reload_tx,
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -1081,6 +1453,7 @@ mod tests {
             port,
             tokens: Vec::new(),
             rate_limit: ApiRateLimitConfig::default(),
+            websocket: WebSocketConfig::default(),
         };
         let modules = Arc::new(StdMutex::new(vec![
             "mod_a".to_string(),
@@ -1096,6 +1469,7 @@ mod tests {
             Instant::now(),
             None,
             reload_tx,
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -1137,6 +1511,7 @@ mod tests {
             port,
             tokens: Vec::new(),
             rate_limit: ApiRateLimitConfig::default(),
+            websocket: WebSocketConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -1146,6 +1521,7 @@ mod tests {
             Instant::now(),
             None,
             reload_tx,
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -1188,6 +1564,7 @@ mod tests {
             port,
             tokens: Vec::new(),
             rate_limit: ApiRateLimitConfig::default(),
+            websocket: WebSocketConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -1197,6 +1574,7 @@ mod tests {
             Instant::now(),
             None, // event_store_db_path is None
             reload_tx,
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -1235,6 +1613,7 @@ mod tests {
             port,
             tokens: Vec::new(),
             rate_limit: ApiRateLimitConfig::default(),
+            websocket: WebSocketConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -1244,6 +1623,7 @@ mod tests {
             Instant::now(),
             None,
             reload_tx,
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -1282,6 +1662,7 @@ mod tests {
             port,
             tokens: Vec::new(),
             rate_limit: ApiRateLimitConfig::default(),
+            websocket: WebSocketConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -1291,6 +1672,7 @@ mod tests {
             Instant::now(),
             None,
             reload_tx,
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -1417,6 +1799,7 @@ mod tests {
             port,
             tokens,
             rate_limit: ApiRateLimitConfig::default(),
+            websocket: WebSocketConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -1426,6 +1809,7 @@ mod tests {
             Instant::now(),
             None,
             reload_tx,
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -1565,6 +1949,333 @@ mod tests {
         stream.read_to_end(&mut buf).await.unwrap();
         let response = String::from_utf8_lossy(&buf);
         assert!(response.contains("HTTP/1.1 200 OK"));
+
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    /// WebSocket テスト用のサーバーを作成するヘルパー
+    fn create_ws_server(
+        tokens: Vec<ApiTokenConfig>,
+        ws_config: WebSocketConfig,
+    ) -> (u16, CancellationToken, broadcast::Sender<SecurityEvent>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let (event_tx, _) = broadcast::channel::<SecurityEvent>(64);
+
+        let (reload_tx, _reload_rx) = mpsc::channel::<()>(1);
+        let config = ApiConfig {
+            enabled: true,
+            bind_address: "127.0.0.1".to_string(),
+            port,
+            tokens,
+            rate_limit: ApiRateLimitConfig::default(),
+            websocket: ws_config,
+        };
+        let server = ApiServer::new(
+            &config,
+            Arc::new(StdMutex::new(Vec::new())),
+            None,
+            Arc::new(StdMutex::new(HashMap::new())),
+            Instant::now(),
+            None,
+            reload_tx,
+            Some(event_tx.clone()),
+        );
+        let cancel = server.cancel_token();
+        server.spawn().unwrap();
+        (port, cancel, event_tx)
+    }
+
+    #[tokio::test]
+    async fn test_ws_connect_success() {
+        use tokio_tungstenite::connect_async;
+
+        let ws_config = WebSocketConfig {
+            enabled: true,
+            max_connections: 10,
+            ..WebSocketConfig::default()
+        };
+        let (port, cancel, _event_tx) = create_ws_server(Vec::new(), ws_config);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let url = format!("ws://127.0.0.1:{}/api/v1/events/stream", port);
+        let result = connect_async(&url).await;
+        assert!(result.is_ok(), "WebSocket 接続に成功するべき");
+
+        let (mut ws, _response) = result.unwrap();
+        // クリーンに切断
+        use futures_util::SinkExt;
+        let _ = ws
+            .send(tokio_tungstenite::tungstenite::Message::Close(None))
+            .await;
+
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn test_ws_connect_no_auth_required_when_no_tokens() {
+        use tokio_tungstenite::connect_async;
+
+        let ws_config = WebSocketConfig {
+            enabled: true,
+            max_connections: 10,
+            ..WebSocketConfig::default()
+        };
+        // トークン未設定 → 認証不要
+        let (port, cancel, _event_tx) = create_ws_server(Vec::new(), ws_config);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let url = format!("ws://127.0.0.1:{}/api/v1/events/stream", port);
+        let result = connect_async(&url).await;
+        assert!(result.is_ok(), "トークン未設定時は認証なしで接続可能");
+
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn test_ws_connect_auth_failure() {
+        use tokio_tungstenite::connect_async;
+        use tokio_tungstenite::tungstenite::http::Request;
+
+        let tokens = vec![ApiTokenConfig {
+            name: "admin".to_string(),
+            token_hash: ApiServer::hash_token("correct-token"),
+            role: ApiRole::Admin,
+        }];
+        let ws_config = WebSocketConfig {
+            enabled: true,
+            max_connections: 10,
+            ..WebSocketConfig::default()
+        };
+        let (port, cancel, _event_tx) = create_ws_server(tokens, ws_config);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // 不正トークンでの接続
+        let url = format!("ws://127.0.0.1:{}/api/v1/events/stream", port);
+        let request = Request::builder()
+            .uri(&url)
+            .header("Host", format!("127.0.0.1:{}", port))
+            .header("Authorization", "Bearer wrong-token")
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header(
+                "Sec-WebSocket-Key",
+                tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+            )
+            .body(())
+            .unwrap();
+
+        let result = connect_async(request).await;
+        assert!(result.is_err(), "不正トークンでは接続拒否されるべき");
+
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn test_ws_upgrade_required_without_upgrade_header() {
+        // Upgrade ヘッダーなしで /api/v1/events/stream にアクセス → 426
+        let ws_config = WebSocketConfig {
+            enabled: true,
+            max_connections: 10,
+            ..WebSocketConfig::default()
+        };
+        let (port, cancel, _event_tx) = create_ws_server(Vec::new(), ws_config);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // 通常の HTTP GET リクエスト（Upgrade なし）
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET /api/v1/events/stream HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf);
+
+        assert!(
+            response.contains("426"),
+            "Upgrade なしのリクエストは 426 を返すべき: {}",
+            response
+        );
+        assert!(response.contains("WebSocket Upgrade"));
+
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn test_ws_event_receive() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::connect_async;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let ws_config = WebSocketConfig {
+            enabled: true,
+            max_connections: 10,
+            ping_interval_secs: 60,
+            idle_timeout_secs: 300,
+            buffer_size: 128,
+        };
+        let (port, cancel, event_tx) = create_ws_server(Vec::new(), ws_config);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let url = format!("ws://127.0.0.1:{}/api/v1/events/stream", port);
+        let (mut ws, _) = connect_async(&url).await.unwrap();
+
+        // サーバー側で subscribe が完了するまで少し待つ
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // イベントを送信
+        let event = SecurityEvent::new(
+            "test_event",
+            Severity::Warning,
+            "test_module",
+            "テストイベント",
+        );
+        event_tx.send(event).unwrap();
+
+        // WebSocket でイベントを受信
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(3), ws.next())
+            .await
+            .expect("タイムアウト: イベントを受信できなかった")
+            .expect("ストリームが終了した")
+            .expect("メッセージ受信エラー");
+
+        match msg {
+            Message::Text(text) => {
+                let text_str: &str = &text;
+                assert!(
+                    text_str.contains("test_event"),
+                    "イベントタイプが含まれるべき: {}",
+                    text_str
+                );
+                assert!(
+                    text_str.contains("WARNING"),
+                    "Severity が含まれるべき: {}",
+                    text_str
+                );
+                assert!(
+                    text_str.contains("test_module"),
+                    "モジュール名が含まれるべき: {}",
+                    text_str
+                );
+            }
+            other => panic!("テキストメッセージを期待したが {:?} を受信", other),
+        }
+
+        let _ = ws
+            .send(tokio_tungstenite::tungstenite::Message::Close(None))
+            .await;
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn test_ws_severity_filter() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::connect_async;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let ws_config = WebSocketConfig {
+            enabled: true,
+            max_connections: 10,
+            ping_interval_secs: 60,
+            idle_timeout_secs: 300,
+            buffer_size: 128,
+        };
+        let (port, cancel, event_tx) = create_ws_server(Vec::new(), ws_config);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // severity=critical でフィルタ
+        let url = format!(
+            "ws://127.0.0.1:{}/api/v1/events/stream?severity=critical",
+            port
+        );
+        let (mut ws, _) = connect_async(&url).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Info イベントを送信（フィルタされるべき）
+        let info_event =
+            SecurityEvent::new("info_event", Severity::Info, "test_module", "Info イベント");
+        event_tx.send(info_event).unwrap();
+
+        // Critical イベントを送信（受信されるべき）
+        let critical_event = SecurityEvent::new(
+            "critical_event",
+            Severity::Critical,
+            "test_module",
+            "Critical イベント",
+        );
+        event_tx.send(critical_event).unwrap();
+
+        // Critical イベントのみ受信されることを確認
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(3), ws.next())
+            .await
+            .expect("タイムアウト")
+            .expect("ストリーム終了")
+            .expect("受信エラー");
+
+        match msg {
+            Message::Text(text) => {
+                let text_str: &str = &text;
+                assert!(
+                    text_str.contains("critical_event"),
+                    "Critical イベントが受信されるべき: {}",
+                    text_str
+                );
+                assert!(
+                    !text_str.contains("info_event"),
+                    "Info イベントはフィルタされるべき: {}",
+                    text_str
+                );
+            }
+            other => panic!("テキストメッセージを期待したが {:?} を受信", other),
+        }
+
+        let _ = ws
+            .send(tokio_tungstenite::tungstenite::Message::Close(None))
+            .await;
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn test_ws_max_connections_exceeded() {
+        use tokio_tungstenite::connect_async;
+
+        let ws_config = WebSocketConfig {
+            enabled: true,
+            max_connections: 1, // 最大 1 接続
+            ping_interval_secs: 60,
+            idle_timeout_secs: 300,
+            buffer_size: 128,
+        };
+        let (port, cancel, _event_tx) = create_ws_server(Vec::new(), ws_config);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let url = format!("ws://127.0.0.1:{}/api/v1/events/stream", port);
+
+        // 1 接続目: 成功
+        let first = connect_async(&url).await;
+        assert!(first.is_ok(), "1 接続目は成功するべき");
+        let (_ws1, _) = first.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // 2 接続目: 上限超過で失敗
+        let second = connect_async(&url).await;
+        assert!(second.is_err(), "最大接続数超過時は接続拒否されるべき");
 
         cancel.cancel();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1715,6 +2426,7 @@ mod tests {
                 burst_size: 2,
                 cleanup_interval_secs: 60,
             },
+            websocket: WebSocketConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -1724,6 +2436,7 @@ mod tests {
             Instant::now(),
             None,
             reload_tx,
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
