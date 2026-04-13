@@ -4,7 +4,9 @@
 //! 設定リロードをリモートから操作可能にする。
 //! JSON レスポンス形式で `/api/v1/` プレフィックスのエンドポイントを提供する。
 
-use crate::config::{ApiConfig, ApiRateLimitConfig, ApiRole, ApiTokenConfig, WebSocketConfig};
+use crate::config::{
+    ApiConfig, ApiRateLimitConfig, ApiRole, ApiTokenConfig, CorsConfig, WebSocketConfig,
+};
 use crate::core::event::{SecurityEvent, Severity};
 use crate::core::metrics::SharedMetrics;
 use crate::core::status::{MetricsSummary, StatusResponse};
@@ -25,6 +27,7 @@ use tokio_util::sync::CancellationToken;
 enum HttpMethod {
     Get,
     Post,
+    Options,
     Other,
 }
 
@@ -182,6 +185,7 @@ pub struct ApiServer {
     event_bus: Option<broadcast::Sender<SecurityEvent>>,
     ws_config: WebSocketConfig,
     ws_connections: Arc<AtomicUsize>,
+    cors_config: Arc<CorsConfig>,
 }
 
 impl ApiServer {
@@ -218,6 +222,7 @@ impl ApiServer {
             event_bus,
             ws_config: config.websocket.clone(),
             ws_connections: Arc::new(AtomicUsize::new(0)),
+            cors_config: Arc::new(config.cors.clone()),
         }
     }
 
@@ -245,6 +250,7 @@ impl ApiServer {
         let event_bus = self.event_bus;
         let ws_config = Arc::new(self.ws_config);
         let ws_connections = self.ws_connections;
+        let cors_config = self.cors_config;
 
         // クリーンアップタスク
         if self.rate_limit_config.enabled {
@@ -289,11 +295,12 @@ impl ApiServer {
                                 let eb = event_bus.clone();
                                 let wsc = Arc::clone(&ws_config);
                                 let wsc_count = Arc::clone(&ws_connections);
+                                let cors = Arc::clone(&cors_config);
                                 tokio::spawn(async move {
                                     if let Err(e) = Self::handle_connection(
                                         stream, &names, &metrics, &restarts,
                                         started, &db_path, &sender, &toks,
-                                        client_ip, &rl, &eb, &wsc, &wsc_count,
+                                        client_ip, &rl, &eb, &wsc, &wsc_count, &cors,
                                     ).await {
                                         tracing::debug!(error = %e, "API 接続の処理に失敗");
                                     }
@@ -375,6 +382,62 @@ impl ApiServer {
         }
     }
 
+    fn extract_header<'a>(raw: &'a str, name: &str) -> Option<&'a str> {
+        let name_with_colon = format!("{}:", name.to_ascii_lowercase());
+        for line in raw.lines() {
+            let line_lower = line.to_ascii_lowercase();
+            if line_lower.starts_with(&name_with_colon) {
+                let colon_pos = line.find(':').unwrap_or(0);
+                return Some(line[colon_pos + 1..].trim());
+            }
+        }
+        None
+    }
+
+    fn build_cors_headers(cors: &CorsConfig, origin: Option<&str>, is_preflight: bool) -> String {
+        if !cors.enabled {
+            return String::new();
+        }
+
+        let origin_value = match origin {
+            Some("null") => return String::new(),
+            Some(o) => {
+                if cors.allowed_origins.is_empty() {
+                    if cors.allow_credentials {
+                        o.to_string()
+                    } else {
+                        "*".to_string()
+                    }
+                } else if cors.allowed_origins.iter().any(|allowed| allowed == o) {
+                    o.to_string()
+                } else {
+                    return String::new();
+                }
+            }
+            None => return String::new(),
+        };
+
+        let mut headers = format!(
+            "Access-Control-Allow-Origin: {}\r\nVary: Origin",
+            origin_value
+        );
+
+        if cors.allow_credentials {
+            headers.push_str("\r\nAccess-Control-Allow-Credentials: true");
+        }
+
+        if is_preflight {
+            let methods = cors.allowed_methods.join(", ");
+            let hdrs = cors.allowed_headers.join(", ");
+            headers.push_str(&format!(
+                "\r\nAccess-Control-Allow-Methods: {}\r\nAccess-Control-Allow-Headers: {}\r\nAccess-Control-Max-Age: {}",
+                methods, hdrs, cors.max_age
+            ));
+        }
+
+        headers
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn handle_connection(
         mut stream: tokio::net::TcpStream,
@@ -390,6 +453,7 @@ impl ApiServer {
         event_bus: &Option<broadcast::Sender<SecurityEvent>>,
         ws_config: &Arc<WebSocketConfig>,
         ws_connections: &Arc<AtomicUsize>,
+        cors_config: &Arc<CorsConfig>,
     ) -> Result<(), io::Error> {
         // 接続タイムアウト（スローロリス対策）
         let result = tokio::time::timeout(
@@ -407,6 +471,12 @@ impl ApiServer {
         };
 
         let (method, path, query_params) = Self::parse_request(&raw);
+
+        // CORS ヘッダーの構築（全レスポンスに付与するため先に計算）
+        let origin = Self::extract_header(&raw, "origin");
+        let is_preflight = matches!(method, HttpMethod::Options);
+        let cors_headers = Self::build_cors_headers(cors_config, origin, is_preflight);
+        let cors_headers_for_health = cors_headers.clone();
 
         // レートリミットチェック（/api/v1/health はスキップ）
         let rate_limit_check = if path != "/api/v1/health" {
@@ -426,12 +496,18 @@ impl ApiServer {
             let retry_after = if retry_after == 0 { 1 } else { retry_after };
             let body =
                 r#"{"error":"リクエスト数が上限を超えました。しばらくしてから再試行してください"}"#;
+            let cors_extra = if cors_headers.is_empty() {
+                String::new()
+            } else {
+                format!("{}\r\n", cors_headers)
+            };
             let response = format!(
-                "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nRetry-After: {}\r\nX-RateLimit-Limit: {}\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: {}\r\n\r\n{}",
+                "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nRetry-After: {}\r\nX-RateLimit-Limit: {}\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: {}\r\n{}\r\n{}",
                 body.len(),
                 retry_after,
                 result.limit,
                 result.reset_secs,
+                cors_extra,
                 body
             );
             stream.write_all(response.as_bytes()).await?;
@@ -449,6 +525,30 @@ impl ApiServer {
                 None
             }
         });
+
+        let combined_extra = match (&rate_limit_headers, cors_headers.is_empty()) {
+            (Some(rl), false) => Some(format!("{}\r\n{}", rl, cors_headers)),
+            (Some(rl), true) => Some(rl.clone()),
+            (None, false) => Some(cors_headers),
+            (None, true) => None,
+        };
+
+        // CORS プリフライトリクエスト処理
+        if is_preflight && cors_config.enabled {
+            let extra = combined_extra.as_deref().unwrap_or("");
+            let extra_fmt = if extra.is_empty() {
+                String::new()
+            } else {
+                format!("{}\r\n", extra)
+            };
+            let response = format!(
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n{}\r\n",
+                extra_fmt
+            );
+            stream.write_all(response.as_bytes()).await?;
+            stream.shutdown().await?;
+            return Ok(());
+        }
 
         // 認証チェック
         // unwrap safety: Mutex が poisoned になるのはパニック時のみ
@@ -469,7 +569,7 @@ impl ApiServer {
                             403,
                             "Forbidden",
                             "権限が不足しています",
-                            rate_limit_headers.as_deref(),
+                            combined_extra.as_deref(),
                         )
                         .await?;
                         stream.shutdown().await?;
@@ -482,7 +582,7 @@ impl ApiServer {
                         401,
                         "Unauthorized",
                         "認証が必要です",
-                        rate_limit_headers.as_deref(),
+                        combined_extra.as_deref(),
                     )
                     .await?;
                     stream.shutdown().await?;
@@ -505,15 +605,20 @@ impl ApiServer {
             .await;
         }
 
-        let extra = rate_limit_headers.as_deref();
+        let extra = combined_extra.as_deref();
         match (&method, path.as_str()) {
             (HttpMethod::Get, "/api/v1/health") => {
+                let cors_only = if cors_headers_for_health.is_empty() {
+                    None
+                } else {
+                    Some(cors_headers_for_health.as_str())
+                };
                 Self::send_json_response_with_headers(
                     &mut stream,
                     200,
                     "OK",
                     r#"{"status":"ok"}"#,
-                    None,
+                    cors_only,
                 )
                 .await?;
             }
@@ -582,7 +687,7 @@ impl ApiServer {
                     .await?;
                 }
             },
-            (HttpMethod::Get, _) | (HttpMethod::Other, _) => {
+            (HttpMethod::Get, _) | (HttpMethod::Options, _) | (HttpMethod::Other, _) => {
                 if matches!(
                     path.as_str(),
                     "/api/v1/health"
@@ -969,6 +1074,7 @@ impl ApiServer {
             match parts[0] {
                 "GET" => HttpMethod::Get,
                 "POST" => HttpMethod::Post,
+                "OPTIONS" => HttpMethod::Options,
                 _ => HttpMethod::Other,
             }
         } else {
@@ -1346,6 +1452,7 @@ mod tests {
             tokens: Vec::new(),
             rate_limit: ApiRateLimitConfig::default(),
             websocket: WebSocketConfig::default(),
+            cors: CorsConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -1395,6 +1502,7 @@ mod tests {
             tokens: Vec::new(),
             rate_limit: ApiRateLimitConfig::default(),
             websocket: WebSocketConfig::default(),
+            cors: CorsConfig::default(),
         };
         let modules = Arc::new(StdMutex::new(vec!["test_module".to_string()]));
         let metrics = Arc::new(StdMutex::new(SharedMetrics {
@@ -1454,6 +1562,7 @@ mod tests {
             tokens: Vec::new(),
             rate_limit: ApiRateLimitConfig::default(),
             websocket: WebSocketConfig::default(),
+            cors: CorsConfig::default(),
         };
         let modules = Arc::new(StdMutex::new(vec![
             "mod_a".to_string(),
@@ -1512,6 +1621,7 @@ mod tests {
             tokens: Vec::new(),
             rate_limit: ApiRateLimitConfig::default(),
             websocket: WebSocketConfig::default(),
+            cors: CorsConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -1565,6 +1675,7 @@ mod tests {
             tokens: Vec::new(),
             rate_limit: ApiRateLimitConfig::default(),
             websocket: WebSocketConfig::default(),
+            cors: CorsConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -1614,6 +1725,7 @@ mod tests {
             tokens: Vec::new(),
             rate_limit: ApiRateLimitConfig::default(),
             websocket: WebSocketConfig::default(),
+            cors: CorsConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -1663,6 +1775,7 @@ mod tests {
             tokens: Vec::new(),
             rate_limit: ApiRateLimitConfig::default(),
             websocket: WebSocketConfig::default(),
+            cors: CorsConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -1800,6 +1913,7 @@ mod tests {
             tokens,
             rate_limit: ApiRateLimitConfig::default(),
             websocket: WebSocketConfig::default(),
+            cors: CorsConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -1973,6 +2087,7 @@ mod tests {
             tokens,
             rate_limit: ApiRateLimitConfig::default(),
             websocket: ws_config,
+            cors: CorsConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -2427,6 +2542,7 @@ mod tests {
                 cleanup_interval_secs: 60,
             },
             websocket: WebSocketConfig::default(),
+            cors: CorsConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -2487,6 +2603,320 @@ mod tests {
         stream.read_to_end(&mut buf).await.unwrap();
         let response = String::from_utf8_lossy(&buf);
         assert!(response.contains("HTTP/1.1 200 OK"));
+
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[test]
+    fn test_parse_request_options() {
+        let (method, path, _params) =
+            ApiServer::parse_request("OPTIONS /api/v1/status HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        assert!(matches!(method, HttpMethod::Options));
+        assert_eq!(path, "/api/v1/status");
+    }
+
+    #[test]
+    fn test_extract_header_origin() {
+        let raw =
+            "GET /api/v1/health HTTP/1.1\r\nHost: localhost\r\nOrigin: https://example.com\r\n\r\n";
+        assert_eq!(
+            ApiServer::extract_header(raw, "origin"),
+            Some("https://example.com")
+        );
+    }
+
+    #[test]
+    fn test_extract_header_case_insensitive() {
+        let raw = "GET / HTTP/1.1\r\norigin: https://test.com\r\n\r\n";
+        assert_eq!(
+            ApiServer::extract_header(raw, "Origin"),
+            Some("https://test.com")
+        );
+    }
+
+    #[test]
+    fn test_extract_header_missing() {
+        let raw = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        assert_eq!(ApiServer::extract_header(raw, "origin"), None);
+    }
+
+    #[test]
+    fn test_cors_disabled() {
+        let config = CorsConfig::default();
+        let headers = ApiServer::build_cors_headers(&config, Some("https://example.com"), false);
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn test_cors_wildcard_origin() {
+        let config = CorsConfig {
+            enabled: true,
+            allowed_origins: Vec::new(),
+            ..CorsConfig::default()
+        };
+        let headers = ApiServer::build_cors_headers(&config, Some("https://example.com"), false);
+        assert!(headers.contains("Access-Control-Allow-Origin: *"));
+        assert!(headers.contains("Vary: Origin"));
+    }
+
+    #[test]
+    fn test_cors_specific_origin_allowed() {
+        let config = CorsConfig {
+            enabled: true,
+            allowed_origins: vec!["https://app.example.com".to_string()],
+            ..CorsConfig::default()
+        };
+        let headers =
+            ApiServer::build_cors_headers(&config, Some("https://app.example.com"), false);
+        assert!(headers.contains("Access-Control-Allow-Origin: https://app.example.com"));
+    }
+
+    #[test]
+    fn test_cors_specific_origin_rejected() {
+        let config = CorsConfig {
+            enabled: true,
+            allowed_origins: vec!["https://app.example.com".to_string()],
+            ..CorsConfig::default()
+        };
+        let headers =
+            ApiServer::build_cors_headers(&config, Some("https://evil.example.com"), false);
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn test_cors_no_origin_header() {
+        let config = CorsConfig {
+            enabled: true,
+            ..CorsConfig::default()
+        };
+        let headers = ApiServer::build_cors_headers(&config, None, false);
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn test_cors_null_origin_rejected() {
+        let config = CorsConfig {
+            enabled: true,
+            ..CorsConfig::default()
+        };
+        let headers = ApiServer::build_cors_headers(&config, Some("null"), false);
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn test_cors_preflight_headers() {
+        let config = CorsConfig {
+            enabled: true,
+            allowed_origins: Vec::new(),
+            allowed_methods: vec!["GET".to_string(), "POST".to_string()],
+            allowed_headers: vec!["Content-Type".to_string(), "Authorization".to_string()],
+            max_age: 3600,
+            ..CorsConfig::default()
+        };
+        let headers = ApiServer::build_cors_headers(&config, Some("https://example.com"), true);
+        assert!(headers.contains("Access-Control-Allow-Methods: GET, POST"));
+        assert!(headers.contains("Access-Control-Allow-Headers: Content-Type, Authorization"));
+        assert!(headers.contains("Access-Control-Max-Age: 3600"));
+    }
+
+    #[test]
+    fn test_cors_credentials_with_specific_origin() {
+        let config = CorsConfig {
+            enabled: true,
+            allowed_origins: vec!["https://app.example.com".to_string()],
+            allow_credentials: true,
+            ..CorsConfig::default()
+        };
+        let headers =
+            ApiServer::build_cors_headers(&config, Some("https://app.example.com"), false);
+        assert!(headers.contains("Access-Control-Allow-Credentials: true"));
+        assert!(headers.contains("Access-Control-Allow-Origin: https://app.example.com"));
+    }
+
+    #[test]
+    fn test_cors_credentials_with_wildcard_echoes_origin() {
+        let config = CorsConfig {
+            enabled: true,
+            allowed_origins: Vec::new(),
+            allow_credentials: true,
+            ..CorsConfig::default()
+        };
+        let headers = ApiServer::build_cors_headers(&config, Some("https://example.com"), false);
+        assert!(headers.contains("Access-Control-Allow-Origin: https://example.com"));
+        assert!(!headers.contains("Access-Control-Allow-Origin: *"));
+        assert!(headers.contains("Access-Control-Allow-Credentials: true"));
+    }
+
+    #[tokio::test]
+    async fn test_api_server_cors_preflight() {
+        let port = 19260;
+        let cancel = CancellationToken::new();
+
+        let (reload_tx, _reload_rx) = mpsc::channel::<()>(1);
+        let config = ApiConfig {
+            enabled: true,
+            bind_address: "127.0.0.1".to_string(),
+            port,
+            tokens: Vec::new(),
+            rate_limit: ApiRateLimitConfig::default(),
+            websocket: WebSocketConfig::default(),
+            cors: CorsConfig {
+                enabled: true,
+                allowed_origins: vec!["https://dashboard.example.com".to_string()],
+                ..CorsConfig::default()
+            },
+        };
+        let server = ApiServer::new(
+            &config,
+            Arc::new(StdMutex::new(Vec::new())),
+            None,
+            Arc::new(StdMutex::new(HashMap::new())),
+            Instant::now(),
+            None,
+            reload_tx,
+            None,
+        );
+        let server_cancel = server.cancel_token();
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            cancel_clone.cancelled().await;
+            server_cancel.cancel();
+        });
+        server.spawn().unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(
+                b"OPTIONS /api/v1/status HTTP/1.1\r\nHost: localhost\r\nOrigin: https://dashboard.example.com\r\nAccess-Control-Request-Method: GET\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf);
+        assert!(response.contains("HTTP/1.1 204 No Content"));
+        assert!(response.contains("Access-Control-Allow-Origin: https://dashboard.example.com"));
+        assert!(response.contains("Access-Control-Allow-Methods:"));
+        assert!(response.contains("Access-Control-Max-Age:"));
+
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn test_api_server_cors_regular_request() {
+        let port = 19261;
+        let cancel = CancellationToken::new();
+
+        let (reload_tx, _reload_rx) = mpsc::channel::<()>(1);
+        let config = ApiConfig {
+            enabled: true,
+            bind_address: "127.0.0.1".to_string(),
+            port,
+            tokens: Vec::new(),
+            rate_limit: ApiRateLimitConfig::default(),
+            websocket: WebSocketConfig::default(),
+            cors: CorsConfig {
+                enabled: true,
+                allowed_origins: Vec::new(),
+                ..CorsConfig::default()
+            },
+        };
+        let server = ApiServer::new(
+            &config,
+            Arc::new(StdMutex::new(Vec::new())),
+            None,
+            Arc::new(StdMutex::new(HashMap::new())),
+            Instant::now(),
+            None,
+            reload_tx,
+            None,
+        );
+        let server_cancel = server.cancel_token();
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            cancel_clone.cancelled().await;
+            server_cancel.cancel();
+        });
+        server.spawn().unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(
+                b"GET /api/v1/health HTTP/1.1\r\nHost: localhost\r\nOrigin: https://any.example.com\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf);
+        assert!(response.contains("HTTP/1.1 200 OK"));
+        assert!(response.contains("Access-Control-Allow-Origin: *"));
+        assert!(response.contains("Vary: Origin"));
+
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn test_api_server_cors_rejected_origin() {
+        let port = 19262;
+        let cancel = CancellationToken::new();
+
+        let (reload_tx, _reload_rx) = mpsc::channel::<()>(1);
+        let config = ApiConfig {
+            enabled: true,
+            bind_address: "127.0.0.1".to_string(),
+            port,
+            tokens: Vec::new(),
+            rate_limit: ApiRateLimitConfig::default(),
+            websocket: WebSocketConfig::default(),
+            cors: CorsConfig {
+                enabled: true,
+                allowed_origins: vec!["https://allowed.example.com".to_string()],
+                ..CorsConfig::default()
+            },
+        };
+        let server = ApiServer::new(
+            &config,
+            Arc::new(StdMutex::new(Vec::new())),
+            None,
+            Arc::new(StdMutex::new(HashMap::new())),
+            Instant::now(),
+            None,
+            reload_tx,
+            None,
+        );
+        let server_cancel = server.cancel_token();
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            cancel_clone.cancelled().await;
+            server_cancel.cancel();
+        });
+        server.spawn().unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(
+                b"GET /api/v1/health HTTP/1.1\r\nHost: localhost\r\nOrigin: https://evil.example.com\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf);
+        assert!(response.contains("HTTP/1.1 200 OK"));
+        assert!(!response.contains("Access-Control-Allow-Origin"));
 
         cancel.cancel();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;

@@ -6142,6 +6142,10 @@ pub struct ApiConfig {
     /// WebSocket イベントストリーミング設定
     #[serde(default)]
     pub websocket: WebSocketConfig,
+
+    /// CORS 設定
+    #[serde(default)]
+    pub cors: CorsConfig,
 }
 
 impl ApiConfig {
@@ -6163,6 +6167,7 @@ impl Default for ApiConfig {
             tokens: Vec::new(),
             rate_limit: ApiRateLimitConfig::default(),
             websocket: WebSocketConfig::default(),
+            cors: CorsConfig::default(),
         }
     }
 }
@@ -6176,6 +6181,66 @@ impl Clone for ApiConfig {
             tokens: self.tokens.clone(),
             rate_limit: self.rate_limit.clone(),
             websocket: self.websocket.clone(),
+            cors: self.cors.clone(),
+        }
+    }
+}
+
+/// CORS 設定
+#[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
+pub struct CorsConfig {
+    /// CORS の有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// 許可するオリジン（空の場合は全オリジン "*" を許可）
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+
+    /// 許可する HTTP メソッド
+    #[serde(default = "CorsConfig::default_allowed_methods")]
+    pub allowed_methods: Vec<String>,
+
+    /// 許可するリクエストヘッダー
+    #[serde(default = "CorsConfig::default_allowed_headers")]
+    pub allowed_headers: Vec<String>,
+
+    /// クレデンシャル送信の許可
+    #[serde(default)]
+    pub allow_credentials: bool,
+
+    /// プリフライトキャッシュ秒数
+    #[serde(default = "CorsConfig::default_max_age")]
+    pub max_age: u64,
+}
+
+impl CorsConfig {
+    fn default_allowed_methods() -> Vec<String> {
+        vec!["GET".to_string(), "POST".to_string(), "OPTIONS".to_string()]
+    }
+
+    fn default_allowed_headers() -> Vec<String> {
+        vec![
+            "Content-Type".to_string(),
+            "Authorization".to_string(),
+            "X-API-Token".to_string(),
+        ]
+    }
+
+    fn default_max_age() -> u64 {
+        86400
+    }
+}
+
+impl Default for CorsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allowed_origins: Vec::new(),
+            allowed_methods: Self::default_allowed_methods(),
+            allowed_headers: Self::default_allowed_headers(),
+            allow_credentials: false,
+            max_age: Self::default_max_age(),
         }
     }
 }
@@ -7158,5 +7223,41 @@ restart_cooldown_secs = 120
                 .iter()
                 .any(|d| d.0 == "module_watchdog.check_interval_secs")
         );
+    }
+
+    #[test]
+    fn test_cors_config_defaults() {
+        let config: AppConfig = toml::from_str("").unwrap();
+        assert!(!config.api.cors.enabled);
+        assert!(config.api.cors.allowed_origins.is_empty());
+        assert_eq!(
+            config.api.cors.allowed_methods,
+            vec!["GET", "POST", "OPTIONS"]
+        );
+        assert_eq!(
+            config.api.cors.allowed_headers,
+            vec!["Content-Type", "Authorization", "X-API-Token"]
+        );
+        assert!(!config.api.cors.allow_credentials);
+        assert_eq!(config.api.cors.max_age, 86400);
+    }
+
+    #[test]
+    fn test_cors_config_custom() {
+        let toml_str = r#"
+[api.cors]
+enabled = true
+allowed_origins = ["https://example.com", "https://app.example.com"]
+allowed_methods = ["GET", "POST", "PUT"]
+allowed_headers = ["Content-Type", "X-Custom"]
+allow_credentials = true
+max_age = 3600
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.api.cors.enabled);
+        assert_eq!(config.api.cors.allowed_origins.len(), 2);
+        assert_eq!(config.api.cors.allowed_origins[0], "https://example.com");
+        assert!(config.api.cors.allow_credentials);
+        assert_eq!(config.api.cors.max_age, 3600);
     }
 }
