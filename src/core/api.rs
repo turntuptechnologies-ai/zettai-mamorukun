@@ -4,9 +4,10 @@
 //! 設定リロードをリモートから操作可能にする。
 //! JSON レスポンス形式で `/api/v1/` プレフィックスのエンドポイントを提供する。
 
-use crate::config::ApiConfig;
+use crate::config::{ApiConfig, ApiRole, ApiTokenConfig};
 use crate::core::metrics::SharedMetrics;
 use crate::core::status::{MetricsSummary, StatusResponse};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -23,6 +24,16 @@ enum HttpMethod {
     Other,
 }
 
+/// 認証結果
+enum AuthResult {
+    /// 認証不要（トークン未設定）
+    NoAuthRequired,
+    /// 認証成功（ロール付き）
+    Authenticated(ApiRole),
+    /// 認証失敗
+    Unauthorized,
+}
+
 /// REST API サーバー
 pub struct ApiServer {
     bind_address: String,
@@ -34,6 +45,7 @@ pub struct ApiServer {
     event_store_db_path: Option<String>,
     reload_sender: mpsc::Sender<()>,
     cancel_token: CancellationToken,
+    tokens: Arc<StdMutex<Vec<ApiTokenConfig>>>,
 }
 
 impl ApiServer {
@@ -58,6 +70,7 @@ impl ApiServer {
             event_store_db_path,
             reload_sender,
             cancel_token: CancellationToken::new(),
+            tokens: Arc::new(StdMutex::new(config.tokens.clone())),
         }
     }
 
@@ -80,6 +93,7 @@ impl ApiServer {
         let event_store_db_path = self.event_store_db_path;
         let reload_sender = self.reload_sender;
         let cancel_token = self.cancel_token;
+        let tokens = self.tokens;
 
         tokio::spawn(async move {
             loop {
@@ -93,10 +107,11 @@ impl ApiServer {
                                 let db_path = event_store_db_path.clone();
                                 let sender = reload_sender.clone();
                                 let started = started_at;
+                                let toks = Arc::clone(&tokens);
                                 tokio::spawn(async move {
                                     if let Err(e) = Self::handle_connection(
                                         stream, &names, &metrics, &restarts,
-                                        started, &db_path, &sender,
+                                        started, &db_path, &sender, &toks,
                                     ).await {
                                         tracing::debug!(error = %e, "API 接続の処理に失敗");
                                     }
@@ -122,6 +137,62 @@ impl ApiServer {
         Ok(())
     }
 
+    fn authenticate(raw: &str, tokens: &[ApiTokenConfig]) -> AuthResult {
+        if tokens.is_empty() {
+            return AuthResult::NoAuthRequired;
+        }
+
+        let bearer = raw.lines().find_map(|line| {
+            let lower = line.to_ascii_lowercase();
+            if lower.starts_with("authorization:") {
+                let value = line["authorization:".len()..].trim();
+                if value.len() > 7 && value[..7].eq_ignore_ascii_case("bearer ") {
+                    Some(value[7..].trim().to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        });
+
+        let Some(token) = bearer else {
+            return AuthResult::Unauthorized;
+        };
+
+        let hash = Self::hash_token(&token);
+
+        for tc in tokens {
+            if tc.token_hash == hash {
+                tracing::debug!(token_name = %tc.name, "API 認証成功");
+                return AuthResult::Authenticated(tc.role.clone());
+            }
+        }
+
+        tracing::warn!("API 認証失敗: 不明なトークン");
+        AuthResult::Unauthorized
+    }
+
+    /// トークン文字列から `sha256:<hex>` 形式のハッシュを生成する
+    pub fn hash_token(token: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(token.as_bytes());
+        let result = hasher.finalize();
+        format!("sha256:{:x}", result)
+    }
+
+    fn required_role(method: &HttpMethod, path: &str) -> Option<ApiRole> {
+        match (method, path) {
+            (HttpMethod::Get, "/api/v1/health") => None,
+            (HttpMethod::Get, "/api/v1/status")
+            | (HttpMethod::Get, "/api/v1/modules")
+            | (HttpMethod::Get, "/api/v1/events") => Some(ApiRole::ReadOnly),
+            (HttpMethod::Post, "/api/v1/reload") => Some(ApiRole::Admin),
+            _ => None,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn handle_connection(
         mut stream: tokio::net::TcpStream,
         shared_module_names: &Arc<StdMutex<Vec<String>>>,
@@ -130,6 +201,7 @@ impl ApiServer {
         started_at: Instant,
         event_store_db_path: &Option<String>,
         reload_sender: &mpsc::Sender<()>,
+        tokens: &Arc<StdMutex<Vec<ApiTokenConfig>>>,
     ) -> Result<(), io::Error> {
         // 接続タイムアウト（スローロリス対策）
         let result = tokio::time::timeout(
@@ -147,6 +219,34 @@ impl ApiServer {
         };
 
         let (method, path, query_params) = Self::parse_request(&raw);
+
+        // 認証チェック
+        // unwrap safety: Mutex が poisoned になるのはパニック時のみ
+        let token_list = tokens.lock().unwrap().clone();
+        let auth = Self::authenticate(&raw, &token_list);
+
+        if let Some(required) = Self::required_role(&method, &path) {
+            match &auth {
+                AuthResult::NoAuthRequired => {}
+                AuthResult::Authenticated(role) => {
+                    if !role.has_permission(&required) {
+                        tracing::warn!(
+                            path = %path,
+                            "API 認可失敗: 権限不足"
+                        );
+                        Self::send_error(&mut stream, 403, "Forbidden", "権限が不足しています")
+                            .await?;
+                        stream.shutdown().await?;
+                        return Ok(());
+                    }
+                }
+                AuthResult::Unauthorized => {
+                    Self::send_error(&mut stream, 401, "Unauthorized", "認証が必要です").await?;
+                    stream.shutdown().await?;
+                    return Ok(());
+                }
+            }
+        }
 
         match (&method, path.as_str()) {
             (HttpMethod::Get, "/api/v1/health") => {
@@ -640,6 +740,7 @@ mod tests {
             enabled: true,
             bind_address: "127.0.0.1".to_string(),
             port,
+            tokens: Vec::new(),
         };
         let server = ApiServer::new(
             &config,
@@ -685,6 +786,7 @@ mod tests {
             enabled: true,
             bind_address: "127.0.0.1".to_string(),
             port,
+            tokens: Vec::new(),
         };
         let modules = Arc::new(StdMutex::new(vec!["test_module".to_string()]));
         let metrics = Arc::new(StdMutex::new(SharedMetrics {
@@ -740,6 +842,7 @@ mod tests {
             enabled: true,
             bind_address: "127.0.0.1".to_string(),
             port,
+            tokens: Vec::new(),
         };
         let modules = Arc::new(StdMutex::new(vec![
             "mod_a".to_string(),
@@ -794,6 +897,7 @@ mod tests {
             enabled: true,
             bind_address: "127.0.0.1".to_string(),
             port,
+            tokens: Vec::new(),
         };
         let server = ApiServer::new(
             &config,
@@ -843,6 +947,7 @@ mod tests {
             enabled: true,
             bind_address: "127.0.0.1".to_string(),
             port,
+            tokens: Vec::new(),
         };
         let server = ApiServer::new(
             &config,
@@ -888,6 +993,7 @@ mod tests {
             enabled: true,
             bind_address: "127.0.0.1".to_string(),
             port,
+            tokens: Vec::new(),
         };
         let server = ApiServer::new(
             &config,
@@ -933,6 +1039,7 @@ mod tests {
             enabled: true,
             bind_address: "127.0.0.1".to_string(),
             port,
+            tokens: Vec::new(),
         };
         let server = ApiServer::new(
             &config,
@@ -963,6 +1070,258 @@ mod tests {
 
         assert!(response.contains("HTTP/1.1 405"));
         assert!(response.contains("許可されていないメソッドです"));
+
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[test]
+    fn test_hash_token() {
+        let hash = ApiServer::hash_token("my-secret-token");
+        assert!(hash.starts_with("sha256:"));
+        assert_eq!(hash.len(), 7 + 64); // "sha256:" + 64 hex chars
+        // 同じ入力は同じハッシュ
+        assert_eq!(hash, ApiServer::hash_token("my-secret-token"));
+        // 異なる入力は異なるハッシュ
+        assert_ne!(hash, ApiServer::hash_token("other-token"));
+    }
+
+    #[test]
+    fn test_authenticate_no_tokens() {
+        let raw = "GET /api/v1/status HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let result = ApiServer::authenticate(raw, &[]);
+        assert!(matches!(result, AuthResult::NoAuthRequired));
+    }
+
+    #[test]
+    fn test_authenticate_valid_token() {
+        let token = "test-token-123";
+        let hash = ApiServer::hash_token(token);
+        let tokens = vec![ApiTokenConfig {
+            name: "test".to_string(),
+            token_hash: hash,
+            role: ApiRole::Admin,
+        }];
+        let raw = format!(
+            "GET /api/v1/status HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\n\r\n",
+            token
+        );
+        let result = ApiServer::authenticate(&raw, &tokens);
+        assert!(matches!(result, AuthResult::Authenticated(ApiRole::Admin)));
+    }
+
+    #[test]
+    fn test_authenticate_invalid_token() {
+        let tokens = vec![ApiTokenConfig {
+            name: "test".to_string(),
+            token_hash: ApiServer::hash_token("correct-token"),
+            role: ApiRole::Admin,
+        }];
+        let raw = "GET /api/v1/status HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer wrong-token\r\n\r\n";
+        let result = ApiServer::authenticate(raw, &tokens);
+        assert!(matches!(result, AuthResult::Unauthorized));
+    }
+
+    #[test]
+    fn test_authenticate_no_header() {
+        let tokens = vec![ApiTokenConfig {
+            name: "test".to_string(),
+            token_hash: ApiServer::hash_token("my-token"),
+            role: ApiRole::ReadOnly,
+        }];
+        let raw = "GET /api/v1/status HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let result = ApiServer::authenticate(raw, &tokens);
+        assert!(matches!(result, AuthResult::Unauthorized));
+    }
+
+    #[test]
+    fn test_role_permissions() {
+        assert!(ApiRole::Admin.has_permission(&ApiRole::Admin));
+        assert!(ApiRole::Admin.has_permission(&ApiRole::ReadOnly));
+        assert!(ApiRole::ReadOnly.has_permission(&ApiRole::ReadOnly));
+        assert!(!ApiRole::ReadOnly.has_permission(&ApiRole::Admin));
+    }
+
+    #[test]
+    fn test_required_role_for_endpoints() {
+        assert!(ApiServer::required_role(&HttpMethod::Get, "/api/v1/health").is_none());
+        assert_eq!(
+            ApiServer::required_role(&HttpMethod::Get, "/api/v1/status"),
+            Some(ApiRole::ReadOnly)
+        );
+        assert_eq!(
+            ApiServer::required_role(&HttpMethod::Get, "/api/v1/modules"),
+            Some(ApiRole::ReadOnly)
+        );
+        assert_eq!(
+            ApiServer::required_role(&HttpMethod::Get, "/api/v1/events"),
+            Some(ApiRole::ReadOnly)
+        );
+        assert_eq!(
+            ApiServer::required_role(&HttpMethod::Post, "/api/v1/reload"),
+            Some(ApiRole::Admin)
+        );
+    }
+
+    fn create_auth_server(tokens: Vec<ApiTokenConfig>) -> (u16, CancellationToken) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let (reload_tx, _reload_rx) = mpsc::channel::<()>(1);
+        let config = ApiConfig {
+            enabled: true,
+            bind_address: "127.0.0.1".to_string(),
+            port,
+            tokens,
+        };
+        let server = ApiServer::new(
+            &config,
+            Arc::new(StdMutex::new(Vec::new())),
+            None,
+            Arc::new(StdMutex::new(HashMap::new())),
+            Instant::now(),
+            None,
+            reload_tx,
+        );
+        let cancel = server.cancel_token();
+        server.spawn().unwrap();
+        (port, cancel)
+    }
+
+    #[tokio::test]
+    async fn test_auth_health_no_token_required() {
+        let tokens = vec![ApiTokenConfig {
+            name: "admin".to_string(),
+            token_hash: ApiServer::hash_token("secret"),
+            role: ApiRole::Admin,
+        }];
+        let (port, cancel) = create_auth_server(tokens);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // /health は認証不要
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET /api/v1/health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf);
+        assert!(response.contains("HTTP/1.1 200 OK"));
+
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn test_auth_status_requires_token() {
+        let tokens = vec![ApiTokenConfig {
+            name: "admin".to_string(),
+            token_hash: ApiServer::hash_token("secret"),
+            role: ApiRole::Admin,
+        }];
+        let (port, cancel) = create_auth_server(tokens);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // トークンなしで /status にアクセス → 401
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET /api/v1/status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf);
+        assert!(response.contains("HTTP/1.1 401"));
+
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn test_auth_status_with_valid_token() {
+        let token = "my-secret-token";
+        let tokens = vec![ApiTokenConfig {
+            name: "admin".to_string(),
+            token_hash: ApiServer::hash_token(token),
+            role: ApiRole::Admin,
+        }];
+        let (port, cancel) = create_auth_server(tokens);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        let req = format!(
+            "GET /api/v1/status HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\n\r\n",
+            token
+        );
+        stream.write_all(req.as_bytes()).await.unwrap();
+
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf);
+        assert!(response.contains("HTTP/1.1 200 OK"));
+
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn test_auth_reload_requires_admin() {
+        let token = "read-only-token";
+        let tokens = vec![ApiTokenConfig {
+            name: "reader".to_string(),
+            token_hash: ApiServer::hash_token(token),
+            role: ApiRole::ReadOnly,
+        }];
+        let (port, cancel) = create_auth_server(tokens);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // read_only トークンで /reload にアクセス → 403
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        let req = format!(
+            "POST /api/v1/reload HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\n\r\n",
+            token
+        );
+        stream.write_all(req.as_bytes()).await.unwrap();
+
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf);
+        assert!(response.contains("HTTP/1.1 403"));
+
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn test_auth_no_tokens_allows_all() {
+        let (port, cancel) = create_auth_server(Vec::new());
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // トークン未設定なら認証なしでアクセス可能
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET /api/v1/status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf);
+        assert!(response.contains("HTTP/1.1 200 OK"));
 
         cancel.cancel();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;

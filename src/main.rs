@@ -156,6 +156,12 @@ enum Commands {
         #[arg(long, value_name = "PATH")]
         db: Option<String>,
     },
+    /// API トークンの SHA-256 ハッシュを生成する
+    HashToken {
+        /// ハッシュ化するトークン文字列（省略時は標準入力から読み取る）
+        #[arg(value_name = "TOKEN")]
+        token: Option<String>,
+    },
 }
 
 fn init_logging(log_level: &str, journald_enabled: bool) {
@@ -1034,6 +1040,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             force,
         }) => {
             run_init(profile.as_deref(), *list_profiles, output, *force);
+            return Ok(());
+        }
+        Some(Commands::HashToken { token }) => {
+            let token_str = match token {
+                Some(t) => t.clone(),
+                None => {
+                    let mut buf = String::new();
+                    if io::stdin().read_line(&mut buf).is_err() {
+                        eprintln!("エラー: 標準入力の読み取りに失敗しました");
+                        process::exit(1);
+                    }
+                    buf.trim().to_string()
+                }
+            };
+            if token_str.is_empty() {
+                eprintln!("エラー: トークンが空です");
+                process::exit(1);
+            }
+            let hash = zettai_mamorukun::core::api::ApiServer::hash_token(&token_str);
+            println!("{}", hash);
             return Ok(());
         }
         None => {}
