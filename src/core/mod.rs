@@ -15,5 +15,6 @@ pub mod openapi;
 pub mod prometheus;
 pub mod scan_diff;
 pub mod scan_state;
+pub mod scoring;
 pub mod status;
 pub mod syslog;

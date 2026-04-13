@@ -33,6 +33,7 @@ pub fn generate_openapi_schema() -> Value {
             "/api/v1/events/batch/delete": batch_delete_path(),
             "/api/v1/events/batch/export": batch_export_path(),
             "/api/v1/events/batch/acknowledge": batch_acknowledge_path(),
+            "/api/v1/score": score_path(),
         },
         "components": {
             "securitySchemes": {
@@ -474,6 +475,37 @@ fn batch_acknowledge_path() -> Value {
     })
 }
 
+fn score_path() -> Value {
+    json!({
+        "get": {
+            "summary": "セキュリティスコア取得",
+            "description": "システム全体のセキュリティスコアとカテゴリ別評価を返す。",
+            "operationId": "getScore",
+            "tags": ["security"],
+            "security": [{"BearerAuth": []}],
+            "responses": {
+                "200": {
+                    "description": "スコア取得成功",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/SecurityScore" }
+                        }
+                    }
+                },
+                "401": { "$ref": "#/components/schemas/ErrorResponse" },
+                "503": {
+                    "description": "スコアリングが無効",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
 fn component_schemas() -> Value {
     json!({
         "ErrorResponse": {
@@ -760,6 +792,66 @@ fn component_schemas() -> Value {
                 }
             },
             "required": ["acknowledged"]
+        },
+        "SecurityScore": {
+            "type": "object",
+            "properties": {
+                "overall_score": {
+                    "type": "integer",
+                    "description": "総合セキュリティスコア（0〜100）",
+                    "minimum": 0,
+                    "maximum": 100
+                },
+                "grade": {
+                    "type": "string",
+                    "description": "グレード（A〜F）",
+                    "enum": ["A", "B", "C", "D", "F"]
+                },
+                "categories": {
+                    "type": "object",
+                    "description": "カテゴリ別スコア",
+                    "additionalProperties": { "$ref": "#/components/schemas/CategoryScore" }
+                },
+                "summary": { "$ref": "#/components/schemas/ScoreSummary" },
+                "evaluated_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "評価日時（ISO 8601）"
+                }
+            },
+            "required": ["overall_score", "grade", "categories", "summary", "evaluated_at"]
+        },
+        "CategoryScore": {
+            "type": "object",
+            "properties": {
+                "score": {
+                    "type": "integer",
+                    "description": "カテゴリスコア（0〜100）",
+                    "minimum": 0,
+                    "maximum": 100
+                },
+                "grade": {
+                    "type": "string",
+                    "description": "グレード（A〜F）"
+                },
+                "issues": {
+                    "type": "integer",
+                    "description": "検知された問題数"
+                }
+            },
+            "required": ["score", "grade", "issues"]
+        },
+        "ScoreSummary": {
+            "type": "object",
+            "properties": {
+                "total_events": { "type": "integer", "description": "総イベント数" },
+                "critical": { "type": "integer", "description": "CRITICAL イベント数" },
+                "high": { "type": "integer", "description": "HIGH（WARNING）イベント数" },
+                "medium": { "type": "integer", "description": "MEDIUM イベント数（0固定）" },
+                "low": { "type": "integer", "description": "LOW イベント数（0固定）" },
+                "info": { "type": "integer", "description": "INFO イベント数" }
+            },
+            "required": ["total_events", "critical", "high", "medium", "low", "info"]
         }
     })
 }
