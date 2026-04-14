@@ -1569,41 +1569,57 @@ impl ApiServer {
         )
         .map_err(|e| format!("データベースのオープンに失敗: {}", e))?;
 
-        let mut sql =
-            "SELECT id, timestamp, severity, source_module, event_type, message, details FROM security_events WHERE 1=1"
-                .to_string();
         let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let use_fts = query_params.contains_key("q");
+
+        let mut sql = if use_fts {
+            "SELECT e.id, e.timestamp, e.severity, e.source_module, e.event_type, \
+             highlight(security_events_fts, 0, '<<', '>>') AS message, e.details \
+             FROM security_events e \
+             INNER JOIN security_events_fts fts ON e.id = fts.rowid \
+             WHERE fts.security_events_fts MATCH ?"
+                .to_string()
+        } else {
+            "SELECT id, timestamp, severity, source_module, event_type, message, details FROM security_events WHERE 1=1"
+                .to_string()
+        };
+
+        if let Some(q) = query_params.get("q") {
+            params_vec.push(Box::new(q.clone()));
+        }
+
+        let col_prefix = if use_fts { "e." } else { "" };
 
         let cursor = query_params
             .get("cursor")
             .and_then(|v| v.parse::<i64>().ok());
 
         if let Some(cursor_val) = cursor {
-            sql.push_str(" AND id < ?");
+            sql.push_str(&format!(" AND {}id < ?", col_prefix));
             params_vec.push(Box::new(cursor_val));
         }
 
         if let Some(severity) = query_params.get("severity") {
-            sql.push_str(" AND severity = ?");
+            sql.push_str(&format!(" AND {}severity = ?", col_prefix));
             params_vec.push(Box::new(severity.clone()));
         }
 
         if let Some(module) = query_params.get("module") {
-            sql.push_str(" AND source_module = ?");
+            sql.push_str(&format!(" AND {}source_module = ?", col_prefix));
             params_vec.push(Box::new(module.clone()));
         }
 
         if let Some(since) = query_params.get("since")
             && let Some(ts) = Self::parse_iso8601(since)
         {
-            sql.push_str(" AND timestamp >= ?");
+            sql.push_str(&format!(" AND {}timestamp >= ?", col_prefix));
             params_vec.push(Box::new(ts));
         }
 
         if let Some(until) = query_params.get("until")
             && let Some(ts) = Self::parse_iso8601(until)
         {
-            sql.push_str(" AND timestamp <= ?");
+            sql.push_str(&format!(" AND {}timestamp <= ?", col_prefix));
             params_vec.push(Box::new(ts));
         }
 
@@ -1613,7 +1629,11 @@ impl ApiServer {
             .unwrap_or(default_page_size)
             .min(max_page_size);
 
-        sql.push_str(" ORDER BY id DESC LIMIT ?");
+        if use_fts {
+            sql.push_str(" ORDER BY rank LIMIT ?");
+        } else {
+            sql.push_str(" ORDER BY id DESC LIMIT ?");
+        }
         params_vec.push(Box::new(limit + 1));
 
         let params_refs: Vec<&dyn rusqlite::types::ToSql> =
@@ -1883,6 +1903,7 @@ impl ApiServer {
                 .map(|s| s.to_string()),
             limit,
             cursor: None,
+            text: None,
         };
 
         let conn = rusqlite::Connection::open_with_flags(

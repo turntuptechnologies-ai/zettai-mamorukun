@@ -146,6 +146,9 @@ enum Commands {
         /// イベント種別でフィルタ
         #[arg(long, value_name = "TYPE")]
         event_type: Option<String>,
+        /// フルテキスト検索（メッセージ・詳細フィールドを検索）
+        #[arg(short = 't', long, value_name = "QUERY")]
+        text: Option<String>,
         /// 表示件数の上限
         #[arg(long, default_value = "100", value_name = "N")]
         limit: u32,
@@ -448,6 +451,7 @@ fn run_search_events(
     since: &Option<String>,
     until: &Option<String>,
     event_type: &Option<String>,
+    text: &Option<String>,
     limit: u32,
     json: bool,
     db: &Option<String>,
@@ -510,6 +514,7 @@ fn run_search_events(
         event_type: event_type.clone(),
         limit,
         cursor: None,
+        text: text.clone(),
     };
 
     let records = match event_store::query_events(&conn, &query) {
@@ -654,6 +659,7 @@ fn run_export_events(
         event_type: None,
         limit: limit.unwrap_or(u32::MAX),
         cursor: None,
+        text: None,
     };
 
     let records = match event_store::query_events(&conn, &query) {
@@ -1076,6 +1082,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             since,
             until,
             event_type,
+            text,
             limit,
             json,
             db,
@@ -1087,6 +1094,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 since,
                 until,
                 event_type,
+                text,
                 *limit,
                 *json,
                 db,
