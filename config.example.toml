@@ -848,6 +848,16 @@ access_log = true
 # リクエストボディの最大サイズ（バイト）
 # max_request_body_size = 1048576
 
+# TLS 設定（HTTPS）
+# 有効にすると REST API/WebSocket 接続が TLS で暗号化される
+# SIGHUP でホットリロード可能（証明書の更新が反映される）
+[api.tls]
+enabled = false
+# サーバー証明書ファイル（PEM 形式）
+# cert_file = "/etc/zettai-mamorukun/certs/server.crt"
+# 秘密鍵ファイル（PEM 形式）
+# key_file = "/etc/zettai-mamorukun/certs/server.key"
+
 # WebSocket イベントストリーミング設定
 # /api/v1/events/stream で SecurityEvent をリアルタイムにストリーミングする
 # 認証: Authorization ヘッダー or ?token=xxx クエリパラメータ

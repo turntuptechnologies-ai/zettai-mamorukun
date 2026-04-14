@@ -17,13 +17,65 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io;
 use std::net::IpAddr;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::task::{Context, Poll};
 use std::time::Instant;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
+
+/// TLS/非 TLS 両対応のストリームラッパー
+///
+/// TLS が有効な場合は `TlsStream<TcpStream>`、無効な場合は `TcpStream` を透過的に扱う。
+pub enum MaybeTlsStream {
+    /// 平文 TCP ストリーム
+    Plain(tokio::net::TcpStream),
+    /// TLS 暗号化ストリーム
+    Tls(Box<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>),
+}
+
+impl AsyncRead for MaybeTlsStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            MaybeTlsStream::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            MaybeTlsStream::Tls(s) => Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for MaybeTlsStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            MaybeTlsStream::Plain(s) => Pin::new(s).poll_write(cx, buf),
+            MaybeTlsStream::Tls(s) => Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            MaybeTlsStream::Plain(s) => Pin::new(s).poll_flush(cx),
+            MaybeTlsStream::Tls(s) => Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            MaybeTlsStream::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            MaybeTlsStream::Tls(s) => Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
 
 /// HTTP メソッド
 enum HttpMethod {
@@ -196,6 +248,69 @@ pub struct ApiServer {
     max_request_body_size: usize,
     shared_scoring: Option<Arc<StdMutex<SharedSecurityScore>>>,
     access_log: Arc<AtomicBool>,
+    tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
+}
+
+/// TLS アクセプターを構築する
+fn build_tls_acceptor(
+    tls_config: &crate::config::ApiTlsConfig,
+) -> Result<tokio_rustls::TlsAcceptor, io::Error> {
+    use rustls::ServerConfig;
+    use rustls_pemfile::{certs, private_key};
+    use std::fs::File;
+    use std::io::BufReader;
+
+    let cert_file = File::open(&tls_config.cert_file).map_err(|e| {
+        io::Error::other(format!(
+            "証明書ファイルを開けません: {}: {}",
+            tls_config.cert_file, e
+        ))
+    })?;
+    let key_file = File::open(&tls_config.key_file).map_err(|e| {
+        io::Error::other(format!(
+            "秘密鍵ファイルを開けません: {}: {}",
+            tls_config.key_file, e
+        ))
+    })?;
+
+    let certs: Vec<rustls_pki_types::CertificateDer<'static>> =
+        certs(&mut BufReader::new(cert_file))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("証明書の読み込みに失敗: {}", e),
+                )
+            })?;
+
+    let key = private_key(&mut BufReader::new(key_file))
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("秘密鍵の読み込みに失敗: {}", e),
+            )
+        })?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "秘密鍵が見つかりません"))?;
+
+    let config =
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("TLS プロトコルバージョンの設定に失敗: {}", e),
+                )
+            })?
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("TLS 設定の構築に失敗: {}", e),
+                )
+            })?;
+
+    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
 }
 
 fn is_dry_run(query_params: &HashMap<String, String>) -> bool {
@@ -225,6 +340,26 @@ impl ApiServer {
         } else {
             None
         };
+
+        let tls_acceptor = if config.tls.enabled {
+            match build_tls_acceptor(&config.tls) {
+                Ok(acceptor) => {
+                    tracing::info!(
+                        cert_file = %config.tls.cert_file,
+                        key_file = %config.tls.key_file,
+                        "REST API TLS: 有効"
+                    );
+                    Some(Arc::new(acceptor))
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "TLS アクセプターの構築に失敗。TLS なしで起動します");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Self {
             bind_address: config.bind_address.clone(),
             port: config.port,
@@ -250,6 +385,7 @@ impl ApiServer {
             max_request_body_size: config.max_request_body_size,
             shared_scoring,
             access_log: Arc::new(AtomicBool::new(config.access_log)),
+            tls_acceptor,
         }
     }
 
@@ -291,6 +427,7 @@ impl ApiServer {
         let max_request_body_size = self.max_request_body_size;
         let shared_scoring = self.shared_scoring;
         let access_log = self.access_log;
+        let tls_acceptor = self.tls_acceptor;
 
         // クリーンアップタスク
         if self.rate_limit_config.enabled {
@@ -316,6 +453,8 @@ impl ApiServer {
                 }
             });
         }
+
+        let tls_enabled = tls_acceptor.is_some();
 
         tokio::spawn(async move {
             loop {
@@ -344,9 +483,21 @@ impl ApiServer {
                                 let mrbs = max_request_body_size;
                                 let scoring = shared_scoring.clone();
                                 let al = Arc::clone(&access_log);
+                                let tls_acc = tls_acceptor.clone();
                                 tokio::spawn(async move {
+                                    let maybe_stream = if let Some(ref acceptor) = tls_acc {
+                                        match acceptor.accept(stream).await {
+                                            Ok(tls_stream) => MaybeTlsStream::Tls(Box::new(tls_stream)),
+                                            Err(e) => {
+                                                tracing::debug!(error = %e, "TLS ハンドシェイクに失敗");
+                                                return;
+                                            }
+                                        }
+                                    } else {
+                                        MaybeTlsStream::Plain(stream)
+                                    };
                                     if let Err(e) = Self::handle_connection(
-                                        stream, &names, &metrics, &restarts,
+                                        maybe_stream, &names, &metrics, &restarts,
                                         started, &db_path, &cfg_path, &sender, &toks,
                                         client_ip, &rl, &eb, &wsc, &wsc_count, &cors,
                                         oa_enabled, dps, mps, bms, mrbs, &scoring, &al,
@@ -370,6 +521,7 @@ impl ApiServer {
 
         tracing::info!(
             bind_address = %addr,
+            tls = tls_enabled,
             "REST API サーバーを起動しました"
         );
         Ok(())
@@ -493,7 +645,7 @@ impl ApiServer {
 
     #[allow(clippy::too_many_arguments)]
     async fn handle_connection(
-        mut stream: tokio::net::TcpStream,
+        mut stream: MaybeTlsStream,
         shared_module_names: &Arc<StdMutex<Vec<String>>>,
         shared_metrics: &Option<Arc<StdMutex<SharedMetrics>>>,
         shared_module_restarts: &Arc<StdMutex<HashMap<String, u32>>>,
@@ -1465,7 +1617,7 @@ impl ApiServer {
 
     #[allow(clippy::too_many_arguments)]
     async fn handle_websocket(
-        mut stream: tokio::net::TcpStream,
+        mut stream: MaybeTlsStream,
         raw: &str,
         query_params: &HashMap<String, String>,
         tokens: &Arc<StdMutex<Vec<ApiTokenConfig>>>,
@@ -1650,7 +1802,7 @@ impl ApiServer {
     }
 
     async fn run_websocket_session(
-        ws_stream: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+        ws_stream: tokio_tungstenite::WebSocketStream<MaybeTlsStream>,
         event_sender: broadcast::Sender<SecurityEvent>,
         filter_modules: Option<Vec<String>>,
         filter_severity: Option<Severity>,
@@ -1772,7 +1924,7 @@ impl ApiServer {
         base64_encode(&result)
     }
 
-    async fn read_request(stream: &mut tokio::net::TcpStream) -> Result<String, io::Error> {
+    async fn read_request(stream: &mut MaybeTlsStream) -> Result<String, io::Error> {
         let mut buf = [0u8; 4096];
         let n = stream.read(&mut buf).await?;
         if n == 0 {
@@ -1785,7 +1937,7 @@ impl ApiServer {
     }
 
     async fn read_request_with_body(
-        stream: &mut tokio::net::TcpStream,
+        stream: &mut MaybeTlsStream,
         max_body_size: usize,
     ) -> Result<String, io::Error> {
         let mut buf = Vec::with_capacity(4096);
@@ -2423,7 +2575,7 @@ impl ApiServer {
     }
 
     async fn send_json_response_with_headers(
-        stream: &mut tokio::net::TcpStream,
+        stream: &mut MaybeTlsStream,
         status: u16,
         status_text: &str,
         body: &str,
@@ -2445,7 +2597,7 @@ impl ApiServer {
     }
 
     async fn send_error_with_headers(
-        stream: &mut tokio::net::TcpStream,
+        stream: &mut MaybeTlsStream,
         status: u16,
         status_text: &str,
         message: &str,
@@ -2531,6 +2683,7 @@ mod tests {
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
             access_log: true,
+            tls: crate::config::ApiTlsConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -2589,6 +2742,7 @@ mod tests {
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
             access_log: true,
+            tls: crate::config::ApiTlsConfig::default(),
         };
         let modules = Arc::new(StdMutex::new(vec!["test_module".to_string()]));
         let metrics = Arc::new(StdMutex::new(SharedMetrics {
@@ -2657,6 +2811,7 @@ mod tests {
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
             access_log: true,
+            tls: crate::config::ApiTlsConfig::default(),
         };
         let modules = Arc::new(StdMutex::new(vec![
             "mod_a".to_string(),
@@ -2724,6 +2879,7 @@ mod tests {
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
             access_log: true,
+            tls: crate::config::ApiTlsConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -2786,6 +2942,7 @@ mod tests {
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
             access_log: true,
+            tls: crate::config::ApiTlsConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -2844,6 +3001,7 @@ mod tests {
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
             access_log: true,
+            tls: crate::config::ApiTlsConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -2902,6 +3060,7 @@ mod tests {
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
             access_log: true,
+            tls: crate::config::ApiTlsConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -3048,6 +3207,7 @@ mod tests {
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
             access_log: true,
+            tls: crate::config::ApiTlsConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -3230,6 +3390,7 @@ mod tests {
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
             access_log: true,
+            tls: crate::config::ApiTlsConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -3693,6 +3854,7 @@ mod tests {
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
             access_log: true,
+            tls: crate::config::ApiTlsConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -3924,6 +4086,7 @@ mod tests {
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
             access_log: true,
+            tls: crate::config::ApiTlsConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -3991,6 +4154,7 @@ mod tests {
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
             access_log: true,
+            tls: crate::config::ApiTlsConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -4057,6 +4221,7 @@ mod tests {
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
             access_log: true,
+            tls: crate::config::ApiTlsConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -4119,6 +4284,7 @@ mod tests {
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
             access_log: true,
+            tls: crate::config::ApiTlsConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -4178,6 +4344,7 @@ mod tests {
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
             access_log: true,
+            tls: crate::config::ApiTlsConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -4344,6 +4511,7 @@ mod tests {
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
             access_log: false,
+            tls: crate::config::ApiTlsConfig::default(),
         };
         let server = ApiServer::new(
             &config,
@@ -4368,5 +4536,145 @@ mod tests {
     fn test_access_log_default_true() {
         let config = ApiConfig::default();
         assert!(config.access_log);
+    }
+
+    #[test]
+    fn test_tls_config_default() {
+        let config = crate::config::ApiTlsConfig::default();
+        assert!(!config.enabled);
+        assert!(config.cert_file.is_empty());
+        assert!(config.key_file.is_empty());
+    }
+
+    #[test]
+    fn test_tls_config_deserialize_disabled() {
+        let toml_str = r#"
+            enabled = false
+        "#;
+        let config: crate::config::ApiTlsConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.enabled);
+        assert!(config.cert_file.is_empty());
+        assert!(config.key_file.is_empty());
+    }
+
+    #[test]
+    fn test_tls_config_deserialize_enabled() {
+        let toml_str = r#"
+            enabled = true
+            cert_file = "/etc/certs/server.crt"
+            key_file = "/etc/certs/server.key"
+        "#;
+        let config: crate::config::ApiTlsConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.cert_file, "/etc/certs/server.crt");
+        assert_eq!(config.key_file, "/etc/certs/server.key");
+    }
+
+    #[test]
+    fn test_api_config_with_tls_deserialize() {
+        let toml_str = r#"
+            enabled = true
+            bind_address = "0.0.0.0"
+            port = 9201
+            [tls]
+            enabled = true
+            cert_file = "/path/to/cert.pem"
+            key_file = "/path/to/key.pem"
+        "#;
+        let config: ApiConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.tls.enabled);
+        assert_eq!(config.tls.cert_file, "/path/to/cert.pem");
+        assert_eq!(config.tls.key_file, "/path/to/key.pem");
+    }
+
+    #[test]
+    fn test_api_config_without_tls_section() {
+        let toml_str = r#"
+            enabled = true
+            bind_address = "127.0.0.1"
+            port = 9201
+        "#;
+        let config: ApiConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.tls.enabled);
+        assert!(config.tls.cert_file.is_empty());
+        assert!(config.tls.key_file.is_empty());
+    }
+
+    #[test]
+    fn test_build_tls_acceptor_invalid_cert_path() {
+        let tls_config = crate::config::ApiTlsConfig {
+            enabled: true,
+            cert_file: "/nonexistent/cert.pem".to_string(),
+            key_file: "/nonexistent/key.pem".to_string(),
+        };
+        let result = build_tls_acceptor(&tls_config);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(err.to_string().contains("証明書ファイルを開けません"));
+    }
+
+    #[test]
+    fn test_build_tls_acceptor_invalid_key_path() {
+        // 証明書ファイルだけ存在するが秘密鍵がない場合
+        let dir = tempfile::tempdir().unwrap();
+        let cert_path = dir.path().join("cert.pem");
+
+        // rcgen で自己署名証明書を生成
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let cert_pem = cert.cert.pem();
+        std::fs::write(&cert_path, cert_pem).unwrap();
+
+        let tls_config = crate::config::ApiTlsConfig {
+            enabled: true,
+            cert_file: cert_path.to_string_lossy().to_string(),
+            key_file: "/nonexistent/key.pem".to_string(),
+        };
+        let result = build_tls_acceptor(&tls_config);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(err.to_string().contains("秘密鍵ファイルを開けません"));
+    }
+
+    #[test]
+    fn test_build_tls_acceptor_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let cert_path = dir.path().join("cert.pem");
+        let key_path = dir.path().join("key.pem");
+
+        // rcgen で自己署名証明書と秘密鍵を生成
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let cert_pem = cert.cert.pem();
+        let key_pem = cert.key_pair.serialize_pem();
+        std::fs::write(&cert_path, cert_pem).unwrap();
+        std::fs::write(&key_path, key_pem).unwrap();
+
+        let tls_config = crate::config::ApiTlsConfig {
+            enabled: true,
+            cert_file: cert_path.to_string_lossy().to_string(),
+            key_file: key_path.to_string_lossy().to_string(),
+        };
+        let result = build_tls_acceptor(&tls_config);
+        assert!(
+            result.is_ok(),
+            "TLS アクセプター構築に失敗: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_build_tls_acceptor_empty_cert_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let cert_path = dir.path().join("empty_cert.pem");
+        let key_path = dir.path().join("empty_key.pem");
+        std::fs::write(&cert_path, "").unwrap();
+        std::fs::write(&key_path, "").unwrap();
+
+        let tls_config = crate::config::ApiTlsConfig {
+            enabled: true,
+            cert_file: cert_path.to_string_lossy().to_string(),
+            key_file: key_path.to_string_lossy().to_string(),
+        };
+        let result = build_tls_acceptor(&tls_config);
+        assert!(result.is_err());
     }
 }
