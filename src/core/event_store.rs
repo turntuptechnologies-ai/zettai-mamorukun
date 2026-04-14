@@ -1208,6 +1208,143 @@ pub fn batch_acknowledge(conn: &Connection, ids: &[i64]) -> Result<u64, AppError
     Ok(total)
 }
 
+/// ID 指定でイベントの件数をカウントする（dry-run 用）
+pub fn count_by_ids(conn: &Connection, ids: &[i64]) -> Result<(u64, Vec<i64>), AppError> {
+    let mut total = 0u64;
+    let mut sample_ids = Vec::new();
+    for chunk in ids.chunks(999) {
+        let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT id FROM security_events WHERE id IN ({})",
+            placeholders
+        );
+        let params: Vec<&dyn rusqlite::types::ToSql> = chunk
+            .iter()
+            .map(|id| id as &dyn rusqlite::types::ToSql)
+            .collect();
+        let mut stmt = conn.prepare(&sql).map_err(|e| AppError::EventStore {
+            message: format!("クエリ準備に失敗: {}", e),
+        })?;
+        let rows = stmt
+            .query_map(params.as_slice(), |row| row.get::<_, i64>(0))
+            .map_err(|e| AppError::EventStore {
+                message: format!("クエリ実行に失敗: {}", e),
+            })?;
+        for row in rows {
+            let id = row.map_err(|e| AppError::EventStore {
+                message: format!("行読取に失敗: {}", e),
+            })?;
+            total += 1;
+            if sample_ids.len() < 10 {
+                sample_ids.push(id);
+            }
+        }
+    }
+    Ok((total, sample_ids))
+}
+
+/// フィルタ条件でイベントの件数をカウントする（dry-run 用）
+pub fn count_by_filter(
+    conn: &Connection,
+    filter: &BatchDeleteFilter,
+) -> Result<(u64, Vec<i64>), AppError> {
+    let mut where_clause = String::from("WHERE 1=1");
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut idx = 1;
+
+    if let Some(severity) = &filter.severity {
+        where_clause.push_str(&format!(" AND severity = ?{}", idx));
+        param_values.push(Box::new(severity.to_uppercase()));
+        idx += 1;
+    }
+    if let Some(module) = &filter.source_module {
+        where_clause.push_str(&format!(" AND source_module = ?{}", idx));
+        param_values.push(Box::new(module.clone()));
+        idx += 1;
+    }
+    if let Some(since) = filter.since {
+        where_clause.push_str(&format!(" AND timestamp >= ?{}", idx));
+        param_values.push(Box::new(since));
+        idx += 1;
+    }
+    if let Some(until) = filter.until {
+        where_clause.push_str(&format!(" AND timestamp <= ?{}", idx));
+        param_values.push(Box::new(until));
+        idx += 1;
+    }
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
+
+    let count_sql = format!("SELECT COUNT(*) FROM security_events {}", where_clause);
+    let total: u64 = conn
+        .query_row(&count_sql, param_refs.as_slice(), |row| {
+            row.get::<_, i64>(0)
+        })
+        .map(|v| v as u64)
+        .map_err(|e| AppError::EventStore {
+            message: format!("カウントクエリに失敗: {}", e),
+        })?;
+
+    let sample_sql = format!(
+        "SELECT id FROM security_events {} ORDER BY id DESC LIMIT 10",
+        where_clause
+    );
+    let mut stmt = conn
+        .prepare(&sample_sql)
+        .map_err(|e| AppError::EventStore {
+            message: format!("サンプルクエリ準備に失敗: {}", e),
+        })?;
+    let sample_ids: Vec<i64> = stmt
+        .query_map(param_refs.as_slice(), |row| row.get::<_, i64>(0))
+        .map_err(|e| AppError::EventStore {
+            message: format!("サンプルクエリ実行に失敗: {}", e),
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let _ = idx;
+    Ok((total, sample_ids))
+}
+
+/// 未確認イベントの件数をカウントする（dry-run 用）
+pub fn count_acknowledge_targets(
+    conn: &Connection,
+    ids: &[i64],
+) -> Result<(u64, Vec<i64>), AppError> {
+    let mut total = 0u64;
+    let mut sample_ids = Vec::new();
+    for chunk in ids.chunks(999) {
+        let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT id FROM security_events WHERE id IN ({}) AND acknowledged = 0",
+            placeholders
+        );
+        let params: Vec<&dyn rusqlite::types::ToSql> = chunk
+            .iter()
+            .map(|id| id as &dyn rusqlite::types::ToSql)
+            .collect();
+        let mut stmt = conn.prepare(&sql).map_err(|e| AppError::EventStore {
+            message: format!("クエリ準備に失敗: {}", e),
+        })?;
+        let rows = stmt
+            .query_map(params.as_slice(), |row| row.get::<_, i64>(0))
+            .map_err(|e| AppError::EventStore {
+                message: format!("クエリ実行に失敗: {}", e),
+            })?;
+        for row in rows {
+            let id = row.map_err(|e| AppError::EventStore {
+                message: format!("行読取に失敗: {}", e),
+            })?;
+            total += 1;
+            if sample_ids.len() < 10 {
+                sample_ids.push(id);
+            }
+        }
+    }
+    Ok((total, sample_ids))
+}
+
 /// エクスポート用クエリ（acknowledged フィールド含む、件数上限あり）
 pub fn query_events_for_export(
     conn: &Connection,
@@ -2336,5 +2473,110 @@ mod tests {
 
         // Running init_database again should be idempotent
         init_database(&conn).unwrap();
+    }
+
+    #[test]
+    fn test_count_by_ids() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+        insert_test_events(&conn, 5);
+
+        let ids: Vec<i64> = conn
+            .prepare("SELECT id FROM security_events")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let (count, sample) = count_by_ids(&conn, &ids[..3]).unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(sample.len(), 3);
+
+        let (count, _) = count_by_ids(&conn, &[9999]).unwrap();
+        assert_eq!(count, 0);
+
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM security_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 5);
+    }
+
+    #[test]
+    fn test_count_by_filter() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+        insert_test_events(&conn, 5);
+
+        let filter = BatchDeleteFilter {
+            severity: Some("info".to_string()),
+            source_module: Some("test_module".to_string()),
+            since: None,
+            until: None,
+        };
+        let (count, sample) = count_by_filter(&conn, &filter).unwrap();
+        assert_eq!(count, 5);
+        assert!(sample.len() <= 10);
+
+        let filter_no_match = BatchDeleteFilter {
+            severity: Some("critical".to_string()),
+            source_module: None,
+            since: None,
+            until: None,
+        };
+        let (count, _) = count_by_filter(&conn, &filter_no_match).unwrap();
+        assert_eq!(count, 0);
+
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM security_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 5);
+    }
+
+    #[test]
+    fn test_count_acknowledge_targets() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+        insert_test_events(&conn, 5);
+
+        let ids: Vec<i64> = conn
+            .prepare("SELECT id FROM security_events")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let (count, sample) = count_acknowledge_targets(&conn, &ids).unwrap();
+        assert_eq!(count, 5);
+        assert_eq!(sample.len(), 5);
+
+        batch_acknowledge(&conn, &ids[..2]).unwrap();
+        let (count, _) = count_acknowledge_targets(&conn, &ids).unwrap();
+        assert_eq!(count, 3);
+
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM security_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 5);
+    }
+
+    #[test]
+    fn test_count_by_ids_sample_limit() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+        insert_test_events(&conn, 20);
+
+        let ids: Vec<i64> = conn
+            .prepare("SELECT id FROM security_events")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let (count, sample) = count_by_ids(&conn, &ids).unwrap();
+        assert_eq!(count, 20);
+        assert!(sample.len() <= 10);
     }
 }
