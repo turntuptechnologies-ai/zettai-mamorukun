@@ -3109,7 +3109,7 @@ dependencies = [
 
 [[package]]
 name = "zettai-mamorukun"
-version = "1.32.0"
+version = "1.33.0"
 dependencies = [
  "clap",
  "crossterm",
@@ -3126,6 +3126,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rusqlite",
+ "rustls",
  "rustls-pemfile",
  "rustls-pki-types",
  "serde",

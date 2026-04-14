@@ -6144,6 +6144,22 @@ impl Default for WebSocketConfig {
     }
 }
 
+/// REST API TLS 設定
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+pub struct ApiTlsConfig {
+    /// TLS の有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// 証明書ファイルのパス（PEM 形式）
+    #[serde(default)]
+    pub cert_file: String,
+
+    /// 秘密鍵ファイルのパス（PEM 形式）
+    #[serde(default)]
+    pub key_file: String,
+}
+
 /// REST API サーバー設定
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub struct ApiConfig {
@@ -6198,6 +6214,10 @@ pub struct ApiConfig {
     /// アクセスログの有効/無効
     #[serde(default = "ApiConfig::default_access_log")]
     pub access_log: bool,
+
+    /// TLS 設定
+    #[serde(default)]
+    pub tls: ApiTlsConfig,
 }
 
 impl ApiConfig {
@@ -6250,6 +6270,7 @@ impl Default for ApiConfig {
             batch_max_size: Self::default_batch_max_size(),
             max_request_body_size: Self::default_max_request_body_size(),
             access_log: Self::default_access_log(),
+            tls: ApiTlsConfig::default(),
         }
     }
 }
@@ -6270,6 +6291,7 @@ impl Clone for ApiConfig {
             batch_max_size: self.batch_max_size,
             max_request_body_size: self.max_request_body_size,
             access_log: self.access_log,
+            tls: self.tls.clone(),
         }
     }
 }
