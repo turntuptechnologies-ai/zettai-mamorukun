@@ -1,6 +1,7 @@
 //! Cron ジョブ改ざん検知モジュール
 //!
 //! cron 関連ファイルを定期的にスキャンし、SHA-256 ハッシュベースで変更を検知する。
+//! inotify によるリアルタイム検知にも対応し、定期スキャンと併用して高速かつ確実な検知を実現する。
 //!
 //! 検知対象:
 //! - 新規追加された cron ファイル
@@ -11,9 +12,11 @@ use crate::config::CronMonitorConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
+use inotify::{Inotify, WatchDescriptor, WatchMask};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use walkdir::WalkDir;
 
@@ -33,7 +36,7 @@ impl ChangeReport {
 
 /// Cron ジョブ改ざん検知モジュール
 ///
-/// cron 関連ファイルを定期スキャンし、ベースラインとの差分を検知する。
+/// cron 関連ファイルを定期スキャンおよび inotify リアルタイム検知で変更を検知する。
 pub struct CronMonitorModule {
     config: CronMonitorConfig,
     baseline: Option<HashMap<PathBuf, String>>,
@@ -128,6 +131,140 @@ impl CronMonitorModule {
             removed,
         }
     }
+
+    /// inotify を初期化し、監視対象ディレクトリに watch を登録する
+    fn setup_inotify(
+        watch_paths: &[PathBuf],
+    ) -> Result<(Inotify, HashMap<WatchDescriptor, PathBuf>), AppError> {
+        let mut inotify = Inotify::init().map_err(|e| AppError::ModuleConfig {
+            message: format!("inotify の初期化に失敗しました: {}", e),
+        })?;
+
+        let watch_mask =
+            WatchMask::CLOSE_WRITE | WatchMask::MOVED_TO | WatchMask::DELETE | WatchMask::CREATE;
+
+        let mut watch_map: HashMap<WatchDescriptor, PathBuf> = HashMap::new();
+
+        for path in watch_paths {
+            if path.is_dir() {
+                Self::register_dir_watches(&mut inotify, path, watch_mask, &mut watch_map);
+            } else if let Some(parent) = path.parent()
+                && parent.is_dir()
+                && !watch_map.values().any(|p| p == parent)
+            {
+                match inotify.watches().add(parent, watch_mask) {
+                    Ok(wd) => {
+                        watch_map.insert(wd, parent.to_path_buf());
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %parent.display(),
+                            error = %e,
+                            "inotify watch の登録に失敗しました"
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok((inotify, watch_map))
+    }
+
+    /// ディレクトリとそのサブディレクトリに再帰的に inotify watch を登録する
+    fn register_dir_watches(
+        inotify: &mut Inotify,
+        path: &std::path::Path,
+        watch_mask: WatchMask,
+        watch_map: &mut HashMap<WatchDescriptor, PathBuf>,
+    ) {
+        match inotify.watches().add(path, watch_mask) {
+            Ok(wd) => {
+                watch_map.insert(wd, path.to_path_buf());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "inotify watch の登録に失敗しました"
+                );
+                return;
+            }
+        }
+
+        let entries = match std::fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(_) => return,
+        };
+
+        for entry in entries.filter_map(|e| e.ok()) {
+            let entry_path = entry.path();
+            let metadata = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                Self::register_dir_watches(inotify, &entry_path, watch_mask, watch_map);
+            }
+        }
+    }
+
+    /// 変更レポートを処理してイベントを発行する
+    fn publish_changes(report: &ChangeReport, event_bus: &Option<EventBus>, detection: &str) {
+        for path in &report.modified {
+            tracing::warn!(path = %path.display(), change = "modified", detection = detection, "cron ファイルの変更を検知しました");
+            if let Some(bus) = event_bus {
+                bus.publish(
+                    SecurityEvent::new(
+                        "cron_modified",
+                        Severity::Warning,
+                        "cron_monitor",
+                        format!("cron ファイルの変更を検知しました: {}", path.display()),
+                    )
+                    .with_details(format!(
+                        "path={}, detection={}",
+                        path.display(),
+                        detection
+                    )),
+                );
+            }
+        }
+        for path in &report.added {
+            tracing::warn!(path = %path.display(), change = "added", detection = detection, "cron ファイルの追加を検知しました");
+            if let Some(bus) = event_bus {
+                bus.publish(
+                    SecurityEvent::new(
+                        "cron_added",
+                        Severity::Warning,
+                        "cron_monitor",
+                        format!("cron ファイルの追加を検知しました: {}", path.display()),
+                    )
+                    .with_details(format!(
+                        "path={}, detection={}",
+                        path.display(),
+                        detection
+                    )),
+                );
+            }
+        }
+        for path in &report.removed {
+            tracing::warn!(path = %path.display(), change = "removed", detection = detection, "cron ファイルの削除を検知しました");
+            if let Some(bus) = event_bus {
+                bus.publish(
+                    SecurityEvent::new(
+                        "cron_removed",
+                        Severity::Warning,
+                        "cron_monitor",
+                        format!("cron ファイルの削除を検知しました: {}", path.display()),
+                    )
+                    .with_details(format!(
+                        "path={}, detection={}",
+                        path.display(),
+                        detection
+                    )),
+                );
+            }
+        }
+    }
 }
 
 /// ファイルの SHA-256 ハッシュを計算する
@@ -173,6 +310,8 @@ impl Module for CronMonitorModule {
         tracing::info!(
             watch_paths = ?self.config.watch_paths,
             scan_interval_secs = self.config.scan_interval_secs,
+            use_inotify = self.config.use_inotify,
+            inotify_debounce_ms = self.config.inotify_debounce_ms,
             "Cron ジョブ改ざん検知モジュールを初期化しました"
         );
 
@@ -198,6 +337,30 @@ impl Module for CronMonitorModule {
         let scan_interval_secs = self.config.scan_interval_secs;
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
+        let use_inotify = self.config.use_inotify;
+        let inotify_debounce_ms = self.config.inotify_debounce_ms;
+
+        // inotify の初期化（有効時のみ）
+        let inotify_state = if use_inotify {
+            match Self::setup_inotify(&watch_paths) {
+                Ok((inotify, watch_map)) => {
+                    tracing::info!(
+                        watch_count = watch_map.len(),
+                        "cron 監視用の inotify watch を登録しました"
+                    );
+                    Some((inotify, watch_map))
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "inotify の初期化に失敗しました。定期スキャンのみで動作します"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let handle = tokio::spawn(async move {
             let mut interval =
@@ -205,63 +368,95 @@ impl Module for CronMonitorModule {
             // 最初の tick は即座に発火するのでスキップ
             interval.tick().await;
 
-            loop {
-                tokio::select! {
-                    _ = cancel_token.cancelled() => {
-                        tracing::info!("Cron ジョブ改ざん検知モジュールを停止します");
-                        break;
-                    }
-                    _ = interval.tick() => {
-                        let current = CronMonitorModule::scan_files(&watch_paths);
-                        let report = CronMonitorModule::detect_changes(&baseline, &current);
+            if let Some((mut inotify, watch_map)) = inotify_state {
+                let mut buffer = vec![0u8; 4096];
+                let mut debounce_map: HashMap<PathBuf, Instant> = HashMap::new();
+                let debounce_duration = Duration::from_millis(inotify_debounce_ms);
+                let mut poll_interval = tokio::time::interval(Duration::from_millis(100));
+                poll_interval.tick().await;
 
-                        if report.has_changes() {
-                            for path in &report.modified {
-                                tracing::warn!(path = %path.display(), change = "modified", "cron ファイルの変更を検知しました");
-                                if let Some(ref bus) = event_bus {
-                                    bus.publish(
-                                        SecurityEvent::new(
-                                            "cron_modified",
-                                            Severity::Warning,
-                                            "cron_monitor",
-                                            format!("cron ファイルの変更を検知しました: {}", path.display()),
-                                        )
-                                        .with_details(path.display().to_string()),
-                                    );
-                                }
+                loop {
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => {
+                            tracing::info!("Cron ジョブ改ざん検知モジュールを停止します");
+                            break;
+                        }
+                        _ = interval.tick() => {
+                            let current = CronMonitorModule::scan_files(&watch_paths);
+                            let report = CronMonitorModule::detect_changes(&baseline, &current);
+
+                            if report.has_changes() {
+                                CronMonitorModule::publish_changes(&report, &event_bus, "periodic_scan");
+                                baseline = current;
+                            } else {
+                                tracing::debug!("cron ファイルの変更はありません");
                             }
-                            for path in &report.added {
-                                tracing::warn!(path = %path.display(), change = "added", "cron ファイルの追加を検知しました");
-                                if let Some(ref bus) = event_bus {
-                                    bus.publish(
-                                        SecurityEvent::new(
-                                            "cron_added",
-                                            Severity::Warning,
-                                            "cron_monitor",
-                                            format!("cron ファイルの追加を検知しました: {}", path.display()),
-                                        )
-                                        .with_details(path.display().to_string()),
-                                    );
+                        }
+                        _ = poll_interval.tick() => {
+                            let events = match inotify.read_events(&mut buffer) {
+                                Ok(events) => events,
+                                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                                Err(e) => {
+                                    tracing::error!(error = %e, "inotify イベントの読み取りに失敗しました");
+                                    continue;
                                 }
-                            }
-                            for path in &report.removed {
-                                tracing::warn!(path = %path.display(), change = "removed", "cron ファイルの削除を検知しました");
-                                if let Some(ref bus) = event_bus {
-                                    bus.publish(
-                                        SecurityEvent::new(
-                                            "cron_removed",
-                                            Severity::Warning,
-                                            "cron_monitor",
-                                            format!("cron ファイルの削除を検知しました: {}", path.display()),
-                                        )
-                                        .with_details(path.display().to_string()),
-                                    );
+                            };
+
+                            let now = Instant::now();
+
+                            for event in events {
+                                let dir_path = match watch_map.get(&event.wd) {
+                                    Some(p) => p.clone(),
+                                    None => continue,
+                                };
+
+                                let file_path = match &event.name {
+                                    Some(name) => dir_path.join(name),
+                                    None => dir_path.clone(),
+                                };
+
+                                if let Some(last_time) = debounce_map.get(&file_path)
+                                    && now.duration_since(*last_time) < debounce_duration
+                                {
+                                    continue;
                                 }
+                                debounce_map.insert(file_path.clone(), now);
+
+                                let current = CronMonitorModule::scan_files(&watch_paths);
+                                let report = CronMonitorModule::detect_changes(&baseline, &current);
+
+                                if report.has_changes() {
+                                    CronMonitorModule::publish_changes(&report, &event_bus, "inotify");
+                                    baseline = current;
+                                }
+
+                                break;
                             }
-                            // ベースラインを更新
-                            baseline = current;
-                        } else {
-                            tracing::debug!("cron ファイルの変更はありません");
+
+                            if debounce_map.len() > 10000 {
+                                let threshold = now - Duration::from_secs(60);
+                                debounce_map.retain(|_, t| *t > threshold);
+                            }
+                        }
+                    }
+                }
+            } else {
+                loop {
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => {
+                            tracing::info!("Cron ジョブ改ざん検知モジュールを停止します");
+                            break;
+                        }
+                        _ = interval.tick() => {
+                            let current = CronMonitorModule::scan_files(&watch_paths);
+                            let report = CronMonitorModule::detect_changes(&baseline, &current);
+
+                            if report.has_changes() {
+                                CronMonitorModule::publish_changes(&report, &event_bus, "periodic_scan");
+                                baseline = current;
+                            } else {
+                                tracing::debug!("cron ファイルの変更はありません");
+                            }
                         }
                     }
                 }
@@ -461,6 +656,7 @@ mod tests {
             enabled: true,
             scan_interval_secs: 0,
             watch_paths: vec![],
+            ..Default::default()
         };
         let mut module = CronMonitorModule::new(config, None);
         let result = module.init();
@@ -474,6 +670,7 @@ mod tests {
             enabled: true,
             scan_interval_secs: 120,
             watch_paths: vec![dir.path().to_path_buf()],
+            ..Default::default()
         };
         let mut module = CronMonitorModule::new(config, None);
         let result = module.init();
@@ -486,6 +683,7 @@ mod tests {
             enabled: true,
             scan_interval_secs: 120,
             watch_paths: vec![PathBuf::from("/nonexistent-path-zettai-cron-test")],
+            ..Default::default()
         };
         let mut module = CronMonitorModule::new(config, None);
         let result = module.init();
@@ -504,6 +702,7 @@ mod tests {
             enabled: true,
             scan_interval_secs: 120,
             watch_paths: vec![non_canonical],
+            ..Default::default()
         };
         let mut module = CronMonitorModule::new(config, None);
         let result = module.init();
@@ -523,6 +722,7 @@ mod tests {
             enabled: true,
             scan_interval_secs: 3600,
             watch_paths: vec![dir.path().to_path_buf()],
+            ..Default::default()
         };
         let mut module = CronMonitorModule::new(config, None);
         module.init().unwrap();
@@ -556,6 +756,7 @@ mod tests {
             enabled: true,
             scan_interval_secs: 120,
             watch_paths: vec![dir.path().to_path_buf()],
+            ..Default::default()
         };
         let mut module = CronMonitorModule::new(config, None);
         module.init().unwrap();
@@ -572,10 +773,142 @@ mod tests {
             enabled: true,
             scan_interval_secs: 120,
             watch_paths: vec![],
+            ..Default::default()
         };
         let module = CronMonitorModule::new(config, None);
 
         let result = module.initial_scan().await.unwrap();
         assert_eq!(result.items_scanned, 0);
+    }
+
+    #[test]
+    fn test_inotify_config_enabled_by_default() {
+        let config = CronMonitorConfig::default();
+        assert!(config.use_inotify);
+        assert_eq!(config.inotify_debounce_ms, 500);
+    }
+
+    #[test]
+    fn test_inotify_config_disabled() {
+        let config = CronMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 120,
+            watch_paths: vec![],
+            use_inotify: false,
+            inotify_debounce_ms: 500,
+        };
+        assert!(!config.use_inotify);
+    }
+
+    #[tokio::test]
+    async fn test_start_and_stop_with_inotify_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let file1 = dir.path().join("crontab");
+        std::fs::write(&file1, "* * * * * /bin/true").unwrap();
+
+        let config = CronMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 3600,
+            watch_paths: vec![dir.path().to_path_buf()],
+            use_inotify: false,
+            inotify_debounce_ms: 500,
+        };
+        let mut module = CronMonitorModule::new(config, None);
+        module.init().unwrap();
+
+        let cancel_token = module.cancel_token();
+        module.start().await.unwrap();
+
+        module.stop().await.unwrap();
+        assert!(cancel_token.is_cancelled());
+    }
+
+    #[test]
+    fn test_setup_inotify_with_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("cron.d");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("job"), "test").unwrap();
+
+        let watch_paths = vec![dir.path().to_path_buf()];
+        let result = CronMonitorModule::setup_inotify(&watch_paths);
+        assert!(result.is_ok());
+        let (_inotify, watch_map) = result.unwrap();
+        assert!(watch_map.len() >= 1);
+    }
+
+    #[test]
+    fn test_setup_inotify_with_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("crontab");
+        std::fs::write(&file, "test").unwrap();
+
+        let watch_paths = vec![file];
+        let result = CronMonitorModule::setup_inotify(&watch_paths);
+        assert!(result.is_ok());
+        let (_inotify, watch_map) = result.unwrap();
+        assert_eq!(watch_map.len(), 1);
+    }
+
+    #[test]
+    fn test_publish_changes_detection_field() {
+        let report = ChangeReport {
+            modified: vec![PathBuf::from("/etc/crontab")],
+            added: vec![],
+            removed: vec![],
+        };
+
+        let event_bus = EventBus::new(16);
+        let mut rx = event_bus.subscribe();
+
+        CronMonitorModule::publish_changes(&report, &Some(event_bus), "inotify");
+
+        let event = rx.try_recv().unwrap();
+        assert!(
+            event
+                .details
+                .as_ref()
+                .unwrap()
+                .contains("detection=inotify")
+        );
+    }
+
+    #[test]
+    fn test_publish_changes_periodic_scan_detection() {
+        let report = ChangeReport {
+            modified: vec![PathBuf::from("/etc/crontab")],
+            added: vec![],
+            removed: vec![],
+        };
+
+        let event_bus = EventBus::new(16);
+        let mut rx = event_bus.subscribe();
+
+        CronMonitorModule::publish_changes(&report, &Some(event_bus), "periodic_scan");
+
+        let event = rx.try_recv().unwrap();
+        assert!(
+            event
+                .details
+                .as_ref()
+                .unwrap()
+                .contains("detection=periodic_scan")
+        );
+    }
+
+    #[test]
+    fn test_debounce_logic() {
+        let mut debounce_map: HashMap<PathBuf, Instant> = HashMap::new();
+        let debounce_duration = Duration::from_millis(500);
+        let path = PathBuf::from("/etc/crontab");
+
+        let now = Instant::now();
+        assert!(debounce_map.get(&path).is_none());
+        debounce_map.insert(path.clone(), now);
+
+        let should_skip = debounce_map
+            .get(&path)
+            .is_some_and(|last_time| now.duration_since(*last_time) < debounce_duration);
+        assert!(should_skip);
     }
 }
