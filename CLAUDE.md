@@ -106,7 +106,7 @@ src/
     cgroup_monitor.rs  # cgroup v2 リソース制限監視モジュール
     container_namespace.rs # コンテナ・名前空間検知モジュール
     coredump_monitor.rs  # コアダンプ設定監視モジュール
-    cron_monitor.rs    # Cron ジョブ改ざん検知モジュール
+    cron_monitor.rs    # Cron ジョブ改ざん検知モジュール（inotify リアルタイム検知対応）
     dbus_monitor.rs    # D-Bus シグナル監視モジュール
     dns_monitor.rs     # DNS設定改ざん検知モジュール
     dns_query_monitor.rs # ネットワーク名前解決監視モジュール
