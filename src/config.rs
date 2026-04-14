@@ -682,6 +682,14 @@ pub struct CronMonitorConfig {
     /// 監視対象パスのリスト
     #[serde(default = "CronMonitorConfig::default_watch_paths")]
     pub watch_paths: Vec<PathBuf>,
+
+    /// inotify によるリアルタイム検知の有効/無効
+    #[serde(default = "CronMonitorConfig::default_true")]
+    pub use_inotify: bool,
+
+    /// inotify デバウンス時間（ミリ秒）
+    #[serde(default = "CronMonitorConfig::default_inotify_debounce_ms")]
+    pub inotify_debounce_ms: u64,
 }
 
 impl CronMonitorConfig {
@@ -700,6 +708,14 @@ impl CronMonitorConfig {
             PathBuf::from("/var/spool/cron/crontabs"),
         ]
     }
+
+    fn default_true() -> bool {
+        true
+    }
+
+    fn default_inotify_debounce_ms() -> u64 {
+        500
+    }
 }
 
 impl Default for CronMonitorConfig {
@@ -708,6 +724,8 @@ impl Default for CronMonitorConfig {
             enabled: false,
             scan_interval_secs: Self::default_scan_interval_secs(),
             watch_paths: Self::default_watch_paths(),
+            use_inotify: Self::default_true(),
+            inotify_debounce_ms: Self::default_inotify_debounce_ms(),
         }
     }
 }
@@ -3711,6 +3729,12 @@ impl AppConfig {
             "modules.cron_monitor.scan_interval_secs",
             &mut errors,
         );
+        if !(10..=60000).contains(&self.modules.cron_monitor.inotify_debounce_ms) {
+            errors.push(
+                "modules.cron_monitor.inotify_debounce_ms: 10〜60000 の範囲で指定してください"
+                    .to_string(),
+            );
+        }
         Self::validate_interval(
             self.modules.user_account.scan_interval_secs,
             "modules.user_account.scan_interval_secs",
@@ -6408,6 +6432,8 @@ log_level = "warn"
         assert!(!config.modules.cron_monitor.enabled);
         assert_eq!(config.modules.cron_monitor.scan_interval_secs, 120);
         assert_eq!(config.modules.cron_monitor.watch_paths.len(), 7);
+        assert!(config.modules.cron_monitor.use_inotify);
+        assert_eq!(config.modules.cron_monitor.inotify_debounce_ms, 500);
     }
 
     #[test]
@@ -6417,11 +6443,15 @@ log_level = "warn"
 enabled = true
 scan_interval_secs = 60
 watch_paths = ["/etc/crontab", "/etc/cron.d"]
+use_inotify = false
+inotify_debounce_ms = 200
 "#;
         let config: AppConfig = toml::from_str(toml_str).unwrap();
         assert!(config.modules.cron_monitor.enabled);
         assert_eq!(config.modules.cron_monitor.scan_interval_secs, 60);
         assert_eq!(config.modules.cron_monitor.watch_paths.len(), 2);
+        assert!(!config.modules.cron_monitor.use_inotify);
+        assert_eq!(config.modules.cron_monitor.inotify_debounce_ms, 200);
     }
 
     #[test]
