@@ -771,6 +771,20 @@ retention_days_critical = 365
 # DB ファイルサイズがこの値を超えた場合、古い INFO → WARNING → CRITICAL の順で削除する
 # 0 の場合は上限なし（無制限）
 max_storage_mb = 0
+# アーカイブ機能 — 古いイベントを圧縮ファイルにエクスポートし、DB から削除する
+# 有効にすると archive_after_days 日以前のイベントを archive_interval_hours ごとにアーカイブする
+# アーカイブファイルは JSON Lines 形式（gzip 圧縮対応）で SHA-256 チェックサム付き
+archive_enabled = false
+# アーカイブ対象とするイベントの経過日数
+# retention_days より小さい値を推奨（GC による削除前にアーカイブするため）
+archive_after_days = 30
+# アーカイブファイルの保存先ディレクトリ
+archive_dir = "/var/lib/zettai-mamorukun/archive"
+# アーカイブ実行間隔（時間）
+archive_interval_hours = 24
+# アーカイブファイルの gzip 圧縮
+# true: .jsonl.gz（圧縮あり）、false: .jsonl（圧縮なし）
+archive_compress = true
 
 [event_stream]
 # イベントストリーム（Unix ソケット経由リアルタイムイベント配信）の有効/無効

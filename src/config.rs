@@ -3353,6 +3353,26 @@ pub struct EventStoreConfig {
     /// 0 の場合は上限なし
     #[serde(default)]
     pub max_storage_mb: u64,
+
+    /// アーカイブ機能の有効/無効
+    #[serde(default)]
+    pub archive_enabled: bool,
+
+    /// アーカイブ対象とするイベントの経過日数
+    #[serde(default = "EventStoreConfig::default_archive_after_days")]
+    pub archive_after_days: u64,
+
+    /// アーカイブファイルの保存先ディレクトリ
+    #[serde(default = "EventStoreConfig::default_archive_dir")]
+    pub archive_dir: String,
+
+    /// アーカイブ実行間隔（時間）
+    #[serde(default = "EventStoreConfig::default_archive_interval_hours")]
+    pub archive_interval_hours: u64,
+
+    /// アーカイブファイルの gzip 圧縮の有効/無効
+    #[serde(default = "EventStoreConfig::default_archive_compress")]
+    pub archive_compress: bool,
 }
 
 impl EventStoreConfig {
@@ -3374,6 +3394,18 @@ impl EventStoreConfig {
     fn default_retention_days_critical() -> u64 {
         365
     }
+    fn default_archive_after_days() -> u64 {
+        30
+    }
+    fn default_archive_dir() -> String {
+        "/var/lib/zettai-mamorukun/archive".to_string()
+    }
+    fn default_archive_interval_hours() -> u64 {
+        24
+    }
+    fn default_archive_compress() -> bool {
+        true
+    }
 }
 
 impl Default for EventStoreConfig {
@@ -3387,6 +3419,11 @@ impl Default for EventStoreConfig {
             cleanup_interval_hours: Self::default_cleanup_interval_hours(),
             retention_days_critical: Self::default_retention_days_critical(),
             max_storage_mb: 0,
+            archive_enabled: false,
+            archive_after_days: Self::default_archive_after_days(),
+            archive_dir: Self::default_archive_dir(),
+            archive_interval_hours: Self::default_archive_interval_hours(),
+            archive_compress: Self::default_archive_compress(),
         }
     }
 }

@@ -177,6 +177,51 @@ enum Commands {
         #[arg(value_name = "TOKEN")]
         token: Option<String>,
     },
+    /// イベントストアのアーカイブ管理
+    Archive {
+        #[command(subcommand)]
+        action: ArchiveAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ArchiveAction {
+    /// アーカイブファイル一覧を表示する
+    List {
+        /// アーカイブディレクトリ（省略時は設定ファイルの値を使用）
+        #[arg(long, value_name = "PATH")]
+        dir: Option<String>,
+        /// JSON 形式で出力
+        #[arg(long)]
+        json: bool,
+    },
+    /// アーカイブを手動実行する
+    Run {
+        /// アーカイブ対象とするイベントの経過日数（省略時は設定ファイルの値を使用）
+        #[arg(long, value_name = "DAYS")]
+        after_days: Option<u64>,
+        /// アーカイブディレクトリ（省略時は設定ファイルの値を使用）
+        #[arg(long, value_name = "PATH")]
+        dir: Option<String>,
+        /// データベースファイルパス（省略時は設定ファイルの値を使用）
+        #[arg(long, value_name = "PATH")]
+        db: Option<String>,
+        /// 圧縮を無効化する
+        #[arg(long)]
+        no_compress: bool,
+    },
+    /// アーカイブファイルからイベントを復元する
+    Restore {
+        /// 復元するアーカイブファイル名
+        #[arg(value_name = "FILENAME")]
+        filename: String,
+        /// アーカイブディレクトリ（省略時は設定ファイルの値を使用）
+        #[arg(long, value_name = "PATH")]
+        dir: Option<String>,
+        /// データベースファイルパス（省略時は設定ファイルの値を使用）
+        #[arg(long, value_name = "PATH")]
+        db: Option<String>,
+    },
 }
 
 fn init_logging(log_level: &str, journald_enabled: bool) {
@@ -902,6 +947,129 @@ fn run_score_command(api_url: &str, api_token: Option<&str>, json: bool) {
     }
 }
 
+fn run_archive_command(config_path: &Path, action: &ArchiveAction) {
+    let config = AppConfig::load(config_path).ok();
+    let default_config = zettai_mamorukun::config::EventStoreConfig::default();
+    let es_config = config.as_ref().map(|c| &c.event_store);
+
+    match action {
+        ArchiveAction::List { dir, json } => {
+            let archive_dir = dir.as_deref().unwrap_or_else(|| {
+                es_config
+                    .map(|c| c.archive_dir.as_str())
+                    .unwrap_or(&default_config.archive_dir)
+            });
+
+            match event_store::list_archives(archive_dir) {
+                Ok(archives) => {
+                    if *json {
+                        for archive in &archives {
+                            if let Ok(line) = serde_json::to_string(archive) {
+                                println!("{}", line);
+                            }
+                        }
+                    } else if archives.is_empty() {
+                        eprintln!("アーカイブファイルはありません ({})", archive_dir);
+                    } else {
+                        eprintln!("アーカイブ一覧 ({}):\n", archive_dir);
+                        for archive in &archives {
+                            let size_kb = archive.size / 1024;
+                            let checksum_str = archive
+                                .checksum
+                                .as_deref()
+                                .map(|c| &c[..8])
+                                .unwrap_or("--------");
+                            println!(
+                                "  {} ({} KB, sha256:{}...)",
+                                archive.filename, size_kb, checksum_str
+                            );
+                        }
+                        eprintln!("\n合計: {} ファイル", archives.len());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("エラー: {}", e);
+                    process::exit(1);
+                }
+            }
+        }
+        ArchiveAction::Run {
+            after_days,
+            dir,
+            db,
+            no_compress,
+        } => {
+            let db_path = db.as_deref().unwrap_or_else(|| {
+                es_config
+                    .map(|c| c.database_path.as_str())
+                    .unwrap_or(&default_config.database_path)
+            });
+            let archive_dir = dir.as_deref().unwrap_or_else(|| {
+                es_config
+                    .map(|c| c.archive_dir.as_str())
+                    .unwrap_or(&default_config.archive_dir)
+            });
+            let days = after_days.unwrap_or_else(|| {
+                es_config
+                    .map(|c| c.archive_after_days)
+                    .unwrap_or(default_config.archive_after_days)
+            });
+            let compress = !no_compress
+                && es_config
+                    .map(|c| c.archive_compress)
+                    .unwrap_or(default_config.archive_compress);
+
+            eprintln!(
+                "アーカイブを実行します（対象: {} 日以前のイベント, 出力先: {}, 圧縮: {}）",
+                days,
+                archive_dir,
+                if compress { "有効" } else { "無効" }
+            );
+
+            match event_store::run_archive_manual(db_path, days, archive_dir, compress) {
+                Ok(count) => {
+                    if count > 0 {
+                        eprintln!("{} 件のイベントをアーカイブしました", count);
+                    } else {
+                        eprintln!("アーカイブ対象のイベントはありません");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("エラー: {}", e);
+                    process::exit(1);
+                }
+            }
+        }
+        ArchiveAction::Restore { filename, dir, db } => {
+            let db_path = db.as_deref().unwrap_or_else(|| {
+                es_config
+                    .map(|c| c.database_path.as_str())
+                    .unwrap_or(&default_config.database_path)
+            });
+            let archive_dir = dir.as_deref().unwrap_or_else(|| {
+                es_config
+                    .map(|c| c.archive_dir.as_str())
+                    .unwrap_or(&default_config.archive_dir)
+            });
+
+            eprintln!(
+                "アーカイブを復元します（ファイル: {}, データベース: {}）",
+                filename, db_path
+            );
+
+            match event_store::restore_archive(db_path, archive_dir, filename) {
+                Ok(count) => {
+                    eprintln!("{} 件のイベントを復元しました", count);
+                }
+                Err(e) => {
+                    eprintln!("エラー: {}", e);
+                    process::exit(1);
+                }
+            }
+        }
+    }
+}
+
 fn run_event_stats(config_path: &Path, db: &Option<String>, days: u32, json: bool) {
     if days < 1 {
         eprintln!("エラー: --days は 1 以上を指定してください");
@@ -1181,6 +1349,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             json,
         }) => {
             run_score_command(api_url, api_token.as_deref(), *json);
+            return Ok(());
+        }
+        Some(Commands::Archive { action }) => {
+            run_archive_command(&cli.config, action);
             return Ok(());
         }
         Some(Commands::HashToken { token }) => {

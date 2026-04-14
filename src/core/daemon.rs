@@ -613,6 +613,16 @@ impl Daemon {
                                         "event_store.database_path の変更はホットリロードに対応していません。デーモンを再起動してください"
                                     );
                                 }
+                                if new_config.event_store.archive_enabled
+                                    && new_config.event_store.archive_after_days
+                                        >= new_config.event_store.retention_days
+                                {
+                                    tracing::warn!(
+                                        archive_after_days = new_config.event_store.archive_after_days,
+                                        retention_days = new_config.event_store.retention_days,
+                                        "archive_after_days が retention_days 以上です。アーカイブ前にイベントが削除される可能性があります"
+                                    );
+                                }
                                 let new_runtime = EventStoreRuntimeConfig::from(&new_config.event_store);
                                 if sender.send(new_runtime).is_ok() {
                                     tracing::info!(
