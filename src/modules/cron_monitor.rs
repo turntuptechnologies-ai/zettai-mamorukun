@@ -911,4 +911,124 @@ mod tests {
             .is_some_and(|last_time| now.duration_since(*last_time) < debounce_duration);
         assert!(should_skip);
     }
+
+    #[test]
+    fn test_debounce_logic_expired() {
+        let mut debounce_map: HashMap<PathBuf, Instant> = HashMap::new();
+        let debounce_duration = Duration::from_millis(500);
+        let path = PathBuf::from("/etc/crontab");
+
+        let past = Instant::now() - Duration::from_secs(1);
+        debounce_map.insert(path.clone(), past);
+
+        let now = Instant::now();
+        let should_skip = debounce_map
+            .get(&path)
+            .is_some_and(|last_time| now.duration_since(*last_time) < debounce_duration);
+        assert!(!should_skip);
+    }
+
+    #[test]
+    fn test_setup_inotify_with_recursive_subdirectories() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub1 = dir.path().join("cron.d");
+        let sub2 = sub1.join("nested");
+        std::fs::create_dir_all(&sub2).unwrap();
+        std::fs::write(sub2.join("job"), "test").unwrap();
+
+        let watch_paths = vec![dir.path().to_path_buf()];
+        let result = CronMonitorModule::setup_inotify(&watch_paths);
+        assert!(result.is_ok());
+        let (_inotify, watch_map) = result.unwrap();
+        assert!(watch_map.len() >= 3);
+    }
+
+    #[test]
+    fn test_publish_changes_added_event() {
+        let report = ChangeReport {
+            modified: vec![],
+            added: vec![PathBuf::from("/etc/cron.d/new_job")],
+            removed: vec![],
+        };
+
+        let event_bus = EventBus::new(16);
+        let mut rx = event_bus.subscribe();
+
+        CronMonitorModule::publish_changes(&report, &Some(event_bus), "inotify");
+
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.event_type, "cron_added");
+        assert!(
+            event
+                .details
+                .as_ref()
+                .unwrap()
+                .contains("detection=inotify")
+        );
+    }
+
+    #[test]
+    fn test_publish_changes_removed_event() {
+        let report = ChangeReport {
+            modified: vec![],
+            added: vec![],
+            removed: vec![PathBuf::from("/etc/cron.d/old_job")],
+        };
+
+        let event_bus = EventBus::new(16);
+        let mut rx = event_bus.subscribe();
+
+        CronMonitorModule::publish_changes(&report, &Some(event_bus), "periodic_scan");
+
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.event_type, "cron_removed");
+        assert!(
+            event
+                .details
+                .as_ref()
+                .unwrap()
+                .contains("detection=periodic_scan")
+        );
+    }
+
+    #[test]
+    fn test_publish_changes_no_changes() {
+        let report = ChangeReport {
+            modified: vec![],
+            added: vec![],
+            removed: vec![],
+        };
+
+        let event_bus = EventBus::new(16);
+        let mut rx = event_bus.subscribe();
+
+        CronMonitorModule::publish_changes(&report, &Some(event_bus), "inotify");
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_setup_inotify_empty_paths() {
+        let watch_paths: Vec<PathBuf> = vec![];
+        let result = CronMonitorModule::setup_inotify(&watch_paths);
+        assert!(result.is_ok());
+        let (_inotify, watch_map) = result.unwrap();
+        assert!(watch_map.is_empty());
+    }
+
+    #[test]
+    fn test_debounce_map_cleanup() {
+        let mut debounce_map: HashMap<PathBuf, Instant> = HashMap::new();
+        let now = Instant::now();
+        let old_time = now - Duration::from_secs(120);
+
+        debounce_map.insert(PathBuf::from("/etc/cron.d/old"), old_time);
+        debounce_map.insert(PathBuf::from("/etc/cron.d/recent"), now);
+
+        let threshold = now - Duration::from_secs(60);
+        debounce_map.retain(|_, t| *t > threshold);
+
+        assert_eq!(debounce_map.len(), 1);
+        assert!(debounce_map.contains_key(&PathBuf::from("/etc/cron.d/recent")));
+    }
 }
