@@ -858,6 +858,12 @@ enabled = false
 # 秘密鍵ファイル（PEM 形式）
 # key_file = "/etc/zettai-mamorukun/certs/server.key"
 
+# mTLS（クライアント証明書認証）設定
+# [api.tls.mtls]
+# enabled = false
+# client_ca_file = "/etc/zettai-mamorukun/certs/client-ca.crt"
+# client_auth_mode = "required"  # "required" | "optional"
+
 # WebSocket イベントストリーミング設定
 # /api/v1/events/stream で SecurityEvent をリアルタイムにストリーミングする
 # 認証: Authorization ヘッダー or ?token=xxx クエリパラメータ

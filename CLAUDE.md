@@ -65,7 +65,7 @@ Linux サーバ上でデーモンとして動作し（systemd で管理）、あ
 - **Action Engine**: 検知イベントに対するアクション（ログ・コマンド実行・Webhook 送信）を設定ベースで実行。イベントバスのサブスクライバーとして動作し、Severity やモジュール名に基づくルールマッチングでアクションを選択する
 - **Metrics Collector**: SecurityEvent の発生件数・種別・Severity を集計し、定期的にサマリーをログ出力する。イベントバスのサブスクライバーとして動作。`tokio::sync::watch` チャネルによるインターバルのホットリロードに対応
 - **Prometheus Exporter**: MetricsCollector の集計データを Prometheus テキスト形式で HTTP エンドポイント（`/metrics`）から公開する。Grafana・Alertmanager 等の外部監視基盤と連携可能。`/health` エンドポイントでヘルスチェックも提供
-- **REST API Server**: HTTP REST API でデーモンのステータス確認、イベント検索、モジュール一覧、設定リロードをリモートから操作可能にする。JSON レスポンス形式で `/api/v1/` プレフィックスのエンドポイントを提供。WebSocket によるリアルタイムイベントストリーミング（`/api/v1/events/stream`）に対応し、モジュール名・Severity でのフィルタリングが可能。OpenAPI 3.0.3 スキーマ（`/api/v1/openapi.json`）による API ドキュメント提供。TLS（HTTPS）対応により暗号化通信をサポート（rustls ベース、TLS 1.2 以上）。ホットリロード対応
+- **REST API Server**: HTTP REST API でデーモンのステータス確認、イベント検索、モジュール一覧、設定リロードをリモートから操作可能にする。JSON レスポンス形式で `/api/v1/` プレフィックスのエンドポイントを提供。WebSocket によるリアルタイムイベントストリーミング（`/api/v1/events/stream`）に対応し、モジュール名・Severity でのフィルタリングが可能。OpenAPI 3.0.3 スキーマ（`/api/v1/openapi.json`）による API ドキュメント提供。TLS（HTTPS）対応により暗号化通信をサポート（rustls ベース、TLS 1.2 以上）。mTLS（相互TLS認証）によるクライアント証明書認証に対応（required/optional モード選択可能）。ホットリロード対応
 - **Syslog Forwarder**: SecurityEvent を RFC 5424 形式で外部 Syslog サーバ（SIEM 等）に転送する。UDP/TCP/TLS（RFC 5425）プロトコル対応。TLS 接続時はカスタム CA 証明書またはシステムルート証明書を使用。mTLS（相互TLS認証）によるクライアント証明書認証に対応。イベントバスのサブスクライバーとして動作し、設定ホットリロードに対応
 - **Event Store**: SecurityEvent を SQLite データベースに永続保存する。イベントバスのサブスクライバーとして動作し、バッチ挿入・自動クリーンアップ・設定ホットリロードに対応
 - **Module Manager**: モジュールの一括起動・停止・リロードを管理。設定変更の差分検出により、変更のあったモジュールのみ再起動する
