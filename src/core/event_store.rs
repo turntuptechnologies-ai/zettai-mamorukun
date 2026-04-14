@@ -3,8 +3,13 @@
 use crate::config::EventStoreConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
+use flate2::Compression;
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
 use rusqlite::{Connection, OpenFlags, params};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, watch};
@@ -24,6 +29,16 @@ pub struct EventStoreRuntimeConfig {
     pub batch_interval_secs: u64,
     /// クリーンアップ実行間隔（時間）
     pub cleanup_interval_hours: u64,
+    /// アーカイブ機能の有効/無効
+    pub archive_enabled: bool,
+    /// アーカイブ対象とするイベントの経過日数
+    pub archive_after_days: u64,
+    /// アーカイブファイルの保存先ディレクトリ
+    pub archive_dir: String,
+    /// アーカイブ実行間隔（時間）
+    pub archive_interval_hours: u64,
+    /// gzip 圧縮の有効/無効
+    pub archive_compress: bool,
 }
 
 impl From<&EventStoreConfig> for EventStoreRuntimeConfig {
@@ -35,6 +50,11 @@ impl From<&EventStoreConfig> for EventStoreRuntimeConfig {
             batch_size: config.batch_size,
             batch_interval_secs: config.batch_interval_secs,
             cleanup_interval_hours: config.cleanup_interval_hours,
+            archive_enabled: config.archive_enabled,
+            archive_after_days: config.archive_after_days,
+            archive_dir: config.archive_dir.clone(),
+            archive_interval_hours: config.archive_interval_hours,
+            archive_compress: config.archive_compress,
         }
     }
 }
@@ -259,19 +279,38 @@ impl EventStore {
     ) {
         let mut buffer: Vec<SecurityEvent> = Vec::new();
         let mut batch_ticker = tokio::time::interval(batch_interval);
-        batch_ticker.tick().await; // 最初の tick をスキップ
+        batch_ticker.tick().await;
 
         let mut cleanup_ticker = tokio::time::interval(cleanup_interval);
-        cleanup_ticker.tick().await; // 最初の tick をスキップ
+        cleanup_ticker.tick().await;
 
-        let (mut retention_days, mut retention_days_critical, mut max_storage_mb) = {
+        let (
+            mut retention_days,
+            mut retention_days_critical,
+            mut max_storage_mb,
+            mut archive_enabled,
+            mut archive_after_days,
+            mut archive_dir,
+            mut archive_compress,
+        ) = {
             let cfg = config_receiver.borrow();
             (
                 cfg.retention_days,
                 cfg.retention_days_critical,
                 cfg.max_storage_mb,
+                cfg.archive_enabled,
+                cfg.archive_after_days,
+                cfg.archive_dir.clone(),
+                cfg.archive_compress,
             )
         };
+
+        let archive_interval = {
+            let cfg = config_receiver.borrow();
+            Duration::from_secs(cfg.archive_interval_hours * 3600)
+        };
+        let mut archive_ticker = tokio::time::interval(archive_interval);
+        archive_ticker.tick().await;
 
         loop {
             tokio::select! {
@@ -310,6 +349,9 @@ impl EventStore {
                 _ = cleanup_ticker.tick() => {
                     Self::cleanup_old_events(&conn, retention_days, retention_days_critical, max_storage_mb).await;
                 }
+                _ = archive_ticker.tick(), if archive_enabled => {
+                    Self::run_archive(&conn, archive_after_days, &archive_dir, archive_compress).await;
+                }
                 result = config_receiver.changed() => {
                     match result {
                         Ok(()) => {
@@ -321,12 +363,20 @@ impl EventStore {
                                 batch_size = new_config.batch_size,
                                 batch_interval_secs = new_config.batch_interval_secs,
                                 cleanup_interval_hours = new_config.cleanup_interval_hours,
+                                archive_enabled = new_config.archive_enabled,
+                                archive_after_days = new_config.archive_after_days,
+                                archive_interval_hours = new_config.archive_interval_hours,
+                                archive_compress = new_config.archive_compress,
                                 "イベントストア: 設定をリロードしました"
                             );
                             batch_size = new_config.batch_size;
                             retention_days = new_config.retention_days;
                             retention_days_critical = new_config.retention_days_critical;
                             max_storage_mb = new_config.max_storage_mb;
+                            archive_enabled = new_config.archive_enabled;
+                            archive_after_days = new_config.archive_after_days;
+                            archive_dir = new_config.archive_dir;
+                            archive_compress = new_config.archive_compress;
 
                             let new_batch_interval = Duration::from_secs(new_config.batch_interval_secs);
                             batch_ticker = tokio::time::interval(new_batch_interval);
@@ -335,6 +385,10 @@ impl EventStore {
                             let new_cleanup_interval = Duration::from_secs(new_config.cleanup_interval_hours * 3600);
                             cleanup_ticker = tokio::time::interval(new_cleanup_interval);
                             cleanup_ticker.tick().await;
+
+                            let new_archive_interval = Duration::from_secs(new_config.archive_interval_hours * 3600);
+                            archive_ticker = tokio::time::interval(new_archive_interval);
+                            archive_ticker.tick().await;
                         }
                         Err(_) => {
                             tracing::info!("設定チャネルが閉じられました。イベントストアを終了します");
@@ -567,6 +621,401 @@ impl EventStore {
 
         total_deleted
     }
+
+    async fn run_archive(
+        conn: &Arc<StdMutex<Connection>>,
+        archive_after_days: u64,
+        archive_dir: &str,
+        compress: bool,
+    ) {
+        let conn = Arc::clone(conn);
+        let archive_dir = archive_dir.to_string();
+        let result = tokio::task::spawn_blocking(move || {
+            archive_events_blocking(&conn, archive_after_days, &archive_dir, compress)
+        })
+        .await;
+
+        match result {
+            Ok(Ok(count)) => {
+                if count > 0 {
+                    tracing::info!(
+                        archived = count,
+                        archive_after_days = archive_after_days,
+                        "イベントストア: {} 件のイベントをアーカイブしました",
+                        count
+                    );
+                }
+            }
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "イベントストア: アーカイブ処理に失敗しました");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "イベントストア: アーカイブ spawn_blocking タスクがパニックしました");
+            }
+        }
+    }
+}
+
+/// アーカイブ処理の本体（ブロッキング）
+fn archive_events_blocking(
+    conn: &Arc<StdMutex<Connection>>,
+    archive_after_days: u64,
+    archive_dir: &str,
+    compress: bool,
+) -> Result<usize, AppError> {
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let cutoff = now_secs.saturating_sub(archive_after_days * 86400) as i64;
+
+    // unwrap safety: Mutex が poisoned になるのはパニック時のみ
+    let conn = conn.lock().unwrap();
+
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM security_events WHERE timestamp < ?1",
+            params![cutoff],
+            |row| row.get(0),
+        )
+        .map_err(|e| AppError::EventStore {
+            message: format!("アーカイブ対象件数の取得に失敗: {}", e),
+        })?;
+
+    if count == 0 {
+        return Ok(0);
+    }
+
+    std::fs::create_dir_all(archive_dir).map_err(|e| AppError::EventStore {
+        message: format!(
+            "アーカイブディレクトリの作成に失敗 ({}): {}",
+            archive_dir, e
+        ),
+    })?;
+
+    let min_ts: i64 = conn
+        .query_row(
+            "SELECT MIN(timestamp) FROM security_events WHERE timestamp < ?1",
+            params![cutoff],
+            |row| row.get(0),
+        )
+        .map_err(|e| AppError::EventStore {
+            message: format!("最小タイムスタンプの取得に失敗: {}", e),
+        })?;
+
+    let date_from = format_date_from_epoch(min_ts);
+    let date_to = format_date_from_epoch(cutoff);
+
+    let extension = if compress { "jsonl.gz" } else { "jsonl" };
+    let filename = format!("events_{}_{}.{}", date_from, date_to, extension);
+    let filepath = std::path::Path::new(archive_dir).join(&filename);
+    let tmp_filepath = std::path::Path::new(archive_dir).join(format!("{}.tmp", filename));
+
+    let mut hasher = Sha256::new();
+    let written;
+
+    {
+        let file = std::fs::File::create(&tmp_filepath).map_err(|e| AppError::EventStore {
+            message: format!(
+                "アーカイブ一時ファイルの作成に失敗 ({}): {}",
+                tmp_filepath.display(),
+                e
+            ),
+        })?;
+
+        if compress {
+            let encoder = GzEncoder::new(file, Compression::default());
+            let mut writer = BufWriter::new(encoder);
+            written = write_archive_events(&conn, cutoff, &mut writer, &mut hasher)?;
+            let encoder = writer.into_inner().map_err(|e| AppError::EventStore {
+                message: format!("バッファフラッシュに失敗: {}", e),
+            })?;
+            encoder.finish().map_err(|e| AppError::EventStore {
+                message: format!("gzip 圧縮の完了に失敗: {}", e),
+            })?;
+        } else {
+            let mut writer = BufWriter::new(file);
+            written = write_archive_events(&conn, cutoff, &mut writer, &mut hasher)?;
+            writer.flush().map_err(|e| AppError::EventStore {
+                message: format!("バッファフラッシュに失敗: {}", e),
+            })?;
+        }
+    }
+
+    let checksum = format!("{:x}", hasher.finalize());
+
+    let checksum_path = std::path::Path::new(archive_dir).join(format!("{}.sha256", filename));
+    std::fs::write(&checksum_path, format!("{}  {}\n", checksum, filename)).map_err(|e| {
+        AppError::EventStore {
+            message: format!(
+                "チェックサムファイルの書き込みに失敗 ({}): {}",
+                checksum_path.display(),
+                e
+            ),
+        }
+    })?;
+
+    std::fs::rename(&tmp_filepath, &filepath).map_err(|e| AppError::EventStore {
+        message: format!("アーカイブファイルのリネームに失敗: {}", e),
+    })?;
+
+    conn.execute(
+        "DELETE FROM security_events WHERE timestamp < ?1",
+        params![cutoff],
+    )
+    .map_err(|e| AppError::EventStore {
+        message: format!("アーカイブ済みイベントの削除に失敗: {}", e),
+    })?;
+
+    tracing::debug!(
+        file = %filepath.display(),
+        checksum = %checksum,
+        events = written,
+        "アーカイブファイルを書き出しました"
+    );
+
+    Ok(written)
+}
+
+/// イベントを JSON Lines 形式でライターに書き出す
+fn write_archive_events<W: Write>(
+    conn: &Connection,
+    cutoff: i64,
+    writer: &mut W,
+    hasher: &mut Sha256,
+) -> Result<usize, AppError> {
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT id, timestamp, severity, source_module, event_type, message, details, acknowledged \
+             FROM security_events WHERE timestamp < ?1 ORDER BY timestamp ASC",
+        )
+        .map_err(|e| AppError::EventStore {
+            message: format!("アーカイブクエリの準備に失敗: {}", e),
+        })?;
+
+    let rows = stmt
+        .query_map(params![cutoff], |row| {
+            Ok(EventRecord {
+                id: row.get(0)?,
+                timestamp: row.get(1)?,
+                severity: row.get(2)?,
+                source_module: row.get(3)?,
+                event_type: row.get(4)?,
+                message: row.get(5)?,
+                details: row.get(6)?,
+                acknowledged: row.get(7)?,
+            })
+        })
+        .map_err(|e| AppError::EventStore {
+            message: format!("アーカイブクエリの実行に失敗: {}", e),
+        })?;
+
+    let mut count = 0;
+    for row in rows {
+        let record = row.map_err(|e| AppError::EventStore {
+            message: format!("行の読み取りに失敗: {}", e),
+        })?;
+        let mut line = serde_json::to_vec(&record).map_err(|e| AppError::EventStore {
+            message: format!("JSON シリアライズに失敗: {}", e),
+        })?;
+        line.push(b'\n');
+        hasher.update(&line);
+        writer.write_all(&line).map_err(|e| AppError::EventStore {
+            message: format!("アーカイブファイルの書き込みに失敗: {}", e),
+        })?;
+        count += 1;
+    }
+
+    Ok(count)
+}
+
+/// UNIX エポック秒から YYYYMMDD 形式の日付文字列を生成する
+fn format_date_from_epoch(epoch_secs: i64) -> String {
+    let days = epoch_secs / 86400;
+    let mut y: i64 = 1970;
+    let mut remaining = days;
+    loop {
+        let days_in_year: i64 = if is_leap_year(y) { 366 } else { 365 };
+        if remaining < days_in_year {
+            break;
+        }
+        remaining -= days_in_year;
+        y += 1;
+    }
+    let leap = is_leap_year(y);
+    let month_days: [i64; 12] = if leap {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+    let mut m = 0;
+    for (i, &md) in month_days.iter().enumerate() {
+        if remaining < md {
+            m = i;
+            break;
+        }
+        remaining -= md;
+    }
+    let d = remaining + 1;
+    format!("{:04}{:02}{:02}", y, m + 1, d)
+}
+
+/// アーカイブファイルの情報
+#[derive(Debug, Serialize)]
+pub struct ArchiveInfo {
+    /// ファイル名
+    pub filename: String,
+    /// ファイルサイズ（バイト）
+    pub size: u64,
+    /// SHA-256 チェックサム
+    pub checksum: Option<String>,
+}
+
+/// アーカイブファイル一覧を取得する
+pub fn list_archives(archive_dir: &str) -> Result<Vec<ArchiveInfo>, AppError> {
+    let dir = std::path::Path::new(archive_dir);
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut archives = Vec::new();
+    let entries = std::fs::read_dir(dir).map_err(|e| AppError::EventStore {
+        message: format!(
+            "アーカイブディレクトリの読み取りに失敗 ({}): {}",
+            archive_dir, e
+        ),
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| AppError::EventStore {
+            message: format!("ディレクトリエントリの読み取りに失敗: {}", e),
+        })?;
+        let filename = entry.file_name().to_string_lossy().to_string();
+        if !filename.starts_with("events_")
+            || (!filename.ends_with(".jsonl") && !filename.ends_with(".jsonl.gz"))
+        {
+            continue;
+        }
+
+        let meta = entry.metadata().map_err(|e| AppError::EventStore {
+            message: format!("ファイルメタデータの取得に失敗: {}", e),
+        })?;
+
+        let checksum_filename = format!("{}.sha256", filename);
+        let checksum_path = dir.join(&checksum_filename);
+        let checksum = std::fs::read_to_string(&checksum_path)
+            .ok()
+            .and_then(|content| content.split_whitespace().next().map(|s| s.to_string()));
+
+        archives.push(ArchiveInfo {
+            filename,
+            size: meta.len(),
+            checksum,
+        });
+    }
+
+    archives.sort_by(|a, b| a.filename.cmp(&b.filename));
+    Ok(archives)
+}
+
+/// アーカイブファイルからイベントを復元する
+pub fn restore_archive(
+    db_path: &str,
+    archive_dir: &str,
+    archive_filename: &str,
+) -> Result<usize, AppError> {
+    let filepath = std::path::Path::new(archive_dir).join(archive_filename);
+    if !filepath.exists() {
+        return Err(AppError::EventStore {
+            message: format!("アーカイブファイルが見つかりません: {}", filepath.display()),
+        });
+    }
+
+    let conn = Connection::open(db_path).map_err(|e| AppError::EventStore {
+        message: format!("データベースを開けません ({}): {}", db_path, e),
+    })?;
+    init_database(&conn)?;
+
+    let file = std::fs::File::open(&filepath).map_err(|e| AppError::EventStore {
+        message: format!(
+            "アーカイブファイルを開けません ({}): {}",
+            filepath.display(),
+            e
+        ),
+    })?;
+
+    let compressed = archive_filename.ends_with(".gz");
+    let reader: Box<dyn BufRead> = if compressed {
+        Box::new(BufReader::new(GzDecoder::new(file)))
+    } else {
+        Box::new(BufReader::new(file))
+    };
+
+    let mut count = 0;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| AppError::EventStore {
+            message: format!("トランザクション開始に失敗: {}", e),
+        })?;
+
+    {
+        let mut stmt = tx
+            .prepare_cached(
+                "INSERT OR IGNORE INTO security_events \
+                 (timestamp, severity, source_module, event_type, message, details, acknowledged) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )
+            .map_err(|e| AppError::EventStore {
+                message: format!("INSERT 文の準備に失敗: {}", e),
+            })?;
+
+        for line in reader.lines() {
+            let line = line.map_err(|e| AppError::EventStore {
+                message: format!("行の読み取りに失敗: {}", e),
+            })?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let record: EventRecord =
+                serde_json::from_str(&line).map_err(|e| AppError::EventStore {
+                    message: format!("JSON デシリアライズに失敗: {}", e),
+                })?;
+
+            stmt.execute(params![
+                record.timestamp,
+                record.severity,
+                record.source_module,
+                record.event_type,
+                record.message,
+                record.details,
+                record.acknowledged,
+            ])
+            .map_err(|e| AppError::EventStore {
+                message: format!("イベント挿入に失敗: {}", e),
+            })?;
+            count += 1;
+        }
+    }
+
+    tx.commit().map_err(|e| AppError::EventStore {
+        message: format!("コミットに失敗: {}", e),
+    })?;
+
+    Ok(count)
+}
+
+/// 手動アーカイブ実行（CLI 用）
+pub fn run_archive_manual(
+    db_path: &str,
+    archive_after_days: u64,
+    archive_dir: &str,
+    compress: bool,
+) -> Result<usize, AppError> {
+    let conn = Connection::open(db_path).map_err(|e| AppError::EventStore {
+        message: format!("データベースを開けません ({}): {}", db_path, e),
+    })?;
+    let conn = Arc::new(StdMutex::new(conn));
+    archive_events_blocking(&conn, archive_after_days, archive_dir, compress)
 }
 
 /// イベント検索クエリ条件
@@ -590,7 +1039,7 @@ pub struct EventQuery {
 }
 
 /// 検索結果のイベントレコード
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, serde::Deserialize)]
 pub struct EventRecord {
     /// レコード ID
     pub id: i64,
@@ -1442,6 +1891,11 @@ mod tests {
             cleanup_interval_hours: 24,
             retention_days_critical: 365,
             max_storage_mb: 0,
+            archive_enabled: false,
+            archive_after_days: 30,
+            archive_dir: "/tmp/zettai-test-archive".to_string(),
+            archive_interval_hours: 24,
+            archive_compress: true,
         }
     }
 
@@ -1553,6 +2007,11 @@ mod tests {
             cleanup_interval_hours: 12,
             retention_days_critical: 180,
             max_storage_mb: 500,
+            archive_enabled: true,
+            archive_after_days: 7,
+            archive_dir: "/tmp/archive".to_string(),
+            archive_interval_hours: 12,
+            archive_compress: false,
         };
         let runtime = EventStoreRuntimeConfig::from(&config);
         assert_eq!(runtime.retention_days, 30);
@@ -1561,6 +2020,11 @@ mod tests {
         assert_eq!(runtime.batch_size, 50);
         assert_eq!(runtime.batch_interval_secs, 10);
         assert_eq!(runtime.cleanup_interval_hours, 12);
+        assert_eq!(runtime.archive_enabled, true);
+        assert_eq!(runtime.archive_after_days, 7);
+        assert_eq!(runtime.archive_dir, "/tmp/archive");
+        assert_eq!(runtime.archive_interval_hours, 12);
+        assert_eq!(runtime.archive_compress, false);
     }
 
     #[tokio::test]
@@ -1575,6 +2039,7 @@ mod tests {
             cleanup_interval_hours: 24,
             retention_days_critical: 365,
             max_storage_mb: 0,
+            ..Default::default()
         };
         let (store, _sender) = EventStore::new_in_memory(&bus, &config).unwrap();
         let conn = Arc::clone(&store.conn);
@@ -1612,11 +2077,12 @@ mod tests {
             enabled: true,
             database_path: String::new(),
             retention_days: 90,
-            batch_size: 100, // 大きいバッチサイズ
+            batch_size: 100,
             batch_interval_secs: 1,
             cleanup_interval_hours: 24,
             retention_days_critical: 365,
             max_storage_mb: 0,
+            ..Default::default()
         };
         let (store, _sender) = EventStore::new_in_memory(&bus, &config).unwrap();
         let conn = Arc::clone(&store.conn);
@@ -1656,6 +2122,11 @@ mod tests {
             batch_size: 50,
             batch_interval_secs: 10,
             cleanup_interval_hours: 12,
+            archive_enabled: false,
+            archive_after_days: 30,
+            archive_dir: "/tmp/archive".to_string(),
+            archive_interval_hours: 24,
+            archive_compress: true,
         };
         sender.send(new_config).unwrap();
 
@@ -2578,5 +3049,158 @@ mod tests {
         let (count, sample) = count_by_ids(&conn, &ids).unwrap();
         assert_eq!(count, 20);
         assert!(sample.len() <= 10);
+    }
+
+    #[test]
+    fn test_format_date_from_epoch() {
+        assert_eq!(format_date_from_epoch(0), "19700101");
+        assert_eq!(format_date_from_epoch(1704067200), "20240101");
+        assert_eq!(format_date_from_epoch(1672531200), "20230101");
+    }
+
+    #[test]
+    fn test_archive_and_restore_compressed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let archive_dir = dir.path().join("archive");
+
+        let conn = Connection::open(&db_path).unwrap();
+        init_database(&conn).unwrap();
+
+        let old_ts = 1000i64;
+        for i in 0..5 {
+            conn.execute(
+                "INSERT INTO security_events (timestamp, severity, source_module, event_type, message) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![old_ts + i, "INFO", "test_mod", "test_event", format!("message {}", i)],
+            ).unwrap();
+        }
+        let recent_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        conn.execute(
+            "INSERT INTO security_events (timestamp, severity, source_module, event_type, message) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![recent_ts, "WARNING", "test_mod", "test_event", "recent event"],
+        ).unwrap();
+        drop(conn);
+
+        let count = run_archive_manual(
+            db_path.to_str().unwrap(),
+            1,
+            archive_dir.to_str().unwrap(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(count, 5);
+
+        let conn = Connection::open(&db_path).unwrap();
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM security_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 1);
+        drop(conn);
+
+        let archives = list_archives(archive_dir.to_str().unwrap()).unwrap();
+        assert_eq!(archives.len(), 1);
+        assert!(archives[0].filename.ends_with(".jsonl.gz"));
+        assert!(archives[0].checksum.is_some());
+
+        let restored = restore_archive(
+            db_path.to_str().unwrap(),
+            archive_dir.to_str().unwrap(),
+            &archives[0].filename,
+        )
+        .unwrap();
+        assert_eq!(restored, 5);
+
+        let conn = Connection::open(&db_path).unwrap();
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM security_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, 6);
+    }
+
+    #[test]
+    fn test_archive_uncompressed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let archive_dir = dir.path().join("archive");
+
+        let conn = Connection::open(&db_path).unwrap();
+        init_database(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO security_events (timestamp, severity, source_module, event_type, message) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![100i64, "CRITICAL", "test_mod", "critical_event", "critical message"],
+        ).unwrap();
+        drop(conn);
+
+        let count = run_archive_manual(
+            db_path.to_str().unwrap(),
+            1,
+            archive_dir.to_str().unwrap(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(count, 1);
+
+        let archives = list_archives(archive_dir.to_str().unwrap()).unwrap();
+        assert_eq!(archives.len(), 1);
+        assert!(archives[0].filename.ends_with(".jsonl"));
+        assert!(!archives[0].filename.ends_with(".jsonl.gz"));
+    }
+
+    #[test]
+    fn test_archive_no_old_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let archive_dir = dir.path().join("archive");
+
+        let conn = Connection::open(&db_path).unwrap();
+        init_database(&conn).unwrap();
+
+        let recent_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        conn.execute(
+            "INSERT INTO security_events (timestamp, severity, source_module, event_type, message) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![recent_ts, "INFO", "test_mod", "test_event", "recent"],
+        ).unwrap();
+        drop(conn);
+
+        let count = run_archive_manual(
+            db_path.to_str().unwrap(),
+            1,
+            archive_dir.to_str().unwrap(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_list_archives_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let archives = list_archives(dir.path().to_str().unwrap()).unwrap();
+        assert!(archives.is_empty());
+    }
+
+    #[test]
+    fn test_list_archives_nonexistent_dir() {
+        let archives = list_archives("/nonexistent/path").unwrap();
+        assert!(archives.is_empty());
+    }
+
+    #[test]
+    fn test_restore_nonexistent_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let result = restore_archive(
+            db_path.to_str().unwrap(),
+            dir.path().to_str().unwrap(),
+            "nonexistent.jsonl.gz",
+        );
+        assert!(result.is_err());
     }
 }
