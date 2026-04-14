@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -195,6 +195,7 @@ pub struct ApiServer {
     batch_max_size: u32,
     max_request_body_size: usize,
     shared_scoring: Option<Arc<StdMutex<SharedSecurityScore>>>,
+    access_log: Arc<AtomicBool>,
 }
 
 fn is_dry_run(query_params: &HashMap<String, String>) -> bool {
@@ -248,12 +249,18 @@ impl ApiServer {
             batch_max_size: config.batch_max_size,
             max_request_body_size: config.max_request_body_size,
             shared_scoring,
+            access_log: Arc::new(AtomicBool::new(config.access_log)),
         }
     }
 
     /// キャンセルトークンを取得する
     pub fn cancel_token(&self) -> CancellationToken {
         self.cancel_token.clone()
+    }
+
+    /// アクセスログフラグの共有参照を取得する（ホットリロード用）
+    pub fn access_log_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.access_log)
     }
 
     /// API サーバーを非同期タスクとして起動する
@@ -283,6 +290,7 @@ impl ApiServer {
         let batch_max_size = self.batch_max_size;
         let max_request_body_size = self.max_request_body_size;
         let shared_scoring = self.shared_scoring;
+        let access_log = self.access_log;
 
         // クリーンアップタスク
         if self.rate_limit_config.enabled {
@@ -335,12 +343,13 @@ impl ApiServer {
                                 let bms = batch_max_size;
                                 let mrbs = max_request_body_size;
                                 let scoring = shared_scoring.clone();
+                                let al = Arc::clone(&access_log);
                                 tokio::spawn(async move {
                                     if let Err(e) = Self::handle_connection(
                                         stream, &names, &metrics, &restarts,
                                         started, &db_path, &cfg_path, &sender, &toks,
                                         client_ip, &rl, &eb, &wsc, &wsc_count, &cors,
-                                        oa_enabled, dps, mps, bms, mrbs, &scoring,
+                                        oa_enabled, dps, mps, bms, mrbs, &scoring, &al,
                                     ).await {
                                         tracing::debug!(error = %e, "API 接続の処理に失敗");
                                     }
@@ -505,7 +514,10 @@ impl ApiServer {
         batch_max_size: u32,
         max_request_body_size: usize,
         shared_scoring: &Option<Arc<StdMutex<SharedSecurityScore>>>,
+        access_log: &Arc<AtomicBool>,
     ) -> Result<(), io::Error> {
+        let request_start = Instant::now();
+
         // 接続タイムアウト（スローロリス対策）
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
@@ -522,6 +534,18 @@ impl ApiServer {
         };
 
         let (method, path, query_params) = Self::parse_request(&raw);
+
+        let access_log_enabled = access_log.load(Ordering::Relaxed);
+        let method_str = match &method {
+            HttpMethod::Get => "GET",
+            HttpMethod::Post => "POST",
+            HttpMethod::Options => "OPTIONS",
+            HttpMethod::Other => "OTHER",
+        };
+        let user_agent = Self::extract_header(&raw, "user-agent").unwrap_or_default();
+        let request_size: u64 = Self::extract_header(&raw, "content-length")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
 
         // CORS ヘッダーの構築（全レスポンスに付与するため先に計算）
         let origin = Self::extract_header(&raw, "origin");
@@ -562,6 +586,18 @@ impl ApiServer {
                 body
             );
             stream.write_all(response.as_bytes()).await?;
+            if access_log_enabled {
+                Self::log_access(
+                    method_str,
+                    &path,
+                    429,
+                    request_start,
+                    client_ip,
+                    user_agent,
+                    request_size,
+                    body.len() as u64,
+                );
+            }
             stream.shutdown().await?;
             return Ok(());
         }
@@ -597,6 +633,18 @@ impl ApiServer {
                 extra_fmt
             );
             stream.write_all(response.as_bytes()).await?;
+            if access_log_enabled {
+                Self::log_access(
+                    method_str,
+                    &path,
+                    204,
+                    request_start,
+                    client_ip,
+                    user_agent,
+                    request_size,
+                    0,
+                );
+            }
             stream.shutdown().await?;
             return Ok(());
         }
@@ -615,6 +663,7 @@ impl ApiServer {
                             path = %path,
                             "API 認可失敗: 権限不足"
                         );
+                        let err_body = r#"{"error":"権限が不足しています"}"#;
                         Self::send_error_with_headers(
                             &mut stream,
                             403,
@@ -623,11 +672,24 @@ impl ApiServer {
                             combined_extra.as_deref(),
                         )
                         .await?;
+                        if access_log_enabled {
+                            Self::log_access(
+                                method_str,
+                                &path,
+                                403,
+                                request_start,
+                                client_ip,
+                                user_agent,
+                                request_size,
+                                err_body.len() as u64,
+                            );
+                        }
                         stream.shutdown().await?;
                         return Ok(());
                     }
                 }
                 AuthResult::Unauthorized => {
+                    let err_body = r#"{"error":"認証が必要です"}"#;
                     Self::send_error_with_headers(
                         &mut stream,
                         401,
@@ -636,6 +698,18 @@ impl ApiServer {
                         combined_extra.as_deref(),
                     )
                     .await?;
+                    if access_log_enabled {
+                        Self::log_access(
+                            method_str,
+                            &path,
+                            401,
+                            request_start,
+                            client_ip,
+                            user_agent,
+                            request_size,
+                            err_body.len() as u64,
+                        );
+                    }
                     stream.shutdown().await?;
                     return Ok(());
                 }
@@ -657,6 +731,10 @@ impl ApiServer {
         }
 
         let extra = combined_extra.as_deref();
+        #[allow(unused_assignments)]
+        let mut resp_status: u16 = 200;
+        #[allow(unused_assignments)]
+        let mut resp_size: u64 = 0;
         match (&method, path.as_str()) {
             (HttpMethod::Get, "/api/v1/health") => {
                 let cors_only = if cors_headers_for_health.is_empty() {
@@ -664,6 +742,8 @@ impl ApiServer {
                 } else {
                     Some(cors_headers_for_health.as_str())
                 };
+                resp_status = 200;
+                resp_size = r#"{"status":"ok"}"#.len() as u64;
                 Self::send_json_response_with_headers(
                     &mut stream,
                     200,
@@ -680,11 +760,15 @@ impl ApiServer {
                     shared_module_restarts,
                     started_at,
                 );
+                resp_status = 200;
+                resp_size = body.len() as u64;
                 Self::send_json_response_with_headers(&mut stream, 200, "OK", &body, extra).await?;
             }
             (HttpMethod::Get, "/api/v1/modules") => {
                 let body =
                     Self::build_modules_response(shared_module_names, shared_module_restarts);
+                resp_status = 200;
+                resp_size = body.len() as u64;
                 Self::send_json_response_with_headers(&mut stream, 200, "OK", &body, extra).await?;
             }
             (HttpMethod::Get, "/api/v1/events") => match event_store_db_path {
@@ -695,10 +779,15 @@ impl ApiServer {
                     max_page_size,
                 ) {
                     Ok(body) => {
+                        resp_status = 200;
+                        resp_size = body.len() as u64;
                         Self::send_json_response_with_headers(&mut stream, 200, "OK", &body, extra)
                             .await?;
                     }
                     Err(e) => {
+                        let err_body = format!(r#"{{"error":"{}"}}"#, Self::escape_json_string(&e));
+                        resp_status = 500;
+                        resp_size = err_body.len() as u64;
                         Self::send_error_with_headers(
                             &mut stream,
                             500,
@@ -710,6 +799,12 @@ impl ApiServer {
                     }
                 },
                 None => {
+                    let err_body = format!(
+                        r#"{{"error":"{}"}}"#,
+                        Self::escape_json_string("イベントストアが無効です")
+                    );
+                    resp_status = 503;
+                    resp_size = err_body.len() as u64;
                     Self::send_error_with_headers(
                         &mut stream,
                         503,
@@ -728,10 +823,18 @@ impl ApiServer {
                     } else {
                         r#"{"error":"lock failed"}"#.to_string()
                     };
+                    resp_status = 200;
+                    resp_size = body.len() as u64;
                     Self::send_json_response_with_headers(&mut stream, 200, "OK", &body, extra)
                         .await?;
                 }
                 None => {
+                    let err_body = format!(
+                        r#"{{"error":"{}"}}"#,
+                        Self::escape_json_string("スコアリングが無効です")
+                    );
+                    resp_status = 503;
+                    resp_size = err_body.len() as u64;
                     Self::send_error_with_headers(
                         &mut stream,
                         503,
@@ -771,22 +874,31 @@ impl ApiServer {
                             r#"{"dry_run":true,"message":"設定ファイルパスが不明です","details":{"config_valid":false,"errors":["設定ファイルパスが指定されていません"]}}"#.to_string()
                         }
                     };
+                    resp_status = 200;
+                    resp_size = result.len() as u64;
                     Self::send_json_response_with_headers(&mut stream, 200, "OK", &result, extra)
                         .await?;
                 } else {
                     match reload_sender.try_send(()) {
                         Ok(()) => {
+                            let reload_body = r#"{"message":"リロードをトリガーしました"}"#;
+                            resp_status = 200;
+                            resp_size = reload_body.len() as u64;
                             Self::send_json_response_with_headers(
                                 &mut stream,
                                 200,
                                 "OK",
-                                r#"{"message":"リロードをトリガーしました"}"#,
+                                reload_body,
                                 extra,
                             )
                             .await?;
                         }
                         Err(e) => {
                             let msg = format!("リロードのトリガーに失敗しました: {}", e);
+                            let err_body =
+                                format!(r#"{{"error":"{}"}}"#, Self::escape_json_string(&msg));
+                            resp_status = 500;
+                            resp_size = err_body.len() as u64;
                             Self::send_error_with_headers(
                                 &mut stream,
                                 500,
@@ -810,6 +922,8 @@ impl ApiServer {
                         Ok(Ok(s)) => s,
                         Ok(Err(e)) => {
                             let msg = format!("リクエストの読み取りに失敗: {}", e);
+                            let err_body =
+                                format!(r#"{{"error":"{}"}}"#, Self::escape_json_string(&msg));
                             Self::send_error_with_headers(
                                 &mut stream,
                                 400,
@@ -818,10 +932,26 @@ impl ApiServer {
                                 extra,
                             )
                             .await?;
+                            if access_log_enabled {
+                                Self::log_access(
+                                    method_str,
+                                    &path,
+                                    400,
+                                    request_start,
+                                    client_ip,
+                                    user_agent,
+                                    request_size,
+                                    err_body.len() as u64,
+                                );
+                            }
                             stream.shutdown().await?;
                             return Ok(());
                         }
                         Err(_) => {
+                            let err_body = format!(
+                                r#"{{"error":"{}"}}"#,
+                                Self::escape_json_string("リクエストタイムアウト")
+                            );
                             Self::send_error_with_headers(
                                 &mut stream,
                                 408,
@@ -830,6 +960,18 @@ impl ApiServer {
                                 extra,
                             )
                             .await?;
+                            if access_log_enabled {
+                                Self::log_access(
+                                    method_str,
+                                    &path,
+                                    408,
+                                    request_start,
+                                    client_ip,
+                                    user_agent,
+                                    request_size,
+                                    err_body.len() as u64,
+                                );
+                            }
                             stream.shutdown().await?;
                             return Ok(());
                         }
@@ -842,6 +984,8 @@ impl ApiServer {
                         is_dry_run(&query_params),
                     ) {
                         Ok(resp) => {
+                            resp_status = 200;
+                            resp_size = resp.len() as u64;
                             Self::send_json_response_with_headers(
                                 &mut stream,
                                 200,
@@ -857,6 +1001,10 @@ impl ApiServer {
                                 500 => "Internal Server Error",
                                 _ => "Error",
                             };
+                            let err_body =
+                                format!(r#"{{"error":"{}"}}"#, Self::escape_json_string(&msg));
+                            resp_status = status;
+                            resp_size = err_body.len() as u64;
                             Self::send_error_with_headers(
                                 &mut stream,
                                 status,
@@ -869,6 +1017,12 @@ impl ApiServer {
                     }
                 }
                 None => {
+                    let err_body = format!(
+                        r#"{{"error":"{}"}}"#,
+                        Self::escape_json_string("イベントストアが無効です")
+                    );
+                    resp_status = 503;
+                    resp_size = err_body.len() as u64;
                     Self::send_error_with_headers(
                         &mut stream,
                         503,
@@ -890,6 +1044,8 @@ impl ApiServer {
                         Ok(Ok(s)) => s,
                         Ok(Err(e)) => {
                             let msg = format!("リクエストの読み取りに失敗: {}", e);
+                            let err_body =
+                                format!(r#"{{"error":"{}"}}"#, Self::escape_json_string(&msg));
                             Self::send_error_with_headers(
                                 &mut stream,
                                 400,
@@ -898,10 +1054,26 @@ impl ApiServer {
                                 extra,
                             )
                             .await?;
+                            if access_log_enabled {
+                                Self::log_access(
+                                    method_str,
+                                    &path,
+                                    400,
+                                    request_start,
+                                    client_ip,
+                                    user_agent,
+                                    request_size,
+                                    err_body.len() as u64,
+                                );
+                            }
                             stream.shutdown().await?;
                             return Ok(());
                         }
                         Err(_) => {
+                            let err_body = format!(
+                                r#"{{"error":"{}"}}"#,
+                                Self::escape_json_string("リクエストタイムアウト")
+                            );
                             Self::send_error_with_headers(
                                 &mut stream,
                                 408,
@@ -910,6 +1082,18 @@ impl ApiServer {
                                 extra,
                             )
                             .await?;
+                            if access_log_enabled {
+                                Self::log_access(
+                                    method_str,
+                                    &path,
+                                    408,
+                                    request_start,
+                                    client_ip,
+                                    user_agent,
+                                    request_size,
+                                    err_body.len() as u64,
+                                );
+                            }
                             stream.shutdown().await?;
                             return Ok(());
                         }
@@ -917,6 +1101,8 @@ impl ApiServer {
                     let body = full.split("\r\n\r\n").nth(1).unwrap_or("");
                     match Self::handle_batch_export(db_path, body, batch_max_size) {
                         Ok(resp) => {
+                            resp_status = 200;
+                            resp_size = resp.len() as u64;
                             Self::send_json_response_with_headers(
                                 &mut stream,
                                 200,
@@ -932,6 +1118,10 @@ impl ApiServer {
                                 500 => "Internal Server Error",
                                 _ => "Error",
                             };
+                            let err_body =
+                                format!(r#"{{"error":"{}"}}"#, Self::escape_json_string(&msg));
+                            resp_status = status;
+                            resp_size = err_body.len() as u64;
                             Self::send_error_with_headers(
                                 &mut stream,
                                 status,
@@ -944,6 +1134,12 @@ impl ApiServer {
                     }
                 }
                 None => {
+                    let err_body = format!(
+                        r#"{{"error":"{}"}}"#,
+                        Self::escape_json_string("イベントストアが無効です")
+                    );
+                    resp_status = 503;
+                    resp_size = err_body.len() as u64;
                     Self::send_error_with_headers(
                         &mut stream,
                         503,
@@ -965,6 +1161,8 @@ impl ApiServer {
                         Ok(Ok(s)) => s,
                         Ok(Err(e)) => {
                             let msg = format!("リクエストの読み取りに失敗: {}", e);
+                            let err_body =
+                                format!(r#"{{"error":"{}"}}"#, Self::escape_json_string(&msg));
                             Self::send_error_with_headers(
                                 &mut stream,
                                 400,
@@ -973,10 +1171,26 @@ impl ApiServer {
                                 extra,
                             )
                             .await?;
+                            if access_log_enabled {
+                                Self::log_access(
+                                    method_str,
+                                    &path,
+                                    400,
+                                    request_start,
+                                    client_ip,
+                                    user_agent,
+                                    request_size,
+                                    err_body.len() as u64,
+                                );
+                            }
                             stream.shutdown().await?;
                             return Ok(());
                         }
                         Err(_) => {
+                            let err_body = format!(
+                                r#"{{"error":"{}"}}"#,
+                                Self::escape_json_string("リクエストタイムアウト")
+                            );
                             Self::send_error_with_headers(
                                 &mut stream,
                                 408,
@@ -985,6 +1199,18 @@ impl ApiServer {
                                 extra,
                             )
                             .await?;
+                            if access_log_enabled {
+                                Self::log_access(
+                                    method_str,
+                                    &path,
+                                    408,
+                                    request_start,
+                                    client_ip,
+                                    user_agent,
+                                    request_size,
+                                    err_body.len() as u64,
+                                );
+                            }
                             stream.shutdown().await?;
                             return Ok(());
                         }
@@ -997,6 +1223,8 @@ impl ApiServer {
                         is_dry_run(&query_params),
                     ) {
                         Ok(resp) => {
+                            resp_status = 200;
+                            resp_size = resp.len() as u64;
                             Self::send_json_response_with_headers(
                                 &mut stream,
                                 200,
@@ -1012,6 +1240,10 @@ impl ApiServer {
                                 500 => "Internal Server Error",
                                 _ => "Error",
                             };
+                            let err_body =
+                                format!(r#"{{"error":"{}"}}"#, Self::escape_json_string(&msg));
+                            resp_status = status;
+                            resp_size = err_body.len() as u64;
                             Self::send_error_with_headers(
                                 &mut stream,
                                 status,
@@ -1024,6 +1256,12 @@ impl ApiServer {
                     }
                 }
                 None => {
+                    let err_body = format!(
+                        r#"{{"error":"{}"}}"#,
+                        Self::escape_json_string("イベントストアが無効です")
+                    );
+                    resp_status = 503;
+                    resp_size = err_body.len() as u64;
                     Self::send_error_with_headers(
                         &mut stream,
                         503,
@@ -1045,9 +1283,17 @@ impl ApiServer {
                     } else {
                         Some(cors_headers_for_health.as_str())
                     };
+                    resp_status = 200;
+                    resp_size = body.len() as u64;
                     Self::send_json_response_with_headers(&mut stream, 200, "OK", &body, cors_only)
                         .await?;
                 } else {
+                    let err_body = format!(
+                        r#"{{"error":"{}"}}"#,
+                        Self::escape_json_string("OpenAPI スキーマが無効です")
+                    );
+                    resp_status = 404;
+                    resp_size = err_body.len() as u64;
                     Self::send_error_with_headers(
                         &mut stream,
                         404,
@@ -1071,6 +1317,12 @@ impl ApiServer {
                         | "/api/v1/events/batch/export"
                         | "/api/v1/events/batch/acknowledge"
                 ) {
+                    let err_body = format!(
+                        r#"{{"error":"{}"}}"#,
+                        Self::escape_json_string("許可されていないメソッドです")
+                    );
+                    resp_status = 405;
+                    resp_size = err_body.len() as u64;
                     Self::send_error_with_headers(
                         &mut stream,
                         405,
@@ -1080,6 +1332,12 @@ impl ApiServer {
                     )
                     .await?;
                 } else {
+                    let err_body = format!(
+                        r#"{{"error":"{}"}}"#,
+                        Self::escape_json_string("エンドポイントが見つかりません")
+                    );
+                    resp_status = 404;
+                    resp_size = err_body.len() as u64;
                     Self::send_error_with_headers(
                         &mut stream,
                         404,
@@ -1099,6 +1357,12 @@ impl ApiServer {
                         | "/api/v1/events"
                         | "/api/v1/openapi.json"
                 ) {
+                    let err_body = format!(
+                        r#"{{"error":"{}"}}"#,
+                        Self::escape_json_string("許可されていないメソッドです")
+                    );
+                    resp_status = 405;
+                    resp_size = err_body.len() as u64;
                     Self::send_error_with_headers(
                         &mut stream,
                         405,
@@ -1108,6 +1372,12 @@ impl ApiServer {
                     )
                     .await?;
                 } else {
+                    let err_body = format!(
+                        r#"{{"error":"{}"}}"#,
+                        Self::escape_json_string("エンドポイントが見つかりません")
+                    );
+                    resp_status = 404;
+                    resp_size = err_body.len() as u64;
                     Self::send_error_with_headers(
                         &mut stream,
                         404,
@@ -1120,8 +1390,77 @@ impl ApiServer {
             }
         }
 
+        if access_log_enabled {
+            Self::log_access(
+                method_str,
+                &path,
+                resp_status,
+                request_start,
+                client_ip,
+                user_agent,
+                request_size,
+                resp_size,
+            );
+        }
+
         stream.shutdown().await?;
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn log_access(
+        method_str: &str,
+        path: &str,
+        status_code: u16,
+        request_start: Instant,
+        client_ip: IpAddr,
+        user_agent: &str,
+        request_size: u64,
+        response_size: u64,
+    ) {
+        let response_time_ms = request_start.elapsed().as_secs_f64() * 1000.0;
+        let response_time_str = format!("{:.2}", response_time_ms);
+        let client_ip_str = client_ip.to_string();
+        if status_code >= 500 {
+            tracing::error!(
+                target: "api::access",
+                http_method = %method_str,
+                http_path = %path,
+                http_status_code = status_code,
+                http_response_time_ms = %response_time_str,
+                http_client_ip = %client_ip_str,
+                http_user_agent = %user_agent,
+                http_request_size = request_size,
+                http_response_size = response_size,
+                "API リクエスト"
+            );
+        } else if status_code >= 400 {
+            tracing::warn!(
+                target: "api::access",
+                http_method = %method_str,
+                http_path = %path,
+                http_status_code = status_code,
+                http_response_time_ms = %response_time_str,
+                http_client_ip = %client_ip_str,
+                http_user_agent = %user_agent,
+                http_request_size = request_size,
+                http_response_size = response_size,
+                "API リクエスト"
+            );
+        } else {
+            tracing::info!(
+                target: "api::access",
+                http_method = %method_str,
+                http_path = %path,
+                http_status_code = status_code,
+                http_response_time_ms = %response_time_str,
+                http_client_ip = %client_ip_str,
+                http_user_agent = %user_agent,
+                http_request_size = request_size,
+                http_response_size = response_size,
+                "API リクエスト"
+            );
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2191,6 +2530,7 @@ mod tests {
             max_page_size: 200,
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
+            access_log: true,
         };
         let server = ApiServer::new(
             &config,
@@ -2248,6 +2588,7 @@ mod tests {
             max_page_size: 200,
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
+            access_log: true,
         };
         let modules = Arc::new(StdMutex::new(vec!["test_module".to_string()]));
         let metrics = Arc::new(StdMutex::new(SharedMetrics {
@@ -2315,6 +2656,7 @@ mod tests {
             max_page_size: 200,
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
+            access_log: true,
         };
         let modules = Arc::new(StdMutex::new(vec![
             "mod_a".to_string(),
@@ -2381,6 +2723,7 @@ mod tests {
             max_page_size: 200,
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
+            access_log: true,
         };
         let server = ApiServer::new(
             &config,
@@ -2442,6 +2785,7 @@ mod tests {
             max_page_size: 200,
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
+            access_log: true,
         };
         let server = ApiServer::new(
             &config,
@@ -2499,6 +2843,7 @@ mod tests {
             max_page_size: 200,
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
+            access_log: true,
         };
         let server = ApiServer::new(
             &config,
@@ -2556,6 +2901,7 @@ mod tests {
             max_page_size: 200,
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
+            access_log: true,
         };
         let server = ApiServer::new(
             &config,
@@ -2701,6 +3047,7 @@ mod tests {
             max_page_size: 200,
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
+            access_log: true,
         };
         let server = ApiServer::new(
             &config,
@@ -2882,6 +3229,7 @@ mod tests {
             max_page_size: 200,
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
+            access_log: true,
         };
         let server = ApiServer::new(
             &config,
@@ -3344,6 +3692,7 @@ mod tests {
             max_page_size: 200,
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
+            access_log: true,
         };
         let server = ApiServer::new(
             &config,
@@ -3574,6 +3923,7 @@ mod tests {
             max_page_size: 200,
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
+            access_log: true,
         };
         let server = ApiServer::new(
             &config,
@@ -3640,6 +3990,7 @@ mod tests {
             max_page_size: 200,
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
+            access_log: true,
         };
         let server = ApiServer::new(
             &config,
@@ -3705,6 +4056,7 @@ mod tests {
             max_page_size: 200,
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
+            access_log: true,
         };
         let server = ApiServer::new(
             &config,
@@ -3766,6 +4118,7 @@ mod tests {
             max_page_size: 200,
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
+            access_log: true,
         };
         let server = ApiServer::new(
             &config,
@@ -3824,6 +4177,7 @@ mod tests {
             max_page_size: 200,
             batch_max_size: 1000,
             max_request_body_size: 1_048_576,
+            access_log: true,
         };
         let server = ApiServer::new(
             &config,
@@ -3972,5 +4326,47 @@ mod tests {
             ApiServer::required_role(&HttpMethod::Post, "/api/v1/events/batch/acknowledge"),
             Some(ApiRole::Admin)
         );
+    }
+
+    #[test]
+    fn test_access_log_flag() {
+        let config = ApiConfig {
+            enabled: true,
+            bind_address: "127.0.0.1".to_string(),
+            port: 0,
+            tokens: vec![],
+            rate_limit: ApiRateLimitConfig::default(),
+            websocket: WebSocketConfig::default(),
+            cors: CorsConfig::default(),
+            openapi_enabled: true,
+            default_page_size: 50,
+            max_page_size: 200,
+            batch_max_size: 1000,
+            max_request_body_size: 1_048_576,
+            access_log: false,
+        };
+        let server = ApiServer::new(
+            &config,
+            Arc::new(StdMutex::new(Vec::new())),
+            None,
+            Arc::new(StdMutex::new(HashMap::new())),
+            Instant::now(),
+            None,
+            None,
+            tokio::sync::mpsc::channel(1).0,
+            None,
+            None,
+        );
+        let flag = server.access_log_flag();
+        assert!(!flag.load(Ordering::Relaxed));
+
+        flag.store(true, Ordering::Relaxed);
+        assert!(server.access_log_flag().load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_access_log_default_true() {
+        let config = ApiConfig::default();
+        assert!(config.access_log);
     }
 }

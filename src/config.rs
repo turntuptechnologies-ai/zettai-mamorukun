@@ -6194,6 +6194,10 @@ pub struct ApiConfig {
     /// リクエストボディの最大サイズ（バイト）
     #[serde(default = "ApiConfig::default_max_request_body_size")]
     pub max_request_body_size: usize,
+
+    /// アクセスログの有効/無効
+    #[serde(default = "ApiConfig::default_access_log")]
+    pub access_log: bool,
 }
 
 impl ApiConfig {
@@ -6224,6 +6228,10 @@ impl ApiConfig {
     fn default_max_request_body_size() -> usize {
         1_048_576
     }
+
+    fn default_access_log() -> bool {
+        true
+    }
 }
 
 impl Default for ApiConfig {
@@ -6241,6 +6249,7 @@ impl Default for ApiConfig {
             max_page_size: Self::default_max_page_size(),
             batch_max_size: Self::default_batch_max_size(),
             max_request_body_size: Self::default_max_request_body_size(),
+            access_log: Self::default_access_log(),
         }
     }
 }
@@ -6260,6 +6269,7 @@ impl Clone for ApiConfig {
             max_page_size: self.max_page_size,
             batch_max_size: self.batch_max_size,
             max_request_body_size: self.max_request_body_size,
+            access_log: self.access_log,
         }
     }
 }
