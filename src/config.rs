@@ -6144,6 +6144,43 @@ impl Default for WebSocketConfig {
     }
 }
 
+/// REST API mTLS（クライアント証明書認証）設定
+///
+/// REST API の TLS 設定にネストする形で mTLS を構成する。
+/// Syslog モジュールではフラット構造（`client_ca_file` 等が直接 TLS 設定に並ぶ）だが、
+/// REST API では TLS 自体がオプショナルなサブテーブルであるため、
+/// mTLS をさらにネストすることで設定の階層構造を明確にしている。
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct ApiMtlsConfig {
+    /// mTLS の有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// クライアント CA 証明書ファイルのパス（PEM 形式）
+    #[serde(default)]
+    pub client_ca_file: String,
+
+    /// クライアント認証モード（"required" または "optional"）
+    #[serde(default = "ApiMtlsConfig::default_client_auth_mode")]
+    pub client_auth_mode: String,
+}
+
+impl ApiMtlsConfig {
+    fn default_client_auth_mode() -> String {
+        "required".to_string()
+    }
+}
+
+impl Default for ApiMtlsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            client_ca_file: String::new(),
+            client_auth_mode: Self::default_client_auth_mode(),
+        }
+    }
+}
+
 /// REST API TLS 設定
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct ApiTlsConfig {
@@ -6158,6 +6195,10 @@ pub struct ApiTlsConfig {
     /// 秘密鍵ファイルのパス（PEM 形式）
     #[serde(default)]
     pub key_file: String,
+
+    /// mTLS（クライアント証明書認証）設定
+    #[serde(default)]
+    pub mtls: ApiMtlsConfig,
 }
 
 /// REST API サーバー設定
