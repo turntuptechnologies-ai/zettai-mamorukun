@@ -231,24 +231,38 @@ fn reload_path() -> Value {
     json!({
         "post": {
             "summary": "設定リロード",
-            "description": "設定ファイルを再読み込みし、変更のあったモジュールを再起動する。admin ロールが必要。",
+            "description": "設定ファイルを再読み込みし、変更のあったモジュールを再起動する。admin ロールが必要。dry_run=true で設定ファイルのバリデーションのみ実行する。",
             "operationId": "postReload",
             "tags": ["system"],
             "security": [{"BearerAuth": []}],
+            "parameters": [
+                {
+                    "name": "dry_run",
+                    "in": "query",
+                    "required": false,
+                    "schema": { "type": "boolean", "default": false },
+                    "description": "true の場合、実際のリロードを行わず設定ファイルのバリデーション結果のみ返す"
+                }
+            ],
             "responses": {
                 "200": {
-                    "description": "リロード成功",
+                    "description": "リロード成功または dry-run 結果",
                     "content": {
                         "application/json": {
                             "schema": {
-                                "type": "object",
-                                "properties": {
-                                    "message": {
-                                        "type": "string",
-                                        "example": "リロードをトリガーしました"
-                                    }
-                                },
-                                "required": ["message"]
+                                "oneOf": [
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "message": {
+                                                "type": "string",
+                                                "example": "リロードをトリガーしました"
+                                            }
+                                        },
+                                        "required": ["message"]
+                                    },
+                                    { "$ref": "#/components/schemas/DryRunReloadResponse" }
+                                ]
                             }
                         }
                     }
@@ -363,10 +377,19 @@ fn batch_delete_path() -> Value {
     json!({
         "post": {
             "summary": "イベント一括削除",
-            "description": "ID 指定またはフィルタ条件でイベントを一括削除する。admin ロールが必要。",
+            "description": "ID 指定またはフィルタ条件でイベントを一括削除する。admin ロールが必要。dry_run=true で影響範囲のみ確認する。",
             "operationId": "postBatchDelete",
             "tags": ["events"],
             "security": [{"BearerAuth": []}],
+            "parameters": [
+                {
+                    "name": "dry_run",
+                    "in": "query",
+                    "required": false,
+                    "schema": { "type": "boolean", "default": false },
+                    "description": "true の場合、実際の削除を行わず影響範囲のみ返す"
+                }
+            ],
             "requestBody": {
                 "required": true,
                 "content": {
@@ -377,10 +400,15 @@ fn batch_delete_path() -> Value {
             },
             "responses": {
                 "200": {
-                    "description": "削除成功",
+                    "description": "削除成功または dry-run 結果",
                     "content": {
                         "application/json": {
-                            "schema": { "$ref": "#/components/schemas/BatchDeleteResponse" }
+                            "schema": {
+                                "oneOf": [
+                                    { "$ref": "#/components/schemas/BatchDeleteResponse" },
+                                    { "$ref": "#/components/schemas/DryRunBatchResponse" }
+                                ]
+                            }
                         }
                     }
                 },
@@ -445,10 +473,19 @@ fn batch_acknowledge_path() -> Value {
     json!({
         "post": {
             "summary": "イベント一括確認済みマーク",
-            "description": "ID 指定でイベントを一括確認済みにする。admin ロールが必要。",
+            "description": "ID 指定でイベントを一括確認済みにする。admin ロールが必要。dry_run=true で影響範囲のみ確認する。",
             "operationId": "postBatchAcknowledge",
             "tags": ["events"],
             "security": [{"BearerAuth": []}],
+            "parameters": [
+                {
+                    "name": "dry_run",
+                    "in": "query",
+                    "required": false,
+                    "schema": { "type": "boolean", "default": false },
+                    "description": "true の場合、実際の確認済みマークを行わず影響範囲のみ返す"
+                }
+            ],
             "requestBody": {
                 "required": true,
                 "content": {
@@ -459,10 +496,15 @@ fn batch_acknowledge_path() -> Value {
             },
             "responses": {
                 "200": {
-                    "description": "確認済みマーク成功",
+                    "description": "確認済みマーク成功または dry-run 結果",
                     "content": {
                         "application/json": {
-                            "schema": { "$ref": "#/components/schemas/BatchAcknowledgeResponse" }
+                            "schema": {
+                                "oneOf": [
+                                    { "$ref": "#/components/schemas/BatchAcknowledgeResponse" },
+                                    { "$ref": "#/components/schemas/DryRunBatchResponse" }
+                                ]
+                            }
                         }
                     }
                 },
@@ -799,6 +841,64 @@ fn component_schemas() -> Value {
                 }
             },
             "required": ["acknowledged"]
+        },
+        "DryRunBatchResponse": {
+            "type": "object",
+            "description": "バッチ操作の dry-run レスポンス（削除・確認済みマーク共通）",
+            "properties": {
+                "dry_run": {
+                    "type": "boolean",
+                    "enum": [true],
+                    "description": "dry-run モードであることを示すフラグ"
+                },
+                "affected_count": {
+                    "type": "integer",
+                    "description": "影響を受けるイベント件数"
+                },
+                "details": {
+                    "type": "object",
+                    "properties": {
+                        "sample_ids": {
+                            "type": "array",
+                            "items": { "type": "integer", "format": "int64" },
+                            "description": "影響を受けるイベント ID のサンプル（最大10件）"
+                        }
+                    },
+                    "required": ["sample_ids"]
+                }
+            },
+            "required": ["dry_run", "affected_count", "details"]
+        },
+        "DryRunReloadResponse": {
+            "type": "object",
+            "description": "リロード dry-run レスポンス（設定ファイルバリデーション結果）",
+            "properties": {
+                "dry_run": {
+                    "type": "boolean",
+                    "enum": [true],
+                    "description": "dry-run モードであることを示すフラグ"
+                },
+                "message": {
+                    "type": "string",
+                    "description": "バリデーション結果メッセージ"
+                },
+                "details": {
+                    "type": "object",
+                    "properties": {
+                        "config_valid": {
+                            "type": "boolean",
+                            "description": "設定ファイルが有効かどうか"
+                        },
+                        "errors": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "バリデーションエラーの一覧（有効な場合は空配列）"
+                        }
+                    },
+                    "required": ["config_valid", "errors"]
+                }
+            },
+            "required": ["dry_run", "message", "details"]
         },
         "SecurityScore": {
             "type": "object",

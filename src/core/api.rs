@@ -179,6 +179,7 @@ pub struct ApiServer {
     shared_module_restarts: Arc<StdMutex<HashMap<String, u32>>>,
     started_at: Instant,
     event_store_db_path: Option<String>,
+    config_path: Option<String>,
     reload_sender: mpsc::Sender<()>,
     cancel_token: CancellationToken,
     tokens: Arc<StdMutex<Vec<ApiTokenConfig>>>,
@@ -196,6 +197,13 @@ pub struct ApiServer {
     shared_scoring: Option<Arc<StdMutex<SharedSecurityScore>>>,
 }
 
+fn is_dry_run(query_params: &HashMap<String, String>) -> bool {
+    query_params
+        .get("dry_run")
+        .map(|v| v == "true")
+        .unwrap_or(false)
+}
+
 impl ApiServer {
     /// 新しい ApiServer を作成する
     #[allow(clippy::too_many_arguments)]
@@ -206,6 +214,7 @@ impl ApiServer {
         shared_module_restarts: Arc<StdMutex<HashMap<String, u32>>>,
         started_at: Instant,
         event_store_db_path: Option<String>,
+        config_path: Option<String>,
         reload_sender: mpsc::Sender<()>,
         event_bus: Option<broadcast::Sender<SecurityEvent>>,
         shared_scoring: Option<Arc<StdMutex<SharedSecurityScore>>>,
@@ -223,6 +232,7 @@ impl ApiServer {
             shared_module_restarts,
             started_at,
             event_store_db_path,
+            config_path,
             reload_sender,
             cancel_token: CancellationToken::new(),
             tokens: Arc::new(StdMutex::new(config.tokens.clone())),
@@ -258,6 +268,7 @@ impl ApiServer {
         let shared_module_restarts = self.shared_module_restarts;
         let started_at = self.started_at;
         let event_store_db_path = self.event_store_db_path;
+        let config_path = self.config_path;
         let reload_sender = self.reload_sender;
         let cancel_token = self.cancel_token;
         let tokens = self.tokens;
@@ -308,6 +319,7 @@ impl ApiServer {
                                 let metrics = shared_metrics.clone();
                                 let restarts = Arc::clone(&shared_module_restarts);
                                 let db_path = event_store_db_path.clone();
+                                let cfg_path = config_path.clone();
                                 let sender = reload_sender.clone();
                                 let started = started_at;
                                 let toks = Arc::clone(&tokens);
@@ -326,7 +338,7 @@ impl ApiServer {
                                 tokio::spawn(async move {
                                     if let Err(e) = Self::handle_connection(
                                         stream, &names, &metrics, &restarts,
-                                        started, &db_path, &sender, &toks,
+                                        started, &db_path, &cfg_path, &sender, &toks,
                                         client_ip, &rl, &eb, &wsc, &wsc_count, &cors,
                                         oa_enabled, dps, mps, bms, mrbs, &scoring,
                                     ).await {
@@ -478,6 +490,7 @@ impl ApiServer {
         shared_module_restarts: &Arc<StdMutex<HashMap<String, u32>>>,
         started_at: Instant,
         event_store_db_path: &Option<String>,
+        config_path: &Option<String>,
         reload_sender: &mpsc::Sender<()>,
         tokens: &Arc<StdMutex<Vec<ApiTokenConfig>>>,
         client_ip: IpAddr,
@@ -729,29 +742,63 @@ impl ApiServer {
                     .await?;
                 }
             },
-            (HttpMethod::Post, "/api/v1/reload") => match reload_sender.try_send(()) {
-                Ok(()) => {
-                    Self::send_json_response_with_headers(
-                        &mut stream,
-                        200,
-                        "OK",
-                        r#"{"message":"リロードをトリガーしました"}"#,
-                        extra,
-                    )
-                    .await?;
+            (HttpMethod::Post, "/api/v1/reload") => {
+                if is_dry_run(&query_params) {
+                    let result = match config_path {
+                        Some(path) => {
+                            let p = std::path::Path::new(path);
+                            match crate::config::AppConfig::load(p) {
+                                Ok(config) => match config.validate() {
+                                    Ok(()) => {
+                                        r#"{"dry_run":true,"message":"設定ファイルは有効です","details":{"config_valid":true,"errors":[]}}"#.to_string()
+                                    }
+                                    Err(e) => {
+                                        format!(
+                                            r#"{{"dry_run":true,"message":"設定ファイルにエラーがあります","details":{{"config_valid":false,"errors":["{}"]}}}}"#,
+                                            Self::escape_json_string(&e.to_string())
+                                        )
+                                    }
+                                },
+                                Err(e) => {
+                                    format!(
+                                        r#"{{"dry_run":true,"message":"設定ファイルの読み込みに失敗","details":{{"config_valid":false,"errors":["{}"]}}}}"#,
+                                        Self::escape_json_string(&e.to_string())
+                                    )
+                                }
+                            }
+                        }
+                        None => {
+                            r#"{"dry_run":true,"message":"設定ファイルパスが不明です","details":{"config_valid":false,"errors":["設定ファイルパスが指定されていません"]}}"#.to_string()
+                        }
+                    };
+                    Self::send_json_response_with_headers(&mut stream, 200, "OK", &result, extra)
+                        .await?;
+                } else {
+                    match reload_sender.try_send(()) {
+                        Ok(()) => {
+                            Self::send_json_response_with_headers(
+                                &mut stream,
+                                200,
+                                "OK",
+                                r#"{"message":"リロードをトリガーしました"}"#,
+                                extra,
+                            )
+                            .await?;
+                        }
+                        Err(e) => {
+                            let msg = format!("リロードのトリガーに失敗しました: {}", e);
+                            Self::send_error_with_headers(
+                                &mut stream,
+                                500,
+                                "Internal Server Error",
+                                &msg,
+                                extra,
+                            )
+                            .await?;
+                        }
+                    }
                 }
-                Err(e) => {
-                    let msg = format!("リロードのトリガーに失敗しました: {}", e);
-                    Self::send_error_with_headers(
-                        &mut stream,
-                        500,
-                        "Internal Server Error",
-                        &msg,
-                        extra,
-                    )
-                    .await?;
-                }
-            },
+            }
             (HttpMethod::Post, "/api/v1/events/batch/delete") => match event_store_db_path {
                 Some(db_path) => {
                     let body_result = tokio::time::timeout(
@@ -788,7 +835,12 @@ impl ApiServer {
                         }
                     };
                     let body = full.split("\r\n\r\n").nth(1).unwrap_or("");
-                    match Self::handle_batch_delete(db_path, body, batch_max_size) {
+                    match Self::handle_batch_delete(
+                        db_path,
+                        body,
+                        batch_max_size,
+                        is_dry_run(&query_params),
+                    ) {
                         Ok(resp) => {
                             Self::send_json_response_with_headers(
                                 &mut stream,
@@ -938,7 +990,12 @@ impl ApiServer {
                         }
                     };
                     let body = full.split("\r\n\r\n").nth(1).unwrap_or("");
-                    match Self::handle_batch_acknowledge(db_path, body, batch_max_size) {
+                    match Self::handle_batch_acknowledge(
+                        db_path,
+                        body,
+                        batch_max_size,
+                        is_dry_run(&query_params),
+                    ) {
                         Ok(resp) => {
                             Self::send_json_response_with_headers(
                                 &mut stream,
@@ -1800,10 +1857,16 @@ impl ApiServer {
         None
     }
 
+    fn format_ids_json(ids: &[i64]) -> String {
+        let inner: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+        format!("[{}]", inner.join(","))
+    }
+
     fn handle_batch_delete(
         db_path: &str,
         body: &str,
         batch_max_size: u32,
+        dry_run: bool,
     ) -> Result<String, (u16, String)> {
         let json: serde_json::Value = serde_json::from_str(body)
             .map_err(|e| (400u16, format!("JSON パースに失敗: {}", e)))?;
@@ -1818,7 +1881,12 @@ impl ApiServer {
             return Err((400, "ids または filter を指定してください".to_string()));
         }
 
-        let conn = rusqlite::Connection::open(db_path)
+        let flags = if dry_run {
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+        } else {
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+        };
+        let conn = rusqlite::Connection::open_with_flags(db_path, flags)
             .map_err(|e| (500u16, format!("データベースのオープンに失敗: {}", e)))?;
 
         if has_ids {
@@ -1834,6 +1902,15 @@ impl ApiServer {
             let id_values: Vec<i64> = ids.iter().filter_map(|v| v.as_i64()).collect();
             if id_values.len() != ids.len() {
                 return Err((400, "ids に不正な値が含まれています".to_string()));
+            }
+            if dry_run {
+                let (count, sample_ids) = crate::core::event_store::count_by_ids(&conn, &id_values)
+                    .map_err(|e| (500u16, format!("{}", e)))?;
+                return Ok(format!(
+                    r#"{{"dry_run":true,"affected_count":{},"details":{{"sample_ids":{}}}}}"#,
+                    count,
+                    Self::format_ids_json(&sample_ids)
+                ));
             }
             let deleted = crate::core::event_store::batch_delete_by_ids(&conn, &id_values)
                 .map_err(|e| (500u16, format!("{}", e)))?;
@@ -1858,6 +1935,15 @@ impl ApiServer {
                     .and_then(|v| v.as_str())
                     .and_then(Self::parse_iso8601_to_timestamp),
             };
+            if dry_run {
+                let (count, sample_ids) = crate::core::event_store::count_by_filter(&conn, &filter)
+                    .map_err(|e| (500u16, format!("{}", e)))?;
+                return Ok(format!(
+                    r#"{{"dry_run":true,"affected_count":{},"details":{{"sample_ids":{}}}}}"#,
+                    count,
+                    Self::format_ids_json(&sample_ids)
+                ));
+            }
             let deleted = crate::core::event_store::batch_delete_by_filter(&conn, &filter)
                 .map_err(|e| (500u16, format!("{}", e)))?;
             Ok(format!(r#"{{"deleted":{}}}"#, deleted))
@@ -1950,6 +2036,7 @@ impl ApiServer {
         db_path: &str,
         body: &str,
         batch_max_size: u32,
+        dry_run: bool,
     ) -> Result<String, (u16, String)> {
         let json: serde_json::Value = serde_json::from_str(body)
             .map_err(|e| (400u16, format!("JSON パースに失敗: {}", e)))?;
@@ -1971,8 +2058,24 @@ impl ApiServer {
             return Err((400, "ids に不正な値が含まれています".to_string()));
         }
 
-        let conn = rusqlite::Connection::open(db_path)
+        let flags = if dry_run {
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+        } else {
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+        };
+        let conn = rusqlite::Connection::open_with_flags(db_path, flags)
             .map_err(|e| (500u16, format!("データベースのオープンに失敗: {}", e)))?;
+
+        if dry_run {
+            let (count, sample_ids) =
+                crate::core::event_store::count_acknowledge_targets(&conn, &id_values)
+                    .map_err(|e| (500u16, format!("{}", e)))?;
+            return Ok(format!(
+                r#"{{"dry_run":true,"affected_count":{},"details":{{"sample_ids":{}}}}}"#,
+                count,
+                Self::format_ids_json(&sample_ids)
+            ));
+        }
 
         let acknowledged = crate::core::event_store::batch_acknowledge(&conn, &id_values)
             .map_err(|e| (500u16, format!("{}", e)))?;
@@ -2096,6 +2199,7 @@ mod tests {
             Arc::new(StdMutex::new(HashMap::new())),
             Instant::now(),
             None,
+            None,
             reload_tx,
             None,
             None,
@@ -2159,6 +2263,7 @@ mod tests {
             Some(metrics),
             Arc::new(StdMutex::new(HashMap::new())),
             Instant::now(),
+            None,
             None,
             reload_tx,
             None,
@@ -2224,6 +2329,7 @@ mod tests {
             Arc::new(StdMutex::new(restarts)),
             Instant::now(),
             None,
+            None,
             reload_tx,
             None,
             None,
@@ -2282,6 +2388,7 @@ mod tests {
             None,
             Arc::new(StdMutex::new(HashMap::new())),
             Instant::now(),
+            None,
             None,
             reload_tx,
             None,
@@ -2343,6 +2450,7 @@ mod tests {
             Arc::new(StdMutex::new(HashMap::new())),
             Instant::now(),
             None, // event_store_db_path is None
+            None,
             reload_tx,
             None,
             None,
@@ -2399,6 +2507,7 @@ mod tests {
             Arc::new(StdMutex::new(HashMap::new())),
             Instant::now(),
             None,
+            None,
             reload_tx,
             None,
             None,
@@ -2454,6 +2563,7 @@ mod tests {
             None,
             Arc::new(StdMutex::new(HashMap::new())),
             Instant::now(),
+            None,
             None,
             reload_tx,
             None,
@@ -2598,6 +2708,7 @@ mod tests {
             None,
             Arc::new(StdMutex::new(HashMap::new())),
             Instant::now(),
+            None,
             None,
             reload_tx,
             None,
@@ -2778,6 +2889,7 @@ mod tests {
             None,
             Arc::new(StdMutex::new(HashMap::new())),
             Instant::now(),
+            None,
             None,
             reload_tx,
             Some(event_tx.clone()),
@@ -3240,6 +3352,7 @@ mod tests {
             Arc::new(StdMutex::new(HashMap::new())),
             Instant::now(),
             None,
+            None,
             reload_tx,
             None,
             None,
@@ -3469,6 +3582,7 @@ mod tests {
             Arc::new(StdMutex::new(HashMap::new())),
             Instant::now(),
             None,
+            None,
             reload_tx,
             None,
             None,
@@ -3534,6 +3648,7 @@ mod tests {
             Arc::new(StdMutex::new(HashMap::new())),
             Instant::now(),
             None,
+            None,
             reload_tx,
             None,
             None,
@@ -3598,6 +3713,7 @@ mod tests {
             Arc::new(StdMutex::new(HashMap::new())),
             Instant::now(),
             None,
+            None,
             reload_tx,
             None,
             None,
@@ -3658,6 +3774,7 @@ mod tests {
             Arc::new(StdMutex::new(HashMap::new())),
             Instant::now(),
             None,
+            None,
             reload_tx,
             None,
             None,
@@ -3714,6 +3831,7 @@ mod tests {
             None,
             Arc::new(StdMutex::new(HashMap::new())),
             Instant::now(),
+            None,
             None,
             reload_tx,
             None,
