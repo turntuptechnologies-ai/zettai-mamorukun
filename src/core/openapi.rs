@@ -141,6 +141,13 @@ fn events_path() -> Value {
             "security": [{"BearerAuth": []}],
             "parameters": [
                 {
+                    "name": "q",
+                    "in": "query",
+                    "description": "フルテキスト検索クエリ（FTS5 MATCH 構文。AND/OR/NOT/フレーズ検索対応）",
+                    "required": false,
+                    "schema": { "type": "string" }
+                },
+                {
                     "name": "severity",
                     "in": "query",
                     "description": "Severity でフィルタリング（info, warning, critical）",
@@ -924,8 +931,9 @@ mod tests {
         let schema = generate_openapi_schema();
         let events = &schema["paths"]["/api/v1/events"]["get"];
         let params = events["parameters"].as_array().unwrap();
-        assert_eq!(params.len(), 6);
+        assert_eq!(params.len(), 7);
         let param_names: Vec<&str> = params.iter().map(|p| p["name"].as_str().unwrap()).collect();
+        assert!(param_names.contains(&"q"));
         assert!(param_names.contains(&"severity"));
         assert!(param_names.contains(&"module"));
         assert!(param_names.contains(&"since"));

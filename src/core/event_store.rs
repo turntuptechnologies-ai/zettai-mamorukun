@@ -80,6 +80,76 @@ fn init_database(conn: &Connection) -> Result<(), AppError> {
         message: format!("テーブル作成に失敗: {}", e),
     })?;
 
+    // FTS5 仮想テーブルの作成
+    conn.execute_batch(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS security_events_fts USING fts5(
+            message,
+            details,
+            content='security_events',
+            content_rowid='id',
+            tokenize='unicode61'
+        );",
+    )
+    .map_err(|e| AppError::EventStore {
+        message: format!("FTS5 テーブル作成に失敗: {}", e),
+    })?;
+
+    // FTS5 自動同期トリガー
+    conn.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS security_events_fts_insert
+            AFTER INSERT ON security_events
+        BEGIN
+            INSERT INTO security_events_fts(rowid, message, details)
+            VALUES (new.id, new.message, new.details);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS security_events_fts_delete
+            AFTER DELETE ON security_events
+        BEGIN
+            INSERT INTO security_events_fts(security_events_fts, rowid, message, details)
+            VALUES ('delete', old.id, old.message, old.details);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS security_events_fts_update
+            AFTER UPDATE ON security_events
+        BEGIN
+            INSERT INTO security_events_fts(security_events_fts, rowid, message, details)
+            VALUES ('delete', old.id, old.message, old.details);
+            INSERT INTO security_events_fts(rowid, message, details)
+            VALUES (new.id, new.message, new.details);
+        END;",
+    )
+    .map_err(|e| AppError::EventStore {
+        message: format!("FTS5 トリガー作成に失敗: {}", e),
+    })?;
+
+    // 既存データの FTS インデックス再構築（初回のみ）
+    let fts_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM security_events_fts", [], |row| {
+            row.get(0)
+        })
+        .unwrap_or(0);
+
+    if fts_count == 0 {
+        let events_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM security_events", [], |row| row.get(0))
+            .unwrap_or(0);
+
+        if events_count > 0 {
+            conn.execute_batch(
+                "INSERT INTO security_events_fts(security_events_fts) VALUES('rebuild');",
+            )
+            .map_err(|e| AppError::EventStore {
+                message: format!("FTS5 インデックス再構築に失敗: {}", e),
+            })?;
+            tracing::info!(
+                count = events_count,
+                "FTS5 インデックスを再構築しました（{} 件）",
+                events_count
+            );
+        }
+    }
+
     let has_acknowledged = {
         let mut stmt = conn
             .prepare("PRAGMA table_info(security_events)")
@@ -515,6 +585,8 @@ pub struct EventQuery {
     pub limit: u32,
     /// ページネーションカーソル（指定した ID より古いイベントを取得）
     pub cursor: Option<i64>,
+    /// フルテキスト検索クエリ（FTS5 MATCH 構文）
+    pub text: Option<String>,
 }
 
 /// 検索結果のイベントレコード
@@ -761,47 +833,70 @@ pub fn open_readonly(db_path: &str) -> Result<Connection, AppError> {
     })
 }
 
-/// 指定された条件でイベントを検索する
+/// 指定され��条件でイベントを検索する
 pub fn query_events(conn: &Connection, query: &EventQuery) -> Result<Vec<EventRecord>, AppError> {
-    let mut sql = String::from(
-        "SELECT id, timestamp, severity, source_module, event_type, message, details, acknowledged \
-         FROM security_events WHERE 1=1",
-    );
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     let mut idx = 1;
 
+    let use_fts = query.text.is_some();
+    let mut sql = if use_fts {
+        String::from(
+            "SELECT e.id, e.timestamp, e.severity, e.source_module, e.event_type, \
+             highlight(security_events_fts, 0, '<<', '>>') AS message, e.details, e.acknowledged \
+             FROM security_events e \
+             INNER JOIN security_events_fts fts ON e.id = fts.rowid \
+             WHERE fts.security_events_fts MATCH ?1",
+        )
+    } else {
+        String::from(
+            "SELECT id, timestamp, severity, source_module, event_type, message, details, acknowledged \
+             FROM security_events WHERE 1=1",
+        )
+    };
+
+    if let Some(text) = &query.text {
+        param_values.push(Box::new(text.clone()));
+        idx += 1;
+    }
+
+    let col_prefix = if use_fts { "e." } else { "" };
+
     if let Some(cursor) = query.cursor {
-        sql.push_str(&format!(" AND id < ?{}", idx));
+        sql.push_str(&format!(" AND {}id < ?{}", col_prefix, idx));
         param_values.push(Box::new(cursor));
         idx += 1;
     }
     if let Some(module) = &query.module {
-        sql.push_str(&format!(" AND source_module = ?{}", idx));
+        sql.push_str(&format!(" AND {}source_module = ?{}", col_prefix, idx));
         param_values.push(Box::new(module.clone()));
         idx += 1;
     }
     if let Some(severity) = &query.severity {
-        sql.push_str(&format!(" AND severity = ?{}", idx));
+        sql.push_str(&format!(" AND {}severity = ?{}", col_prefix, idx));
         param_values.push(Box::new(severity.to_uppercase()));
         idx += 1;
     }
     if let Some(since) = query.since {
-        sql.push_str(&format!(" AND timestamp >= ?{}", idx));
+        sql.push_str(&format!(" AND {}timestamp >= ?{}", col_prefix, idx));
         param_values.push(Box::new(since));
         idx += 1;
     }
     if let Some(until) = query.until {
-        sql.push_str(&format!(" AND timestamp <= ?{}", idx));
+        sql.push_str(&format!(" AND {}timestamp <= ?{}", col_prefix, idx));
         param_values.push(Box::new(until));
         idx += 1;
     }
     if let Some(event_type) = &query.event_type {
-        sql.push_str(&format!(" AND event_type = ?{}", idx));
+        sql.push_str(&format!(" AND {}event_type = ?{}", col_prefix, idx));
         param_values.push(Box::new(event_type.clone()));
         idx += 1;
     }
 
-    sql.push_str(&format!(" ORDER BY timestamp DESC LIMIT ?{}", idx));
+    if use_fts {
+        sql.push_str(&format!(" ORDER BY rank LIMIT ?{}", idx));
+    } else {
+        sql.push_str(&format!(" ORDER BY timestamp DESC LIMIT ?{}", idx));
+    }
     param_values.push(Box::new(query.limit));
 
     let param_refs: Vec<&dyn rusqlite::types::ToSql> =
@@ -1511,6 +1606,7 @@ mod tests {
             event_type: None,
             limit: 100,
             cursor: None,
+            text: None,
         };
         let results = query_events(&conn, &query).unwrap();
         assert!(results.is_empty());
@@ -1552,6 +1648,7 @@ mod tests {
             event_type: None,
             limit: 100,
             cursor: None,
+            text: None,
         };
         let results = query_events(&conn, &query).unwrap();
         assert_eq!(results.len(), 3);
@@ -1586,6 +1683,7 @@ mod tests {
             event_type: None,
             limit: 100,
             cursor: None,
+            text: None,
         };
         let results = query_events(&conn, &query).unwrap();
         assert_eq!(results.len(), 1);
@@ -1611,6 +1709,7 @@ mod tests {
             event_type: None,
             limit: 100,
             cursor: None,
+            text: None,
         };
         let results = query_events(&conn, &query).unwrap();
         assert_eq!(results.len(), 1);
@@ -1635,6 +1734,7 @@ mod tests {
             event_type: None,
             limit: 3,
             cursor: None,
+            text: None,
         };
         let results = query_events(&conn, &query).unwrap();
         assert_eq!(results.len(), 3);
@@ -1661,6 +1761,7 @@ mod tests {
                 event_type: None,
                 limit: 100,
                 cursor: None,
+                text: None,
             },
         )
         .unwrap();
@@ -1678,6 +1779,7 @@ mod tests {
                 event_type: None,
                 limit: 100,
                 cursor: Some(cursor_id),
+                text: None,
             },
         )
         .unwrap();
@@ -1685,6 +1787,117 @@ mod tests {
         for record in &paged {
             assert!(record.id < cursor_id);
         }
+    }
+
+    #[test]
+    fn test_fulltext_search_basic() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+
+        let events = vec![
+            SecurityEvent::new(
+                "file_modified",
+                Severity::Warning,
+                "file_integrity",
+                "/etc/passwd が変更されました",
+            ),
+            SecurityEvent::new(
+                "brute_force",
+                Severity::Critical,
+                "ssh_brute_force",
+                "192.168.1.100 からの SSH ブルートフォース攻撃を検知",
+            ),
+            SecurityEvent::new(
+                "process_anomaly",
+                Severity::Info,
+                "process_monitor",
+                "不審なプロセス /tmp/malware が起動",
+            ),
+        ];
+        EventStore::insert_events(&mut conn, &events).unwrap();
+
+        let query = EventQuery {
+            module: None,
+            severity: None,
+            since: None,
+            until: None,
+            event_type: None,
+            limit: 100,
+            cursor: None,
+            text: Some("passwd".to_string()),
+        };
+        let results = query_events(&conn, &query).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].message.contains("passwd"));
+    }
+
+    #[test]
+    fn test_fulltext_search_with_filter() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+
+        let events = vec![
+            SecurityEvent::new(
+                "file_modified",
+                Severity::Warning,
+                "file_integrity",
+                "sshd_config modified by root",
+            ),
+            SecurityEvent::new(
+                "file_modified",
+                Severity::Critical,
+                "file_integrity",
+                "shadow file modified by unknown",
+            ),
+            SecurityEvent::new(
+                "brute_force",
+                Severity::Critical,
+                "ssh_brute_force",
+                "brute force detected from 10.0.0.1",
+            ),
+        ];
+        EventStore::insert_events(&mut conn, &events).unwrap();
+
+        let query = EventQuery {
+            module: None,
+            severity: Some("CRITICAL".to_string()),
+            since: None,
+            until: None,
+            event_type: None,
+            limit: 100,
+            cursor: None,
+            text: Some("modified".to_string()),
+        };
+        let results = query_events(&conn, &query).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].message.contains("shadow"));
+    }
+
+    #[test]
+    fn test_fulltext_search_no_results() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+
+        let events = vec![SecurityEvent::new(
+            "test",
+            Severity::Info,
+            "test_module",
+            "テストメッセージ",
+        )];
+        EventStore::insert_events(&mut conn, &events).unwrap();
+
+        let query = EventQuery {
+            module: None,
+            severity: None,
+            since: None,
+            until: None,
+            event_type: None,
+            limit: 100,
+            cursor: None,
+            text: Some("存在しないキーワード".to_string()),
+        };
+        let results = query_events(&conn, &query).unwrap();
+        assert!(results.is_empty());
     }
 
     fn insert_event_at(conn: &Connection, timestamp: i64, severity: &str, module: &str) {
