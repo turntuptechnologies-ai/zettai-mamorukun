@@ -4927,4 +4927,89 @@ mod tests {
             result.err()
         );
     }
+
+    #[test]
+    fn test_build_tls_acceptor_mtls_invalid_mode_falls_back_to_required() {
+        let dir = tempfile::tempdir().unwrap();
+        let cert_path = dir.path().join("cert.pem");
+        let key_path = dir.path().join("key.pem");
+        let ca_path = dir.path().join("client-ca.crt");
+
+        let ca = rcgen::generate_simple_self_signed(vec!["CA".to_string()]).unwrap();
+        let server = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        std::fs::write(&cert_path, server.cert.pem()).unwrap();
+        std::fs::write(&key_path, server.key_pair.serialize_pem()).unwrap();
+        std::fs::write(&ca_path, ca.cert.pem()).unwrap();
+
+        let tls_config = crate::config::ApiTlsConfig {
+            enabled: true,
+            cert_file: cert_path.to_string_lossy().to_string(),
+            key_file: key_path.to_string_lossy().to_string(),
+            mtls: crate::config::ApiMtlsConfig {
+                enabled: true,
+                client_ca_file: ca_path.to_string_lossy().to_string(),
+                client_auth_mode: "invalid_mode".to_string(),
+            },
+        };
+        let result = build_tls_acceptor(&tls_config);
+        assert!(
+            result.is_ok(),
+            "不正な client_auth_mode は required にフォールバックすべき: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_build_tls_acceptor_mtls_invalid_ca_cert_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let cert_path = dir.path().join("cert.pem");
+        let key_path = dir.path().join("key.pem");
+        let ca_path = dir.path().join("client-ca.crt");
+
+        let server = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        std::fs::write(&cert_path, server.cert.pem()).unwrap();
+        std::fs::write(&key_path, server.key_pair.serialize_pem()).unwrap();
+        std::fs::write(&ca_path, "not a valid certificate").unwrap();
+
+        let tls_config = crate::config::ApiTlsConfig {
+            enabled: true,
+            cert_file: cert_path.to_string_lossy().to_string(),
+            key_file: key_path.to_string_lossy().to_string(),
+            mtls: crate::config::ApiMtlsConfig {
+                enabled: true,
+                client_ca_file: ca_path.to_string_lossy().to_string(),
+                client_auth_mode: "required".to_string(),
+            },
+        };
+        let result = build_tls_acceptor(&tls_config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_tls_acceptor_mtls_disabled_ignores_mtls_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let cert_path = dir.path().join("cert.pem");
+        let key_path = dir.path().join("key.pem");
+
+        let server = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        std::fs::write(&cert_path, server.cert.pem()).unwrap();
+        std::fs::write(&key_path, server.key_pair.serialize_pem()).unwrap();
+
+        let tls_config = crate::config::ApiTlsConfig {
+            enabled: true,
+            cert_file: cert_path.to_string_lossy().to_string(),
+            key_file: key_path.to_string_lossy().to_string(),
+            mtls: crate::config::ApiMtlsConfig {
+                enabled: false,
+                client_ca_file: "/nonexistent/path.crt".to_string(),
+                client_auth_mode: "required".to_string(),
+            },
+        };
+        let result = build_tls_acceptor(&tls_config);
+        assert!(
+            result.is_ok(),
+            "mTLS 無効時は CA パスが不正でもエラーにならないべき: {:?}",
+            result.err()
+        );
+    }
 }
