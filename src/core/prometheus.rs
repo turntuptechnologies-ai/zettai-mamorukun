@@ -6,11 +6,150 @@
 use crate::config::PrometheusConfig;
 use crate::core::metrics::SharedMetrics;
 use crate::core::scoring::SharedSecurityScore;
+use std::fs::File;
+use std::io::BufReader;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
+
+fn build_prometheus_tls_acceptor(
+    tls_config: &crate::config::PrometheusTlsConfig,
+) -> Result<tokio_rustls::TlsAcceptor, std::io::Error> {
+    use rustls::ServerConfig;
+    use rustls_pemfile::{certs, private_key};
+
+    let cert_file = File::open(&tls_config.cert_file).map_err(|e| {
+        std::io::Error::other(format!(
+            "証明書ファイルを開けません: {}: {}",
+            tls_config.cert_file, e
+        ))
+    })?;
+    let key_file = File::open(&tls_config.key_file).map_err(|e| {
+        std::io::Error::other(format!(
+            "秘密鍵ファイルを開けません: {}: {}",
+            tls_config.key_file, e
+        ))
+    })?;
+
+    let server_certs: Vec<rustls_pki_types::CertificateDer<'static>> =
+        certs(&mut BufReader::new(cert_file))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("証明書の読み込みに失敗: {}", e),
+                )
+            })?;
+
+    let key = private_key(&mut BufReader::new(key_file))
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("秘密鍵の読み込みに失敗: {}", e),
+            )
+        })?
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "秘密鍵が見つかりません")
+        })?;
+
+    let builder =
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("TLS プロトコルバージョンの設定に失敗: {}", e),
+                )
+            })?;
+
+    let config = if tls_config.mtls.enabled {
+        use rustls::server::WebPkiClientVerifier;
+
+        let ca_file = File::open(&tls_config.mtls.client_ca_file).map_err(|e| {
+            std::io::Error::other(format!(
+                "クライアント CA 証明書ファイルを開けません: {}: {}",
+                tls_config.mtls.client_ca_file, e
+            ))
+        })?;
+        let ca_certs: Vec<rustls_pki_types::CertificateDer<'static>> =
+            certs(&mut BufReader::new(ca_file))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("クライアント CA 証明書の読み込みに失敗: {}", e),
+                    )
+                })?;
+
+        let mut client_root_store = rustls::RootCertStore::empty();
+        for cert in ca_certs {
+            client_root_store.add(cert).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("クライアント CA 証明書の追加に失敗: {}", e),
+                )
+            })?;
+        }
+
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let verifier = if tls_config.mtls.client_auth_mode == "optional" {
+            WebPkiClientVerifier::builder_with_provider(
+                Arc::new(client_root_store),
+                provider.clone(),
+            )
+            .allow_unauthenticated()
+            .build()
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("mTLS クライアント検証の構築に失敗: {}", e),
+                )
+            })?
+        } else {
+            WebPkiClientVerifier::builder_with_provider(
+                Arc::new(client_root_store),
+                provider.clone(),
+            )
+            .build()
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("mTLS クライアント検証の構築に失敗: {}", e),
+                )
+            })?
+        };
+
+        tracing::info!(
+            client_ca_file = %tls_config.mtls.client_ca_file,
+            client_auth_mode = %tls_config.mtls.client_auth_mode,
+            "Prometheus mTLS: 有効"
+        );
+
+        builder
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(server_certs, key)
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("TLS 設定の構築に失敗: {}", e),
+                )
+            })?
+    } else {
+        builder
+            .with_no_client_auth()
+            .with_single_cert(server_certs, key)
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("TLS 設定の構築に失敗: {}", e),
+                )
+            })?
+    };
+
+    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
+}
 
 /// Prometheus メトリクスエクスポーター
 pub struct PrometheusExporter {
@@ -20,6 +159,8 @@ pub struct PrometheusExporter {
     shared_scoring: Option<Arc<StdMutex<SharedSecurityScore>>>,
     started_at: Instant,
     cancel_token: CancellationToken,
+    tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
+    mtls_status: String,
 }
 
 impl PrometheusExporter {
@@ -29,6 +170,40 @@ impl PrometheusExporter {
         shared_metrics: Arc<StdMutex<SharedMetrics>>,
         started_at: Instant,
     ) -> Self {
+        if config.tls.mtls.enabled && !config.tls.enabled {
+            tracing::warn!(
+                "Prometheus mTLS が有効ですが TLS が無効です。mTLS を機能させるには tls.enabled = true が必要です"
+            );
+        }
+
+        let tls_acceptor = if config.tls.enabled {
+            match build_prometheus_tls_acceptor(&config.tls) {
+                Ok(acceptor) => {
+                    tracing::info!(
+                        cert_file = %config.tls.cert_file,
+                        key_file = %config.tls.key_file,
+                        "Prometheus TLS: 有効"
+                    );
+                    Some(Arc::new(acceptor))
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "Prometheus TLS アクセプターの構築に失敗。TLS なしで起動します"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let mtls_status = if tls_acceptor.is_some() && config.tls.mtls.enabled {
+            config.tls.mtls.client_auth_mode.clone()
+        } else {
+            "disabled".to_string()
+        };
+
         Self {
             bind_address: config.bind_address.clone(),
             port: config.port,
@@ -36,6 +211,8 @@ impl PrometheusExporter {
             shared_scoring: None,
             started_at,
             cancel_token: CancellationToken::new(),
+            tls_acceptor,
+            mtls_status,
         }
     }
 
@@ -61,6 +238,9 @@ impl PrometheusExporter {
         let shared_scoring = self.shared_scoring;
         let started_at = self.started_at;
         let cancel_token = self.cancel_token;
+        let tls_acc = self.tls_acceptor.clone();
+        let tls_enabled = self.tls_acceptor.is_some();
+        let mtls_status = self.mtls_status.clone();
 
         tokio::spawn(async move {
             loop {
@@ -71,8 +251,20 @@ impl PrometheusExporter {
                                 let metrics = Arc::clone(&shared_metrics);
                                 let scoring = shared_scoring.clone();
                                 let started = started_at;
+                                let tls = tls_acc.clone();
                                 tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_connection(stream, &metrics, &scoring, started).await {
+                                    if let Some(ref acceptor) = tls {
+                                        match acceptor.accept(stream).await {
+                                            Ok(tls_stream) => {
+                                                if let Err(e) = Self::handle_stream(tls_stream, &metrics, &scoring, started).await {
+                                                    tracing::debug!(error = %e, "Prometheus TLS 接続の処理に失敗");
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::debug!(error = %e, "Prometheus TLS ハンドシェイクに失敗");
+                                            }
+                                        }
+                                    } else if let Err(e) = Self::handle_stream(stream, &metrics, &scoring, started).await {
                                         tracing::debug!(error = %e, "Prometheus 接続の処理に失敗");
                                     }
                                 });
@@ -92,21 +284,22 @@ impl PrometheusExporter {
 
         tracing::info!(
             bind_address = %addr,
+            tls = tls_enabled,
+            mtls = %mtls_status,
             "Prometheus エクスポーターを起動しました"
         );
         Ok(())
     }
 
-    async fn handle_connection(
-        mut stream: tokio::net::TcpStream,
+    async fn handle_stream<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+        mut stream: S,
         shared_metrics: &Arc<StdMutex<SharedMetrics>>,
         shared_scoring: &Option<Arc<StdMutex<SharedSecurityScore>>>,
         started_at: Instant,
     ) -> Result<(), std::io::Error> {
-        // 接続タイムアウト（スローロリス対策）
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            Self::read_request(&mut stream),
+            Self::read_request_from(&mut stream),
         )
         .await;
 
@@ -157,7 +350,9 @@ impl PrometheusExporter {
         Ok(())
     }
 
-    async fn read_request(stream: &mut tokio::net::TcpStream) -> Result<String, std::io::Error> {
+    async fn read_request_from<S: tokio::io::AsyncRead + Unpin>(
+        stream: &mut S,
+    ) -> Result<String, std::io::Error> {
         let mut buf = [0u8; 1024];
         let n = stream.read(&mut buf).await?;
         if n == 0 {
@@ -374,10 +569,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_prometheus_exporter_spawn_and_metrics() {
-        let config = PrometheusConfig {
+        let _config = PrometheusConfig {
             enabled: true,
             bind_address: "127.0.0.1".to_string(),
             port: 0, // OS が空きポートを割り当てる — ここではテスト用に直接指定
+            ..Default::default()
         };
 
         // ポート 0 だと実際のポート取得が難しいため、動的に空きポートを取得
@@ -389,6 +585,7 @@ mod tests {
             enabled: true,
             bind_address: "127.0.0.1".to_string(),
             port,
+            ..Default::default()
         };
 
         let mut module_counts = HashMap::new();
@@ -470,6 +667,7 @@ mod tests {
             enabled: true,
             bind_address: "0.0.0.0".to_string(),
             port: 9200,
+            ..Default::default()
         };
         let shared = Arc::new(StdMutex::new(SharedMetrics::default()));
         let exporter = PrometheusExporter::new(&config, shared, Instant::now());
@@ -485,6 +683,7 @@ mod tests {
             enabled: true,
             bind_address: "127.0.0.1".to_string(),
             port: 9200,
+            ..Default::default()
         };
         let shared = Arc::new(StdMutex::new(SharedMetrics::default()));
         let exporter = PrometheusExporter::new(&config, shared, past);
@@ -512,6 +711,7 @@ mod tests {
             enabled: true,
             bind_address: "127.0.0.1".to_string(),
             port: port1,
+            ..Default::default()
         };
         let exporter1 = PrometheusExporter::new(&config1, Arc::clone(&shared), Instant::now());
         let cancel1 = exporter1.cancel_token();
@@ -531,6 +731,7 @@ mod tests {
             enabled: true,
             bind_address: "127.0.0.1".to_string(),
             port: port2,
+            ..Default::default()
         };
         let exporter2 = PrometheusExporter::new(&config2, Arc::clone(&shared), Instant::now());
         let cancel2 = exporter2.cancel_token();
@@ -570,6 +771,7 @@ mod tests {
             enabled: true,
             bind_address: "127.0.0.1".to_string(),
             port,
+            ..Default::default()
         };
         let exporter = PrometheusExporter::new(&config, Arc::clone(&shared), past);
         let cancel = exporter.cancel_token();
@@ -612,5 +814,130 @@ mod tests {
             }
         }
         panic!("zettai_uptime_seconds not found in metrics output");
+    }
+
+    #[test]
+    fn test_prometheus_tls_config_default() {
+        let tls = crate::config::PrometheusTlsConfig::default();
+        assert!(!tls.enabled);
+        assert!(tls.cert_file.is_empty());
+        assert!(tls.key_file.is_empty());
+        assert!(!tls.mtls.enabled);
+    }
+
+    #[test]
+    fn test_prometheus_mtls_config_default() {
+        let mtls = crate::config::PrometheusMtlsConfig::default();
+        assert!(!mtls.enabled);
+        assert!(mtls.client_ca_file.is_empty());
+        assert_eq!(mtls.client_auth_mode, "required");
+    }
+
+    #[test]
+    fn test_build_prometheus_tls_acceptor_invalid_cert_path() {
+        let tls_config = crate::config::PrometheusTlsConfig {
+            enabled: true,
+            cert_file: "/nonexistent/cert.pem".to_string(),
+            key_file: "/nonexistent/key.pem".to_string(),
+            ..Default::default()
+        };
+        let result = build_prometheus_tls_acceptor(&tls_config);
+        let err = result.err().expect("should be error");
+        assert!(err.to_string().contains("証明書ファイルを開けません"));
+    }
+
+    #[test]
+    fn test_build_prometheus_tls_acceptor_mtls_invalid_ca_path() {
+        let tmp_dir = std::env::temp_dir();
+        let cert_path = tmp_dir.join("test_prom_mtls_cert.pem");
+        let key_path = tmp_dir.join("test_prom_mtls_key.pem");
+
+        let cert_pem = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        std::fs::write(&cert_path, cert_pem.cert.pem()).unwrap();
+        std::fs::write(&key_path, cert_pem.key_pair.serialize_pem()).unwrap();
+
+        let tls_config = crate::config::PrometheusTlsConfig {
+            enabled: true,
+            cert_file: cert_path.to_string_lossy().to_string(),
+            key_file: key_path.to_string_lossy().to_string(),
+            mtls: crate::config::PrometheusMtlsConfig {
+                enabled: true,
+                client_ca_file: "/nonexistent/ca.pem".to_string(),
+                client_auth_mode: "required".to_string(),
+            },
+        };
+        let result = build_prometheus_tls_acceptor(&tls_config);
+        let err = result.err().expect("should be error");
+        assert!(
+            err.to_string()
+                .contains("クライアント CA 証明書ファイルを開けません")
+        );
+
+        let _ = std::fs::remove_file(&cert_path);
+        let _ = std::fs::remove_file(&key_path);
+    }
+
+    #[test]
+    fn test_prometheus_exporter_with_tls_disabled() {
+        let config = PrometheusConfig {
+            enabled: true,
+            bind_address: "127.0.0.1".to_string(),
+            port: 9200,
+            ..Default::default()
+        };
+        let shared = Arc::new(StdMutex::new(SharedMetrics::default()));
+        let exporter = PrometheusExporter::new(&config, shared, Instant::now());
+        assert!(exporter.tls_acceptor.is_none());
+        assert_eq!(exporter.mtls_status, "disabled");
+    }
+
+    #[test]
+    fn test_prometheus_mtls_warning_without_tls() {
+        let config = PrometheusConfig {
+            enabled: true,
+            bind_address: "127.0.0.1".to_string(),
+            port: 9200,
+            tls: crate::config::PrometheusTlsConfig {
+                enabled: false,
+                cert_file: String::new(),
+                key_file: String::new(),
+                mtls: crate::config::PrometheusMtlsConfig {
+                    enabled: true,
+                    client_ca_file: "/some/ca.pem".to_string(),
+                    client_auth_mode: "required".to_string(),
+                },
+            },
+        };
+        let shared = Arc::new(StdMutex::new(SharedMetrics::default()));
+        let exporter = PrometheusExporter::new(&config, shared, Instant::now());
+        assert!(exporter.tls_acceptor.is_none());
+        assert_eq!(exporter.mtls_status, "disabled");
+    }
+
+    #[test]
+    fn test_prometheus_tls_config_deserialize() {
+        let toml_str = r#"
+            enabled = true
+            cert_file = "/etc/certs/server.crt"
+            key_file = "/etc/certs/server.key"
+        "#;
+        let config: crate::config::PrometheusTlsConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.cert_file, "/etc/certs/server.crt");
+        assert_eq!(config.key_file, "/etc/certs/server.key");
+        assert!(!config.mtls.enabled);
+    }
+
+    #[test]
+    fn test_prometheus_mtls_config_deserialize() {
+        let toml_str = r#"
+            enabled = true
+            client_ca_file = "/etc/certs/client-ca.crt"
+            client_auth_mode = "optional"
+        "#;
+        let config: crate::config::PrometheusMtlsConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.client_ca_file, "/etc/certs/client-ca.crt");
+        assert_eq!(config.client_auth_mode, "optional");
     }
 }
