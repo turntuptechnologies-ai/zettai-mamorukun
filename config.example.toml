@@ -801,6 +801,16 @@ enabled = false
 bind_address = "127.0.0.1"
 # リスニングポート
 port = 9100
+# TLS 設定（HTTPS で提供する場合）
+# [prometheus.tls]
+# enabled = false
+# cert_file = "/etc/zettai-mamorukun/certs/prometheus.crt"
+# key_file = "/etc/zettai-mamorukun/certs/prometheus.key"
+# mTLS 設定（クライアント証明書認証）
+# [prometheus.tls.mtls]
+# enabled = false
+# client_ca_file = "/etc/zettai-mamorukun/certs/client-ca.crt"
+# client_auth_mode = "required"
 
 # -------------------------------------------------------
 # REST API サーバー設定

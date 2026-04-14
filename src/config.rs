@@ -5977,6 +5977,58 @@ impl Default for DynamicLibraryMonitorConfig {
     }
 }
 
+/// Prometheus mTLS 設定
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+pub struct PrometheusMtlsConfig {
+    /// mTLS の有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// クライアント CA 証明書ファイルのパス（PEM 形式）
+    #[serde(default)]
+    pub client_ca_file: String,
+
+    /// クライアント認証モード（"required" または "optional"）
+    #[serde(default = "PrometheusMtlsConfig::default_client_auth_mode")]
+    pub client_auth_mode: String,
+}
+
+impl PrometheusMtlsConfig {
+    fn default_client_auth_mode() -> String {
+        "required".to_string()
+    }
+}
+
+impl Default for PrometheusMtlsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            client_ca_file: String::new(),
+            client_auth_mode: Self::default_client_auth_mode(),
+        }
+    }
+}
+
+/// Prometheus TLS 設定
+#[derive(Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct PrometheusTlsConfig {
+    /// TLS の有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// 証明書ファイルのパス（PEM 形式）
+    #[serde(default)]
+    pub cert_file: String,
+
+    /// 秘密鍵ファイルのパス（PEM 形式）
+    #[serde(default)]
+    pub key_file: String,
+
+    /// mTLS（クライアント証明書認証）設定
+    #[serde(default)]
+    pub mtls: PrometheusMtlsConfig,
+}
+
 /// Prometheus メトリクスエクスポーター設定
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub struct PrometheusConfig {
@@ -5991,6 +6043,10 @@ pub struct PrometheusConfig {
     /// リスニングポート
     #[serde(default = "PrometheusConfig::default_port")]
     pub port: u16,
+
+    /// TLS 設定
+    #[serde(default)]
+    pub tls: PrometheusTlsConfig,
 }
 
 impl PrometheusConfig {
@@ -6009,6 +6065,7 @@ impl Default for PrometheusConfig {
             enabled: false,
             bind_address: Self::default_bind_address(),
             port: Self::default_port(),
+            tls: PrometheusTlsConfig::default(),
         }
     }
 }
@@ -7448,5 +7505,49 @@ max_age = 3600
         assert_eq!(config.api.cors.allowed_origins[0], "https://example.com");
         assert!(config.api.cors.allow_credentials);
         assert_eq!(config.api.cors.max_age, 3600);
+    }
+
+    #[test]
+    fn test_prometheus_tls_config_deserialize() {
+        let toml_str = r#"
+[prometheus]
+enabled = true
+bind_address = "0.0.0.0"
+port = 9100
+
+[prometheus.tls]
+enabled = true
+cert_file = "/etc/certs/prometheus.crt"
+key_file = "/etc/certs/prometheus.key"
+
+[prometheus.tls.mtls]
+enabled = true
+client_ca_file = "/etc/certs/client-ca.crt"
+client_auth_mode = "optional"
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.prometheus.tls.enabled);
+        assert_eq!(config.prometheus.tls.cert_file, "/etc/certs/prometheus.crt");
+        assert_eq!(config.prometheus.tls.key_file, "/etc/certs/prometheus.key");
+        assert!(config.prometheus.tls.mtls.enabled);
+        assert_eq!(
+            config.prometheus.tls.mtls.client_ca_file,
+            "/etc/certs/client-ca.crt"
+        );
+        assert_eq!(config.prometheus.tls.mtls.client_auth_mode, "optional");
+    }
+
+    #[test]
+    fn test_prometheus_tls_config_defaults_when_omitted() {
+        let toml_str = r#"
+[prometheus]
+enabled = true
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.prometheus.tls.enabled);
+        assert!(config.prometheus.tls.cert_file.is_empty());
+        assert!(config.prometheus.tls.key_file.is_empty());
+        assert!(!config.prometheus.tls.mtls.enabled);
+        assert_eq!(config.prometheus.tls.mtls.client_auth_mode, "required");
     }
 }
