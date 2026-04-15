@@ -836,6 +836,31 @@ fn delete_archive_file(dir: &std::path::Path, filename: &str) -> bool {
     success
 }
 
+/// 指定されたアーカイブファイルを削除する（API 用）
+pub fn delete_archive(archive_dir: &str, filename: &str) -> Result<(), AppError> {
+    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+        return Err(AppError::EventStore {
+            message: "不正なファイル名です".to_string(),
+        });
+    }
+
+    let dir = std::path::Path::new(archive_dir);
+    let filepath = dir.join(filename);
+    if !filepath.exists() {
+        return Err(AppError::EventStore {
+            message: format!("アーカイブファイルが見つかりません: {}", filename),
+        });
+    }
+
+    if !delete_archive_file(dir, filename) {
+        return Err(AppError::EventStore {
+            message: format!("アーカイブファイルの削除に失敗しました: {}", filename),
+        });
+    }
+
+    Ok(())
+}
+
 /// アーカイブ処理の本体（ブロッキング）
 fn archive_events_blocking(
     conn: &Arc<StdMutex<Connection>>,
@@ -1049,6 +1074,8 @@ pub struct ArchiveInfo {
     pub size: u64,
     /// SHA-256 チェックサム
     pub checksum: Option<String>,
+    /// 作成日時（UNIX タイムスタンプ秒）
+    pub created_at: Option<i64>,
 }
 
 /// アーカイブファイル一覧を取得する
@@ -1087,10 +1114,17 @@ pub fn list_archives(archive_dir: &str) -> Result<Vec<ArchiveInfo>, AppError> {
             .ok()
             .and_then(|content| content.split_whitespace().next().map(|s| s.to_string()));
 
+        let created_at = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64);
+
         archives.push(ArchiveInfo {
             filename,
             size: meta.len(),
             checksum,
+            created_at,
         });
     }
 

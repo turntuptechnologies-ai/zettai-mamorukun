@@ -34,6 +34,10 @@ pub fn generate_openapi_schema() -> Value {
             "/api/v1/events/batch/export": batch_export_path(),
             "/api/v1/events/batch/acknowledge": batch_acknowledge_path(),
             "/api/v1/score": score_path(),
+            "/api/v1/archives": archives_list_create_path(),
+            "/api/v1/archives/restore": archives_restore_path(),
+            "/api/v1/archives/rotate": archives_rotate_path(),
+            "/api/v1/archives/{filename}": archives_delete_path(),
         },
         "components": {
             "securitySchemes": {
@@ -555,6 +559,239 @@ fn score_path() -> Value {
     })
 }
 
+fn archives_list_create_path() -> Value {
+    json!({
+        "get": {
+            "summary": "アーカイブ一覧取得",
+            "description": "アーカイブファイルの一覧を返す。read_only ロール以上が必要。",
+            "operationId": "getArchives",
+            "tags": ["archives"],
+            "security": [{"BearerAuth": []}],
+            "responses": {
+                "200": {
+                    "description": "アーカイブ一覧",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/ArchiveListResponse" }
+                        }
+                    }
+                },
+                "401": { "$ref": "#/components/schemas/ErrorResponse" },
+                "503": {
+                    "description": "アーカイブ機能が無効",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+                        }
+                    }
+                }
+            }
+        },
+        "post": {
+            "summary": "手動アーカイブ実行",
+            "description": "イベントストアのイベントを手動でアーカイブする。admin ロールが必要。dry_run=true でプレビュー。",
+            "operationId": "postArchives",
+            "tags": ["archives"],
+            "security": [{"BearerAuth": []}],
+            "parameters": [
+                {
+                    "name": "dry_run",
+                    "in": "query",
+                    "required": false,
+                    "schema": { "type": "boolean", "default": false },
+                    "description": "true の場合、実際のアーカイブを行わずプレビューのみ返す"
+                }
+            ],
+            "requestBody": {
+                "required": false,
+                "content": {
+                    "application/json": {
+                        "schema": { "$ref": "#/components/schemas/ArchiveCreateRequest" }
+                    }
+                }
+            },
+            "responses": {
+                "200": {
+                    "description": "アーカイブ成功または dry-run 結果",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/ArchiveCreateResponse" }
+                        }
+                    }
+                },
+                "400": { "$ref": "#/components/schemas/ErrorResponse" },
+                "401": { "$ref": "#/components/schemas/ErrorResponse" },
+                "403": { "$ref": "#/components/schemas/ErrorResponse" },
+                "503": {
+                    "description": "アーカイブ機能またはイベントストアが無効",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn archives_restore_path() -> Value {
+    json!({
+        "post": {
+            "summary": "アーカイブ復元",
+            "description": "アーカイブファイルからイベントをイベントストアに復元する。admin ロールが必要。dry_run=true でプレビュー。",
+            "operationId": "postArchivesRestore",
+            "tags": ["archives"],
+            "security": [{"BearerAuth": []}],
+            "parameters": [
+                {
+                    "name": "dry_run",
+                    "in": "query",
+                    "required": false,
+                    "schema": { "type": "boolean", "default": false },
+                    "description": "true の場合、実際の復元を行わずプレビューのみ返す"
+                }
+            ],
+            "requestBody": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": { "$ref": "#/components/schemas/ArchiveRestoreRequest" }
+                    }
+                }
+            },
+            "responses": {
+                "200": {
+                    "description": "復元成功または dry-run 結果",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/ArchiveRestoreResponse" }
+                        }
+                    }
+                },
+                "400": { "$ref": "#/components/schemas/ErrorResponse" },
+                "401": { "$ref": "#/components/schemas/ErrorResponse" },
+                "403": { "$ref": "#/components/schemas/ErrorResponse" },
+                "503": {
+                    "description": "アーカイブ機能またはイベントストアが無効",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn archives_rotate_path() -> Value {
+    json!({
+        "post": {
+            "summary": "アーカイブローテーション",
+            "description": "アーカイブファイルのローテーション（古いファイルの削除）を実行する。admin ロールが必要。dry_run=true でプレビュー。",
+            "operationId": "postArchivesRotate",
+            "tags": ["archives"],
+            "security": [{"BearerAuth": []}],
+            "parameters": [
+                {
+                    "name": "dry_run",
+                    "in": "query",
+                    "required": false,
+                    "schema": { "type": "boolean", "default": false },
+                    "description": "true の場合、実際のローテーションを行わずプレビューのみ返す"
+                }
+            ],
+            "requestBody": {
+                "required": false,
+                "content": {
+                    "application/json": {
+                        "schema": { "$ref": "#/components/schemas/ArchiveRotateRequest" }
+                    }
+                }
+            },
+            "responses": {
+                "200": {
+                    "description": "ローテーション成功または dry-run 結果",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/ArchiveRotateResponse" }
+                        }
+                    }
+                },
+                "400": { "$ref": "#/components/schemas/ErrorResponse" },
+                "401": { "$ref": "#/components/schemas/ErrorResponse" },
+                "403": { "$ref": "#/components/schemas/ErrorResponse" },
+                "503": {
+                    "description": "アーカイブ機能が無効",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn archives_delete_path() -> Value {
+    json!({
+        "delete": {
+            "summary": "アーカイブファイル削除",
+            "description": "指定されたアーカイブファイルを削除する。admin ロールが必要。dry_run=true でプレビュー。",
+            "operationId": "deleteArchive",
+            "tags": ["archives"],
+            "security": [{"BearerAuth": []}],
+            "parameters": [
+                {
+                    "name": "filename",
+                    "in": "path",
+                    "required": true,
+                    "schema": { "type": "string" },
+                    "description": "削除するアーカイブファイル名"
+                },
+                {
+                    "name": "dry_run",
+                    "in": "query",
+                    "required": false,
+                    "schema": { "type": "boolean", "default": false },
+                    "description": "true の場合、実際の削除を行わずプレビューのみ返す"
+                }
+            ],
+            "responses": {
+                "200": {
+                    "description": "削除成功または dry-run 結果",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/ArchiveDeleteResponse" }
+                        }
+                    }
+                },
+                "400": { "$ref": "#/components/schemas/ErrorResponse" },
+                "401": { "$ref": "#/components/schemas/ErrorResponse" },
+                "403": { "$ref": "#/components/schemas/ErrorResponse" },
+                "404": {
+                    "description": "アーカイブファイルが見つからない",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+                        }
+                    }
+                },
+                "503": {
+                    "description": "アーカイブ機能が無効",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
 fn component_schemas() -> Value {
     json!({
         "ErrorResponse": {
@@ -959,6 +1196,84 @@ fn component_schemas() -> Value {
                 "info": { "type": "integer", "description": "INFO イベント数" }
             },
             "required": ["total_events", "critical", "high", "medium", "low", "info"]
+        },
+        "ArchiveInfo": {
+            "type": "object",
+            "properties": {
+                "filename": { "type": "string", "description": "アーカイブファイル名" },
+                "size": { "type": "integer", "description": "ファイルサイズ（バイト）" },
+                "checksum": { "type": ["string", "null"], "description": "SHA-256 チェックサム" },
+                "created_at": { "type": ["integer", "null"], "description": "作成日時（UNIX タイムスタンプ秒）" }
+            },
+            "required": ["filename", "size"]
+        },
+        "ArchiveListResponse": {
+            "type": "object",
+            "properties": {
+                "archives": {
+                    "type": "array",
+                    "items": { "$ref": "#/components/schemas/ArchiveInfo" },
+                    "description": "アーカイブファイル一覧"
+                },
+                "count": { "type": "integer", "description": "アーカイブファイル数" }
+            },
+            "required": ["archives", "count"]
+        },
+        "ArchiveCreateRequest": {
+            "type": "object",
+            "description": "手動アーカイブリクエスト（省略時はデフォルト設定を使用）",
+            "properties": {
+                "archive_after_days": { "type": "integer", "description": "アーカイブ対象とするイベントの経過日数" },
+                "compress": { "type": "boolean", "description": "gzip 圧縮の有効/無効" }
+            }
+        },
+        "ArchiveCreateResponse": {
+            "type": "object",
+            "properties": {
+                "message": { "type": "string", "description": "結果メッセージ" },
+                "archived": { "type": "integer", "description": "アーカイブされたイベント数" }
+            },
+            "required": ["message"]
+        },
+        "ArchiveRestoreRequest": {
+            "type": "object",
+            "properties": {
+                "filename": { "type": "string", "description": "復元するアーカイブファイル名" }
+            },
+            "required": ["filename"]
+        },
+        "ArchiveRestoreResponse": {
+            "type": "object",
+            "properties": {
+                "message": { "type": "string", "description": "結果メッセージ" },
+                "restored": { "type": "integer", "description": "復元されたイベント数" }
+            },
+            "required": ["message"]
+        },
+        "ArchiveRotateRequest": {
+            "type": "object",
+            "description": "ローテーションリクエスト（省略時はデフォルト設定を使用）",
+            "properties": {
+                "max_age_days": { "type": "integer", "description": "最大保持日数（0 で無制限）" },
+                "max_total_mb": { "type": "integer", "description": "合計サイズ上限（MB、0 で無制限）" },
+                "max_files": { "type": "integer", "description": "最大保持ファイル数（0 で無制限）" }
+            }
+        },
+        "ArchiveRotateResponse": {
+            "type": "object",
+            "properties": {
+                "message": { "type": "string", "description": "結果メッセージ" },
+                "deleted": { "type": "integer", "description": "削除されたファイル数" }
+            },
+            "required": ["message"]
+        },
+        "ArchiveDeleteResponse": {
+            "type": "object",
+            "properties": {
+                "message": { "type": "string", "description": "結果メッセージ" },
+                "filename": { "type": "string", "description": "削除されたファイル名" }
+            },
+            "required": ["message", "filename"]
         }
     })
 }
