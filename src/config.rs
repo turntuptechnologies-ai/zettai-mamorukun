@@ -1,3 +1,4 @@
+use crate::encryption::EncryptionConfig;
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -77,6 +78,10 @@ pub struct AppConfig {
     /// セキュリティスコアリング設定
     #[serde(default)]
     pub scoring: ScoringConfig,
+
+    /// 暗号化設定
+    #[serde(default)]
+    pub encryption: Option<EncryptionConfig>,
 }
 
 /// デーモン動作設定
@@ -4307,6 +4312,8 @@ impl AppConfig {
             path: path.to_path_buf(),
             source: e,
         })?;
+
+        let content = crate::encryption::decrypt_config_content(&content)?;
 
         toml::from_str(&content).map_err(|e| AppError::ConfigParse {
             path: path.to_path_buf(),

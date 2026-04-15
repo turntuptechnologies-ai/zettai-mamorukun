@@ -182,6 +182,20 @@ enum Commands {
         #[command(subcommand)]
         action: ArchiveAction,
     },
+    /// 設定値を暗号化する
+    EncryptValue {
+        /// 暗号化する平文
+        #[arg(value_name = "PLAINTEXT")]
+        plaintext: String,
+    },
+    /// 暗号化された設定値を復号する
+    DecryptValue {
+        /// 復号する暗号化文字列（ENC[...]形式）
+        #[arg(value_name = "ENCRYPTED")]
+        encrypted: String,
+    },
+    /// 暗号化鍵を生成する
+    GenerateKey,
 }
 
 #[derive(Subcommand)]
@@ -947,6 +961,66 @@ fn run_score_command(api_url: &str, api_token: Option<&str>, json: bool) {
     }
 }
 
+fn resolve_encryption_key(config_path: &Path) -> zettai_mamorukun::encryption::EncryptionKey {
+    use zettai_mamorukun::encryption::resolve_key;
+
+    let enc_config = AppConfig::load(config_path).ok().and_then(|c| c.encryption);
+
+    match resolve_key(&enc_config) {
+        Ok(Some(key)) => key,
+        Ok(None) => {
+            eprintln!("エラー: 暗号化鍵が設定されていません");
+            eprintln!(
+                "  環境変数 ZETTAI_ENCRYPTION_KEY を設定するか、設定ファイルの [encryption] セクションで key_file を指定してください"
+            );
+            eprintln!("  鍵の生成: zettai-mamorukun generate-key");
+            process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("エラー: {}", e);
+            process::exit(1);
+        }
+    }
+}
+
+fn run_encrypt_value(config_path: &Path, plaintext: &str) {
+    let key = resolve_encryption_key(config_path);
+    match zettai_mamorukun::encryption::encrypt_value(&key, plaintext) {
+        Ok(encrypted) => println!("{}", encrypted),
+        Err(e) => {
+            eprintln!("エラー: {}", e);
+            process::exit(1);
+        }
+    }
+}
+
+fn run_decrypt_value(config_path: &Path, encrypted: &str) {
+    let key = resolve_encryption_key(config_path);
+    match zettai_mamorukun::encryption::decrypt_value(&key, encrypted) {
+        Ok(plaintext) => println!("{}", plaintext),
+        Err(e) => {
+            eprintln!("エラー: {}", e);
+            process::exit(1);
+        }
+    }
+}
+
+fn run_generate_key() {
+    let key = zettai_mamorukun::encryption::generate_key();
+    let b64 = zettai_mamorukun::encryption::key_to_base64(&key);
+    println!("{}", b64);
+    eprintln!("# 鍵をファイルに保存する場合:");
+    eprintln!("#   zettai-mamorukun generate-key > /etc/zettai-mamorukun/encryption.key");
+    eprintln!("#   chmod 600 /etc/zettai-mamorukun/encryption.key");
+    eprintln!("#");
+    eprintln!("# 環境変数で指定する場合:");
+    eprintln!("#   export ZETTAI_ENCRYPTION_KEY=\"<上記の鍵>\"");
+    eprintln!("#");
+    eprintln!("# 設定ファイルで鍵ファイルを指定する場合:");
+    eprintln!("#   [encryption]");
+    eprintln!("#   key_file = \"/etc/zettai-mamorukun/encryption.key\"");
+}
+
 fn run_archive_command(config_path: &Path, action: &ArchiveAction) {
     let config = AppConfig::load(config_path).ok();
     let default_config = zettai_mamorukun::config::EventStoreConfig::default();
@@ -1353,6 +1427,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::Archive { action }) => {
             run_archive_command(&cli.config, action);
+            return Ok(());
+        }
+        Some(Commands::EncryptValue { plaintext }) => {
+            run_encrypt_value(&cli.config, plaintext);
+            return Ok(());
+        }
+        Some(Commands::DecryptValue { encrypted }) => {
+            run_decrypt_value(&cli.config, encrypted);
+            return Ok(());
+        }
+        Some(Commands::GenerateKey) => {
+            run_generate_key();
             return Ok(());
         }
         Some(Commands::HashToken { token }) => {
