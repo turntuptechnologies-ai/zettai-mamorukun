@@ -83,4 +83,8 @@ pub enum AppError {
     /// アラートルールエラー
     #[error("アラートルールエラー: {0}")]
     AlertRule(String),
+
+    /// 暗号化/復号エラー
+    #[error("暗号化エラー: {message}")]
+    Encryption { message: String },
 }

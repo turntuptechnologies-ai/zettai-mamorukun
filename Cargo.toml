@@ -1,11 +1,13 @@
 [package]
 name = "zettai-mamorukun"
-version = "1.40.0"
+version = "1.41.0"
 edition = "2024"
 description = "Linux サーバ向けサイバー攻撃防御デーモン"
 license = "MIT"
 
 [dependencies]
+aes-gcm = "0.10"
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 sha1 = "0.10"
@@ -41,6 +43,7 @@ tokio-tungstenite = "0.26"
 rustls-pki-types = "1"
 webpki-roots = "0.26"
 rustls-pemfile = "2"
+zeroize = "1"
 
 [dev-dependencies]
 tempfile = "3"

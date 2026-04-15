@@ -1,6 +1,20 @@
 # zettai-mamorukun 設定ファイル
 # /etc/zettai-mamorukun/config.toml にコピーして使用する
 
+# [encryption]
+# 設定ファイル内の機密値を暗号化する場合に使用する
+# 暗号化された値は ENC[...] 形式で記述し、設定読み込み時に自動復号される
+#
+# 鍵の生成: zettai-mamorukun generate-key
+# 値の暗号化: zettai-mamorukun encrypt-value "秘密の値"
+# 値の復号: zettai-mamorukun decrypt-value "ENC[...]"
+#
+# 鍵は以下の優先順位で解決される:
+#   1. 環境変数 ZETTAI_ENCRYPTION_KEY（Base64 エンコードされた 32 バイト鍵）
+#   2. key_file で指定したファイル
+#
+# key_file = "/etc/zettai-mamorukun/encryption.key"
+
 [general]
 # ログレベル: trace, debug, info, warn, error
 log_level = "info"
