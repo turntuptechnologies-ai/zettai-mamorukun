@@ -8,6 +8,7 @@
 # 鍵の生成: zettai-mamorukun generate-key
 # 値の暗号化: zettai-mamorukun encrypt-value "秘密の値"
 # 値の復号: zettai-mamorukun decrypt-value "ENC[...]"
+# 鍵のローテーション: zettai-mamorukun rotate-key --old-key <旧鍵> --new-key <新鍵>
 #
 # 鍵は以下の優先順位で解決される:
 #   1. 環境変数 ZETTAI_ENCRYPTION_KEY（Base64 エンコードされた 32 バイト鍵）

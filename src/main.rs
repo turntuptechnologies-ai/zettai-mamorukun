@@ -196,6 +196,21 @@ enum Commands {
     },
     /// 暗号化鍵を生成する
     GenerateKey,
+    /// 暗号化鍵をローテーションする（既存の暗号化値を新しい鍵で再暗号化）
+    RotateKey {
+        /// 旧鍵のソース（env:変数名、ファイルパス、またはBase64文字列）
+        #[arg(long, value_name = "SOURCE")]
+        old_key: String,
+        /// 新鍵のソース（env:変数名、ファイルパス、またはBase64文字列）
+        #[arg(long, value_name = "SOURCE")]
+        new_key: String,
+        /// 実際の書き換えを行わずプレビューのみ表示
+        #[arg(long)]
+        dry_run: bool,
+        /// 書き換え前にバックアップファイルを作成する
+        #[arg(long)]
+        backup: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1021,6 +1036,127 @@ fn run_generate_key() {
     eprintln!("#   key_file = \"/etc/zettai-mamorukun/encryption.key\"");
 }
 
+fn run_rotate_key(
+    config_path: &Path,
+    old_key_src: &str,
+    new_key_src: &str,
+    dry_run: bool,
+    backup: bool,
+) {
+    use zettai_mamorukun::encryption::{resolve_key_from_source, rotate_config_keys};
+
+    let old_key = match resolve_key_from_source(old_key_src) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("エラー: 旧鍵の読み込みに失敗しました: {}", e);
+            process::exit(1);
+        }
+    };
+
+    let new_key = match resolve_key_from_source(new_key_src) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("エラー: 新鍵の読み込みに失敗しました: {}", e);
+            process::exit(1);
+        }
+    };
+
+    let content = match std::fs::read_to_string(config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "エラー: 設定ファイルの読み込みに失敗しました ({}): {}",
+                config_path.display(),
+                e
+            );
+            process::exit(1);
+        }
+    };
+
+    let result = rotate_config_keys(&content, &old_key, &new_key);
+
+    if result.rotated_count == 0 && result.skipped_count == 0 {
+        eprintln!("暗号化された値が見つかりませんでした。");
+        return;
+    }
+
+    if dry_run {
+        eprintln!("--- ドライラン（実際の書き込みは行いません） ---");
+        eprintln!(
+            "ローテーション対象: {} 件、スキップ: {} 件",
+            result.rotated_count, result.skipped_count
+        );
+        for err in &result.errors {
+            eprintln!("  警告: {}", err);
+        }
+        eprintln!("--- プレビュー ---");
+        print!("{}", result.new_content);
+        return;
+    }
+
+    if backup {
+        let timestamp = {
+            let dur = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            dur.as_secs()
+        };
+        let backup_path = format!("{}.bak.{}", config_path.display(), timestamp);
+        if let Err(e) = std::fs::copy(config_path, &backup_path) {
+            eprintln!("エラー: バックアップの作成に失敗しました: {}", e);
+            process::exit(1);
+        }
+        eprintln!("バックアップを作成しました: {}", backup_path);
+    }
+
+    let dir = config_path.parent();
+    let tmp_path = match dir {
+        Some(d) => d.join(".config.toml.rotate.tmp"),
+        None => PathBuf::from(".config.toml.rotate.tmp"),
+    };
+
+    {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = match OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp_path)
+        {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("エラー: 一時ファイルの書き込みに失敗しました: {}", e);
+                process::exit(1);
+            }
+        };
+        if let Err(e) = f.write_all(result.new_content.as_bytes()) {
+            eprintln!("エラー: 一時ファイルの書き込みに失敗しました: {}", e);
+            let _ = std::fs::remove_file(&tmp_path);
+            process::exit(1);
+        }
+    }
+
+    if let Err(e) = std::fs::rename(&tmp_path, config_path) {
+        eprintln!("エラー: 設定ファイルの置き換えに失敗しました: {}", e);
+        let _ = std::fs::remove_file(&tmp_path);
+        process::exit(1);
+    }
+
+    eprintln!("鍵ローテーションが完了しました。");
+    eprintln!(
+        "  成功: {} 件、スキップ: {} 件、エラー: {} 件",
+        result.rotated_count,
+        result.skipped_count,
+        result.errors.len()
+    );
+    for err in &result.errors {
+        eprintln!("  警告: {}", err);
+    }
+}
+
 fn run_archive_command(config_path: &Path, action: &ArchiveAction) {
     let config = AppConfig::load(config_path).ok();
     let default_config = zettai_mamorukun::config::EventStoreConfig::default();
@@ -1439,6 +1575,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::GenerateKey) => {
             run_generate_key();
+            return Ok(());
+        }
+        Some(Commands::RotateKey {
+            old_key,
+            new_key,
+            dry_run,
+            backup,
+        }) => {
+            run_rotate_key(&cli.config, old_key, new_key, *dry_run, *backup);
             return Ok(());
         }
         Some(Commands::HashToken { token }) => {
