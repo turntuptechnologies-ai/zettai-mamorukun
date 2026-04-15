@@ -3583,4 +3583,81 @@ mod tests {
         let remaining = list_archives(archive_dir).unwrap();
         assert_eq!(remaining.len(), 3);
     }
+
+    #[test]
+    fn test_delete_archive_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_dir = dir.path().to_str().unwrap();
+
+        let filename = "events_20260101_20260201.jsonl";
+        std::fs::write(dir.path().join(filename), "test\n").unwrap();
+        std::fs::write(
+            dir.path().join(format!("{}.sha256", filename)),
+            "abc  test\n",
+        )
+        .unwrap();
+
+        let result = delete_archive(archive_dir, filename);
+        assert!(result.is_ok());
+        assert!(!dir.path().join(filename).exists());
+        assert!(!dir.path().join(format!("{}.sha256", filename)).exists());
+    }
+
+    #[test]
+    fn test_delete_archive_file_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_dir = dir.path().to_str().unwrap();
+
+        let result = delete_archive(archive_dir, "nonexistent.jsonl");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("見つかりません"));
+    }
+
+    #[test]
+    fn test_delete_archive_path_traversal_dotdot() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_dir = dir.path().to_str().unwrap();
+
+        let result = delete_archive(archive_dir, "../etc/passwd");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("不正なファイル名"));
+    }
+
+    #[test]
+    fn test_delete_archive_path_traversal_slash() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_dir = dir.path().to_str().unwrap();
+
+        let result = delete_archive(archive_dir, "sub/file.jsonl");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("不正なファイル名"));
+    }
+
+    #[test]
+    fn test_delete_archive_path_traversal_backslash() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_dir = dir.path().to_str().unwrap();
+
+        let result = delete_archive(archive_dir, "sub\\file.jsonl");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("不正なファイル名"));
+    }
+
+    #[test]
+    fn test_list_archives_created_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_dir = dir.path().to_str().unwrap();
+
+        let filename = "events_20260101_20260201.jsonl";
+        std::fs::write(dir.path().join(filename), "test\n").unwrap();
+
+        let archives = list_archives(archive_dir).unwrap();
+        assert_eq!(archives.len(), 1);
+        assert!(archives[0].created_at.is_some());
+        assert!(archives[0].created_at.unwrap() > 0);
+    }
 }

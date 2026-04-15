@@ -5792,4 +5792,45 @@ mod tests {
             result.err()
         );
     }
+
+    #[test]
+    fn test_parse_request_delete() {
+        let (method, path, params) = ApiServer::parse_request(
+            "DELETE /api/v1/archives/events_20260101.jsonl HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert!(matches!(method, HttpMethod::Delete));
+        assert_eq!(path, "/api/v1/archives/events_20260101.jsonl");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_required_role_archives_list() {
+        let role = ApiServer::required_role(&HttpMethod::Get, "/api/v1/archives");
+        assert_eq!(role, Some(ApiRole::ReadOnly));
+    }
+
+    #[test]
+    fn test_required_role_archives_create() {
+        let role = ApiServer::required_role(&HttpMethod::Post, "/api/v1/archives");
+        assert_eq!(role, Some(ApiRole::Admin));
+    }
+
+    #[test]
+    fn test_required_role_archives_restore() {
+        let role = ApiServer::required_role(&HttpMethod::Post, "/api/v1/archives/restore");
+        assert_eq!(role, Some(ApiRole::Admin));
+    }
+
+    #[test]
+    fn test_required_role_archives_rotate() {
+        let role = ApiServer::required_role(&HttpMethod::Post, "/api/v1/archives/rotate");
+        assert_eq!(role, Some(ApiRole::Admin));
+    }
+
+    #[test]
+    fn test_required_role_archives_delete() {
+        let role =
+            ApiServer::required_role(&HttpMethod::Delete, "/api/v1/archives/some_file.jsonl");
+        assert_eq!(role, Some(ApiRole::Admin));
+    }
 }
