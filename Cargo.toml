@@ -9,6 +9,7 @@ license = "MIT"
 aes-gcm = "0.10"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 serde = { version = "1", features = ["derive"] }
 sha1 = "0.10"
 sha2 = "0.10"
