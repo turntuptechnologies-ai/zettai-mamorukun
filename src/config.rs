@@ -3373,6 +3373,22 @@ pub struct EventStoreConfig {
     /// アーカイブファイルの gzip 圧縮の有効/無効
     #[serde(default = "EventStoreConfig::default_archive_compress")]
     pub archive_compress: bool,
+
+    /// アーカイブローテーションの有効/無効
+    #[serde(default)]
+    pub archive_rotation_enabled: bool,
+
+    /// アーカイブファイルの最大保持日数（0 で無制限）
+    #[serde(default = "EventStoreConfig::default_archive_max_age_days")]
+    pub archive_max_age_days: u64,
+
+    /// アーカイブディレクトリの合計サイズ上限（MB、0 で無制限）
+    #[serde(default)]
+    pub archive_max_total_mb: u64,
+
+    /// アーカイブファイルの最大保持数（0 で無制限）
+    #[serde(default)]
+    pub archive_max_files: u64,
 }
 
 impl EventStoreConfig {
@@ -3406,6 +3422,9 @@ impl EventStoreConfig {
     fn default_archive_compress() -> bool {
         true
     }
+    fn default_archive_max_age_days() -> u64 {
+        365
+    }
 }
 
 impl Default for EventStoreConfig {
@@ -3424,6 +3443,10 @@ impl Default for EventStoreConfig {
             archive_dir: Self::default_archive_dir(),
             archive_interval_hours: Self::default_archive_interval_hours(),
             archive_compress: Self::default_archive_compress(),
+            archive_rotation_enabled: false,
+            archive_max_age_days: Self::default_archive_max_age_days(),
+            archive_max_total_mb: 0,
+            archive_max_files: 0,
         }
     }
 }

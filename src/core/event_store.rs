@@ -39,6 +39,14 @@ pub struct EventStoreRuntimeConfig {
     pub archive_interval_hours: u64,
     /// gzip 圧縮の有効/無効
     pub archive_compress: bool,
+    /// アーカイブローテーションの有効/無効
+    pub archive_rotation_enabled: bool,
+    /// アーカイブファイルの最大保持日数（0 で無制限）
+    pub archive_max_age_days: u64,
+    /// アーカイブディレクトリの合計サイズ上限（MB、0 で無制限）
+    pub archive_max_total_mb: u64,
+    /// アーカイブファイルの最大保持数（0 で無制限）
+    pub archive_max_files: u64,
 }
 
 impl From<&EventStoreConfig> for EventStoreRuntimeConfig {
@@ -55,6 +63,10 @@ impl From<&EventStoreConfig> for EventStoreRuntimeConfig {
             archive_dir: config.archive_dir.clone(),
             archive_interval_hours: config.archive_interval_hours,
             archive_compress: config.archive_compress,
+            archive_rotation_enabled: config.archive_rotation_enabled,
+            archive_max_age_days: config.archive_max_age_days,
+            archive_max_total_mb: config.archive_max_total_mb,
+            archive_max_files: config.archive_max_files,
         }
     }
 }
@@ -292,6 +304,10 @@ impl EventStore {
             mut archive_after_days,
             mut archive_dir,
             mut archive_compress,
+            mut archive_rotation_enabled,
+            mut archive_max_age_days,
+            mut archive_max_total_mb,
+            mut archive_max_files,
         ) = {
             let cfg = config_receiver.borrow();
             (
@@ -302,6 +318,10 @@ impl EventStore {
                 cfg.archive_after_days,
                 cfg.archive_dir.clone(),
                 cfg.archive_compress,
+                cfg.archive_rotation_enabled,
+                cfg.archive_max_age_days,
+                cfg.archive_max_total_mb,
+                cfg.archive_max_files,
             )
         };
 
@@ -351,6 +371,9 @@ impl EventStore {
                 }
                 _ = archive_ticker.tick(), if archive_enabled => {
                     Self::run_archive(&conn, archive_after_days, &archive_dir, archive_compress).await;
+                    if archive_rotation_enabled {
+                        Self::run_rotation(&archive_dir, archive_max_age_days, archive_max_total_mb, archive_max_files).await;
+                    }
                 }
                 result = config_receiver.changed() => {
                     match result {
@@ -367,6 +390,10 @@ impl EventStore {
                                 archive_after_days = new_config.archive_after_days,
                                 archive_interval_hours = new_config.archive_interval_hours,
                                 archive_compress = new_config.archive_compress,
+                                archive_rotation_enabled = new_config.archive_rotation_enabled,
+                                archive_max_age_days = new_config.archive_max_age_days,
+                                archive_max_total_mb = new_config.archive_max_total_mb,
+                                archive_max_files = new_config.archive_max_files,
                                 "イベントストア: 設定をリロードしました"
                             );
                             batch_size = new_config.batch_size;
@@ -377,6 +404,10 @@ impl EventStore {
                             archive_after_days = new_config.archive_after_days;
                             archive_dir = new_config.archive_dir;
                             archive_compress = new_config.archive_compress;
+                            archive_rotation_enabled = new_config.archive_rotation_enabled;
+                            archive_max_age_days = new_config.archive_max_age_days;
+                            archive_max_total_mb = new_config.archive_max_total_mb;
+                            archive_max_files = new_config.archive_max_files;
 
                             let new_batch_interval = Duration::from_secs(new_config.batch_interval_secs);
                             batch_ticker = tokio::time::interval(new_batch_interval);
@@ -654,6 +685,155 @@ impl EventStore {
             }
         }
     }
+
+    async fn run_rotation(archive_dir: &str, max_age_days: u64, max_total_mb: u64, max_files: u64) {
+        let archive_dir = archive_dir.to_string();
+        let result = tokio::task::spawn_blocking(move || {
+            rotate_archives(&archive_dir, max_age_days, max_total_mb, max_files)
+        })
+        .await;
+
+        match result {
+            Ok(Ok(count)) => {
+                if count > 0 {
+                    tracing::info!(
+                        deleted = count,
+                        "イベントストア: {} 件のアーカイブファイルをローテーション削除しました",
+                        count
+                    );
+                }
+            }
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "イベントストア: アーカイブローテーションに失敗しました");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "イベントストア: ローテーション spawn_blocking タスクがパニックしました");
+            }
+        }
+    }
+}
+
+/// アーカイブファイルのローテーション（古いファイルの自動削除）
+///
+/// max_age_days → max_total_mb → max_files の順にポリシーを適用し、
+/// 古いファイルから順に削除する。
+pub fn rotate_archives(
+    archive_dir: &str,
+    max_age_days: u64,
+    max_total_mb: u64,
+    max_files: u64,
+) -> Result<usize, AppError> {
+    let mut archives = list_archives(archive_dir)?;
+    if archives.is_empty() {
+        return Ok(0);
+    }
+
+    let mut deleted = 0;
+    let dir = std::path::Path::new(archive_dir);
+
+    // ポリシー1: max_age_days（0 = 無制限）
+    if max_age_days > 0 {
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let cutoff_date =
+            format_date_from_epoch(now_secs.saturating_sub(max_age_days * 86400) as i64);
+
+        let mut remaining = Vec::new();
+        for archive in archives {
+            let end_date = extract_end_date(&archive.filename);
+            if let Some(end_date) = end_date
+                && end_date < cutoff_date
+            {
+                if delete_archive_file(dir, &archive.filename) {
+                    deleted += 1;
+                }
+                continue;
+            }
+            remaining.push(archive);
+        }
+        archives = remaining;
+    }
+
+    // ポリシー2: max_total_mb（0 = 無制限）
+    if max_total_mb > 0 {
+        let max_bytes = max_total_mb * 1024 * 1024;
+        let total_size: u64 = archives.iter().map(|a| a.size).sum();
+        if total_size > max_bytes {
+            let mut current_size = total_size;
+            let mut remaining = Vec::new();
+            for archive in archives {
+                if current_size > max_bytes {
+                    current_size = current_size.saturating_sub(archive.size);
+                    if delete_archive_file(dir, &archive.filename) {
+                        deleted += 1;
+                    }
+                } else {
+                    remaining.push(archive);
+                }
+            }
+            archives = remaining;
+        }
+    }
+
+    // ポリシー3: max_files（0 = 無制限）
+    if max_files > 0 {
+        let count = archives.len() as u64;
+        if count > max_files {
+            let to_delete = (count - max_files) as usize;
+            for archive in archives.drain(..to_delete) {
+                if delete_archive_file(dir, &archive.filename) {
+                    deleted += 1;
+                }
+            }
+        }
+    }
+
+    Ok(deleted)
+}
+
+/// アーカイブファイル名から終了日を抽出する（events_YYYYMMDD_YYYYMMDD.jsonl[.gz]）
+fn extract_end_date(filename: &str) -> Option<String> {
+    let name = filename.strip_prefix("events_").unwrap_or(filename);
+    let date_part = name
+        .strip_suffix(".jsonl.gz")
+        .or_else(|| name.strip_suffix(".jsonl"))?;
+    let parts: Vec<&str> = date_part.split('_').collect();
+    if parts.len() == 2 && parts[1].len() == 8 {
+        Some(parts[1].to_string())
+    } else {
+        None
+    }
+}
+
+/// アーカイブファイルと対応するチェックサムファイルを削除する
+fn delete_archive_file(dir: &std::path::Path, filename: &str) -> bool {
+    let filepath = dir.join(filename);
+    let checksum_path = dir.join(format!("{}.sha256", filename));
+
+    let mut success = false;
+    match std::fs::remove_file(&filepath) {
+        Ok(()) => {
+            tracing::debug!(file = %filename, "アーカイブファイルを削除しました");
+            success = true;
+        }
+        Err(e) => {
+            tracing::warn!(file = %filename, error = %e, "アーカイブファイルの削除に失敗しました");
+        }
+    }
+
+    if checksum_path.exists()
+        && let Err(e) = std::fs::remove_file(&checksum_path)
+    {
+        tracing::warn!(
+            file = %checksum_path.display(),
+            error = %e,
+            "チェックサムファイルの削除に失敗しました"
+        );
+    }
+
+    success
 }
 
 /// アーカイブ処理の本体（ブロッキング）
@@ -1896,6 +2076,10 @@ mod tests {
             archive_dir: "/tmp/zettai-test-archive".to_string(),
             archive_interval_hours: 24,
             archive_compress: true,
+            archive_rotation_enabled: false,
+            archive_max_age_days: 365,
+            archive_max_total_mb: 0,
+            archive_max_files: 0,
         }
     }
 
@@ -2012,6 +2196,10 @@ mod tests {
             archive_dir: "/tmp/archive".to_string(),
             archive_interval_hours: 12,
             archive_compress: false,
+            archive_rotation_enabled: true,
+            archive_max_age_days: 180,
+            archive_max_total_mb: 1024,
+            archive_max_files: 100,
         };
         let runtime = EventStoreRuntimeConfig::from(&config);
         assert_eq!(runtime.retention_days, 30);
@@ -2025,6 +2213,10 @@ mod tests {
         assert_eq!(runtime.archive_dir, "/tmp/archive");
         assert_eq!(runtime.archive_interval_hours, 12);
         assert_eq!(runtime.archive_compress, false);
+        assert_eq!(runtime.archive_rotation_enabled, true);
+        assert_eq!(runtime.archive_max_age_days, 180);
+        assert_eq!(runtime.archive_max_total_mb, 1024);
+        assert_eq!(runtime.archive_max_files, 100);
     }
 
     #[tokio::test]
@@ -2127,6 +2319,10 @@ mod tests {
             archive_dir: "/tmp/archive".to_string(),
             archive_interval_hours: 24,
             archive_compress: true,
+            archive_rotation_enabled: false,
+            archive_max_age_days: 365,
+            archive_max_total_mb: 0,
+            archive_max_files: 0,
         };
         sender.send(new_config).unwrap();
 
@@ -3202,5 +3398,155 @@ mod tests {
             "nonexistent.jsonl.gz",
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_end_date() {
+        assert_eq!(
+            extract_end_date("events_20250101_20250131.jsonl"),
+            Some("20250131".to_string())
+        );
+        assert_eq!(
+            extract_end_date("events_20250101_20250131.jsonl.gz"),
+            Some("20250131".to_string())
+        );
+        assert_eq!(extract_end_date("invalid_filename.txt"), None);
+        assert_eq!(extract_end_date("events_.jsonl"), None);
+    }
+
+    #[test]
+    fn test_rotate_archives_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = rotate_archives(dir.path().to_str().unwrap(), 30, 0, 0);
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn test_rotate_archives_nonexistent_dir() {
+        let result = rotate_archives("/tmp/nonexistent_archive_dir_test", 30, 0, 0);
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn test_rotate_archives_max_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_dir = dir.path().to_str().unwrap();
+
+        for i in 1..=5 {
+            let filename = format!("events_202501{:02}_202501{:02}.jsonl", i, i + 1);
+            std::fs::write(dir.path().join(&filename), "test\n").unwrap();
+            std::fs::write(
+                dir.path().join(format!("{}.sha256", filename)),
+                "abc  test\n",
+            )
+            .unwrap();
+        }
+
+        let deleted = rotate_archives(archive_dir, 0, 0, 3).unwrap();
+        assert_eq!(deleted, 2);
+
+        let remaining = list_archives(archive_dir).unwrap();
+        assert_eq!(remaining.len(), 3);
+        assert!(remaining[0].filename.contains("20250103"));
+    }
+
+    #[test]
+    fn test_rotate_archives_max_total_mb() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_dir = dir.path().to_str().unwrap();
+
+        let big_content = "x".repeat(600 * 1024);
+        for i in 1..=3 {
+            let filename = format!("events_202501{:02}_202501{:02}.jsonl", i, i + 1);
+            std::fs::write(dir.path().join(&filename), &big_content).unwrap();
+        }
+
+        // 3 files * ~600KB = ~1.8MB, limit to 1MB should delete oldest files
+        let deleted = rotate_archives(archive_dir, 0, 1, 0).unwrap();
+        assert!(deleted >= 1);
+
+        let remaining = list_archives(archive_dir).unwrap();
+        let total_size: u64 = remaining.iter().map(|a| a.size).sum();
+        assert!(total_size <= 1024 * 1024);
+    }
+
+    #[test]
+    fn test_rotate_archives_max_age_days() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_dir = dir.path().to_str().unwrap();
+
+        // Very old file
+        let old_filename = "events_20200101_20200201.jsonl";
+        std::fs::write(dir.path().join(old_filename), "test\n").unwrap();
+        std::fs::write(
+            dir.path().join(format!("{}.sha256", old_filename)),
+            "abc  test\n",
+        )
+        .unwrap();
+
+        // Recent file (use a date far in the future to ensure it's "recent")
+        let new_filename = "events_20260101_20260401.jsonl";
+        std::fs::write(dir.path().join(new_filename), "test\n").unwrap();
+
+        let deleted = rotate_archives(archive_dir, 365, 0, 0).unwrap();
+        assert_eq!(deleted, 1);
+
+        let remaining = list_archives(archive_dir).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert!(remaining[0].filename.contains("20260401"));
+    }
+
+    #[test]
+    fn test_rotate_archives_checksum_file_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_dir = dir.path().to_str().unwrap();
+
+        let filename = "events_20200101_20200201.jsonl.gz";
+        std::fs::write(dir.path().join(filename), "test\n").unwrap();
+        let checksum_path = dir.path().join(format!("{}.sha256", filename));
+        std::fs::write(&checksum_path, "abc  test\n").unwrap();
+
+        let deleted = rotate_archives(archive_dir, 30, 0, 0).unwrap();
+        assert_eq!(deleted, 1);
+        assert!(!checksum_path.exists());
+    }
+
+    #[test]
+    fn test_rotate_archives_all_policies_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_dir = dir.path().to_str().unwrap();
+
+        for i in 1..=5 {
+            let filename = format!("events_202501{:02}_202501{:02}.jsonl", i, i + 1);
+            std::fs::write(dir.path().join(&filename), "test\n").unwrap();
+        }
+
+        let deleted = rotate_archives(archive_dir, 0, 0, 0).unwrap();
+        assert_eq!(deleted, 0);
+
+        let remaining = list_archives(archive_dir).unwrap();
+        assert_eq!(remaining.len(), 5);
+    }
+
+    #[test]
+    fn test_rotate_archives_combined_policies() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_dir = dir.path().to_str().unwrap();
+
+        // Old file (will be deleted by max_age)
+        std::fs::write(dir.path().join("events_20200101_20200201.jsonl"), "test\n").unwrap();
+
+        // Recent files
+        for i in 1..=4 {
+            let filename = format!("events_2026030{}_2026030{}.jsonl", i, i + 1);
+            std::fs::write(dir.path().join(&filename), "test\n").unwrap();
+        }
+
+        // max_age=365 deletes the old file, max_files=3 deletes 1 more
+        let deleted = rotate_archives(archive_dir, 365, 0, 3).unwrap();
+        assert_eq!(deleted, 2);
+
+        let remaining = list_archives(archive_dir).unwrap();
+        assert_eq!(remaining.len(), 3);
     }
 }
