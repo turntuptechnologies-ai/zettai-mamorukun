@@ -235,6 +235,10 @@ pub struct ApiServer {
     event_store_db_path: Option<String>,
     config_path: Option<String>,
     reload_sender: mpsc::Sender<()>,
+    module_control_sender: mpsc::Sender<(
+        ModuleControlCommand,
+        tokio::sync::oneshot::Sender<ModuleControlResult>,
+    )>,
     cancel_token: CancellationToken,
     tokens: Arc<StdMutex<Vec<ApiTokenConfig>>>,
     rate_limiter: Arc<StdMutex<Option<RateLimiter>>>,
@@ -405,6 +409,30 @@ fn build_tls_acceptor(
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
 }
 
+/// モジュール制御コマンド
+#[derive(Debug)]
+pub enum ModuleControlCommand {
+    /// モジュールを起動する
+    Start(String),
+    /// モジュールを停止する
+    Stop(String),
+    /// モジュールを再起動する
+    Restart(String),
+}
+
+/// モジュール制御の結果
+#[derive(Debug)]
+pub enum ModuleControlResult {
+    /// 操作成功
+    Ok(String),
+    /// モジュールが見つからない
+    NotFound(String),
+    /// 状態の競合（既に起動中/停止中）
+    Conflict(String),
+    /// 操作失敗
+    Error(String),
+}
+
 fn is_dry_run(query_params: &HashMap<String, String>) -> bool {
     query_params
         .get("dry_run")
@@ -424,6 +452,10 @@ impl ApiServer {
         event_store_db_path: Option<String>,
         config_path: Option<String>,
         reload_sender: mpsc::Sender<()>,
+        module_control_sender: mpsc::Sender<(
+            ModuleControlCommand,
+            tokio::sync::oneshot::Sender<ModuleControlResult>,
+        )>,
         event_bus: Option<broadcast::Sender<SecurityEvent>>,
         shared_scoring: Option<Arc<StdMutex<SharedSecurityScore>>>,
         event_store_config: Option<&crate::config::EventStoreConfig>,
@@ -470,6 +502,7 @@ impl ApiServer {
             event_store_db_path,
             config_path,
             reload_sender,
+            module_control_sender,
             cancel_token: CancellationToken::new(),
             tokens: Arc::new(StdMutex::new(config.tokens.clone())),
             rate_limiter: Arc::new(StdMutex::new(rate_limiter)),
@@ -542,6 +575,7 @@ impl ApiServer {
         let event_store_db_path = self.event_store_db_path;
         let config_path = self.config_path;
         let reload_sender = self.reload_sender;
+        let module_control_sender = self.module_control_sender;
         let cancel_token = self.cancel_token;
         let tokens = self.tokens;
         let rate_limiter = self.rate_limiter;
@@ -601,6 +635,7 @@ impl ApiServer {
                                 let db_path = event_store_db_path.clone();
                                 let cfg_path = config_path.clone();
                                 let sender = reload_sender.clone();
+                                let mc_sender = module_control_sender.clone();
                                 let started = started_at;
                                 let toks = Arc::clone(&tokens);
                                 let rl = Arc::clone(&rate_limiter);
@@ -634,7 +669,7 @@ impl ApiServer {
                                     };
                                     if let Err(e) = Self::handle_connection(
                                         maybe_stream, &names, &metrics, &restarts,
-                                        started, &db_path, &cfg_path, &sender, &toks,
+                                        started, &db_path, &cfg_path, &sender, &mc_sender, &toks,
                                         client_ip, &rl, &eb, &wsc, &wsc_count, &cors,
                                         oa_enabled, dps, mps, bms, mrbs, &scoring, &al,
                                         &arch_dir, &arch_cfg, &act_cfg,
@@ -727,6 +762,14 @@ impl ApiServer {
             (HttpMethod::Post, "/api/v1/archives/restore") => Some(ApiRole::Admin),
             (HttpMethod::Post, "/api/v1/archives/rotate") => Some(ApiRole::Admin),
             (HttpMethod::Post, "/api/v1/webhooks/test") => Some(ApiRole::Admin),
+            _ if matches!(method, HttpMethod::Post)
+                && path.starts_with("/api/v1/modules/")
+                && (path.ends_with("/start")
+                    || path.ends_with("/stop")
+                    || path.ends_with("/restart")) =>
+            {
+                Some(ApiRole::Admin)
+            }
             _ if matches!(method, HttpMethod::Delete) && path.starts_with("/api/v1/archives/") => {
                 Some(ApiRole::Admin)
             }
@@ -800,6 +843,10 @@ impl ApiServer {
         event_store_db_path: &Option<String>,
         config_path: &Option<String>,
         reload_sender: &mpsc::Sender<()>,
+        module_control_sender: &mpsc::Sender<(
+            ModuleControlCommand,
+            tokio::sync::oneshot::Sender<ModuleControlResult>,
+        )>,
         tokens: &Arc<StdMutex<Vec<ApiTokenConfig>>>,
         client_ip: IpAddr,
         rate_limiter: &Arc<StdMutex<Option<RateLimiter>>>,
@@ -2208,6 +2255,164 @@ impl ApiServer {
                     .await?;
                 }
             }
+            (HttpMethod::Post, _)
+                if path.starts_with("/api/v1/modules/")
+                    && (path.ends_with("/start")
+                        || path.ends_with("/stop")
+                        || path.ends_with("/restart")) =>
+            {
+                let parts: Vec<&str> = path.split('/').collect();
+                // /api/v1/modules/{name}/{action} => ["", "api", "v1", "modules", "{name}", "{action}"]
+                if parts.len() == 6 {
+                    let module_name = parts[4];
+                    let action = parts[5];
+                    let dry_run = is_dry_run(&query_params);
+
+                    if dry_run {
+                        // dry_run: 実際には操作せず、バリデーションのみ
+                        let names = shared_module_names.lock().unwrap().clone();
+                        let is_running = names.iter().any(|n| n == module_name);
+
+                        let (valid, message) = match action {
+                            "start" if is_running => (false, "モジュールは既に起動中です"),
+                            "stop" if !is_running => (false, "モジュールは起動していません"),
+                            _ => (true, "操作を実行可能です"),
+                        };
+
+                        let body = format!(
+                            r#"{{"dry_run":true,"valid":{},"module":"{}","action":"{}","message":"{}"}}"#,
+                            valid,
+                            Self::escape_json_string(module_name),
+                            Self::escape_json_string(action),
+                            Self::escape_json_string(message),
+                        );
+                        resp_status = 200;
+                        resp_size = body.len() as u64;
+                        Self::send_json_response_with_headers(&mut stream, 200, "OK", &body, extra)
+                            .await?;
+                    } else {
+                        let cmd = match action {
+                            "start" => ModuleControlCommand::Start(module_name.to_string()),
+                            "stop" => ModuleControlCommand::Stop(module_name.to_string()),
+                            "restart" => ModuleControlCommand::Restart(module_name.to_string()),
+                            _ => unreachable!(),
+                        };
+
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        if module_control_sender.send((cmd, tx)).await.is_ok() {
+                            match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await
+                            {
+                                Ok(Ok(result)) => {
+                                    let (status, body) = match result {
+                                        ModuleControlResult::Ok(msg) => (
+                                            200u16,
+                                            format!(
+                                                r#"{{"success":true,"module":"{}","action":"{}","message":"{}"}}"#,
+                                                Self::escape_json_string(module_name),
+                                                Self::escape_json_string(action),
+                                                Self::escape_json_string(&msg),
+                                            ),
+                                        ),
+                                        ModuleControlResult::NotFound(msg) => (
+                                            404,
+                                            format!(
+                                                r#"{{"error":"{}"}}"#,
+                                                Self::escape_json_string(&msg),
+                                            ),
+                                        ),
+                                        ModuleControlResult::Conflict(msg) => (
+                                            409,
+                                            format!(
+                                                r#"{{"error":"{}"}}"#,
+                                                Self::escape_json_string(&msg),
+                                            ),
+                                        ),
+                                        ModuleControlResult::Error(msg) => (
+                                            500,
+                                            format!(
+                                                r#"{{"error":"{}"}}"#,
+                                                Self::escape_json_string(&msg),
+                                            ),
+                                        ),
+                                    };
+                                    let status_text = match status {
+                                        200 => "OK",
+                                        404 => "Not Found",
+                                        409 => "Conflict",
+                                        _ => "Internal Server Error",
+                                    };
+                                    resp_status = status;
+                                    resp_size = body.len() as u64;
+                                    Self::send_json_response_with_headers(
+                                        &mut stream,
+                                        status,
+                                        status_text,
+                                        &body,
+                                        extra,
+                                    )
+                                    .await?;
+                                }
+                                Ok(Err(_)) => {
+                                    resp_status = 500;
+                                    let err_msg = "モジュール制御の応答が取得できません";
+                                    let err_body = format!(
+                                        r#"{{"error":"{}"}}"#,
+                                        Self::escape_json_string(err_msg),
+                                    );
+                                    resp_size = err_body.len() as u64;
+                                    Self::send_error_with_headers(
+                                        &mut stream,
+                                        500,
+                                        "Internal Server Error",
+                                        err_msg,
+                                        extra,
+                                    )
+                                    .await?;
+                                }
+                                Err(_) => {
+                                    resp_status = 504;
+                                    let err_msg = "モジュール制御がタイムアウトしました";
+                                    let err_body = format!(
+                                        r#"{{"error":"{}"}}"#,
+                                        Self::escape_json_string(err_msg),
+                                    );
+                                    resp_size = err_body.len() as u64;
+                                    Self::send_error_with_headers(
+                                        &mut stream,
+                                        504,
+                                        "Gateway Timeout",
+                                        err_msg,
+                                        extra,
+                                    )
+                                    .await?;
+                                }
+                            }
+                        } else {
+                            resp_status = 503;
+                            let err_msg = "モジュール制御チャネルが利用できません";
+                            let err_body =
+                                format!(r#"{{"error":"{}"}}"#, Self::escape_json_string(err_msg),);
+                            resp_size = err_body.len() as u64;
+                            Self::send_error_with_headers(
+                                &mut stream,
+                                503,
+                                "Service Unavailable",
+                                err_msg,
+                                extra,
+                            )
+                            .await?;
+                        }
+                    }
+                } else {
+                    resp_status = 400;
+                    let err_msg = "不正なモジュール制御パスです";
+                    let err_body =
+                        format!(r#"{{"error":"{}"}}"#, Self::escape_json_string(err_msg),);
+                    resp_size = err_body.len() as u64;
+                    Self::send_error_with_headers(&mut stream, 400, "Bad Request", err_msg, extra)
+                        .await?;
+                }
+            }
             (HttpMethod::Get, _)
             | (HttpMethod::Options, _)
             | (HttpMethod::Delete, _)
@@ -2229,6 +2434,7 @@ impl ApiServer {
                         | "/api/v1/webhooks"
                         | "/api/v1/webhooks/test"
                 ) || path.starts_with("/api/v1/archives/")
+                    || path.starts_with("/api/v1/modules/")
                 {
                     let err_body = format!(
                         r#"{{"error":"{}"}}"#,
@@ -3907,6 +4113,7 @@ mod tests {
             None,
             None,
             reload_tx,
+            mpsc::channel(8).0,
             None,
             None,
             None,
@@ -3976,6 +4183,7 @@ mod tests {
             None,
             None,
             reload_tx,
+            mpsc::channel(8).0,
             None,
             None,
             None,
@@ -4045,6 +4253,7 @@ mod tests {
             None,
             None,
             reload_tx,
+            mpsc::channel(8).0,
             None,
             None,
             None,
@@ -4109,6 +4318,7 @@ mod tests {
             None,
             None,
             reload_tx,
+            mpsc::channel(8).0,
             None,
             None,
             None,
@@ -4174,6 +4384,7 @@ mod tests {
             None, // event_store_db_path is None
             None,
             reload_tx,
+            mpsc::channel(8).0,
             None,
             None,
             None,
@@ -4235,6 +4446,7 @@ mod tests {
             None,
             None,
             reload_tx,
+            mpsc::channel(8).0,
             None,
             None,
             None,
@@ -4296,6 +4508,7 @@ mod tests {
             None,
             None,
             reload_tx,
+            mpsc::channel(8).0,
             None,
             None,
             None,
@@ -4445,6 +4658,7 @@ mod tests {
             None,
             None,
             reload_tx,
+            mpsc::channel(8).0,
             None,
             None,
             None,
@@ -4630,6 +4844,7 @@ mod tests {
             None,
             None,
             reload_tx,
+            mpsc::channel(8).0,
             Some(event_tx.clone()),
             None,
             None,
@@ -5096,6 +5311,7 @@ mod tests {
             None,
             None,
             reload_tx,
+            mpsc::channel(8).0,
             None,
             None,
             None,
@@ -5330,6 +5546,7 @@ mod tests {
             None,
             None,
             reload_tx,
+            mpsc::channel(8).0,
             None,
             None,
             None,
@@ -5400,6 +5617,7 @@ mod tests {
             None,
             None,
             reload_tx,
+            mpsc::channel(8).0,
             None,
             None,
             None,
@@ -5469,6 +5687,7 @@ mod tests {
             None,
             None,
             reload_tx,
+            mpsc::channel(8).0,
             None,
             None,
             None,
@@ -5534,6 +5753,7 @@ mod tests {
             None,
             None,
             reload_tx,
+            mpsc::channel(8).0,
             None,
             None,
             None,
@@ -5596,6 +5816,7 @@ mod tests {
             None,
             None,
             reload_tx,
+            mpsc::channel(8).0,
             None,
             None,
             None,
@@ -5765,6 +5986,7 @@ mod tests {
             None,
             None,
             tokio::sync::mpsc::channel(1).0,
+            mpsc::channel(8).0,
             None,
             None,
             None,
@@ -6207,6 +6429,42 @@ mod tests {
         let role =
             ApiServer::required_role(&HttpMethod::Delete, "/api/v1/archives/some_file.jsonl");
         assert_eq!(role, Some(ApiRole::Admin));
+    }
+
+    #[test]
+    fn test_required_role_module_control_start() {
+        let role = ApiServer::required_role(
+            &HttpMethod::Post,
+            "/api/v1/modules/DNS設定改ざん検知モジュール/start",
+        );
+        assert_eq!(role, Some(ApiRole::Admin));
+    }
+
+    #[test]
+    fn test_required_role_module_control_stop() {
+        let role = ApiServer::required_role(
+            &HttpMethod::Post,
+            "/api/v1/modules/DNS設定改ざん検知モジュール/stop",
+        );
+        assert_eq!(role, Some(ApiRole::Admin));
+    }
+
+    #[test]
+    fn test_required_role_module_control_restart() {
+        let role = ApiServer::required_role(
+            &HttpMethod::Post,
+            "/api/v1/modules/DNS設定改ざん検知モジュール/restart",
+        );
+        assert_eq!(role, Some(ApiRole::Admin));
+    }
+
+    #[test]
+    fn test_required_role_module_control_get_not_matched() {
+        let role = ApiServer::required_role(
+            &HttpMethod::Get,
+            "/api/v1/modules/DNS設定改ざん検知モジュール/start",
+        );
+        assert_eq!(role, None);
     }
 
     #[test]
