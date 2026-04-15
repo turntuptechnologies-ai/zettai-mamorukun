@@ -785,6 +785,18 @@ archive_interval_hours = 24
 # アーカイブファイルの gzip 圧縮
 # true: .jsonl.gz（圧縮あり）、false: .jsonl（圧縮なし）
 archive_compress = true
+# アーカイブローテーション — 古いアーカイブファイルを自動削除する
+# 有効にすると各アーカイブ実行後にローテーションポリシーを適用する
+archive_rotation_enabled = false
+# アーカイブファイルの最大保持日数（0 で無制限）
+# ファイル名に含まれる終了日がこの日数より古いファイルを削除する
+archive_max_age_days = 365
+# アーカイブディレクトリの合計サイズ上限（MB、0 で無制限）
+# 超過時は古いファイルから削除して上限以下にする
+archive_max_total_mb = 0
+# アーカイブファイルの最大保持数（0 で無制限）
+# 超過時は古いファイルから削除する
+archive_max_files = 0
 
 [event_stream]
 # イベントストリーム（Unix ソケット経由リアルタイムイベント配信）の有効/無効
