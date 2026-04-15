@@ -645,7 +645,7 @@ impl ActionEngine {
     }
 
     /// テンプレート内のプレースホルダを展開する
-    fn expand_placeholders(template: &str, event: &SecurityEvent) -> String {
+    pub(crate) fn expand_placeholders(template: &str, event: &SecurityEvent) -> String {
         template
             .replace("{{source}}", &event.source_module)
             .replace("{{message}}", &event.message)
@@ -769,7 +769,7 @@ impl ActionEngine {
     }
 
     /// ログ出力用に URL をマスクする
-    fn mask_url(url: &str) -> String {
+    pub(crate) fn mask_url(url: &str) -> String {
         match url.find("://") {
             Some(pos) => {
                 let after_scheme = &url[pos + 3..];
