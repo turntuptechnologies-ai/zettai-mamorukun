@@ -1081,7 +1081,9 @@ mod tests {
 
     #[test]
     fn test_is_known_module() {
-        assert!(ModuleManager::is_known_module("DNS設定改ざん検知モジュール"));
+        assert!(ModuleManager::is_known_module(
+            "DNS設定改ざん検知モジュール"
+        ));
         assert!(ModuleManager::is_known_module(
             "ファイル整合性監視モジュール"
         ));
