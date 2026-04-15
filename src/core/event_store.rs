@@ -836,6 +836,31 @@ fn delete_archive_file(dir: &std::path::Path, filename: &str) -> bool {
     success
 }
 
+/// 指定されたアーカイブファイルを削除する（API 用）
+pub fn delete_archive(archive_dir: &str, filename: &str) -> Result<(), AppError> {
+    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+        return Err(AppError::EventStore {
+            message: "不正なファイル名です".to_string(),
+        });
+    }
+
+    let dir = std::path::Path::new(archive_dir);
+    let filepath = dir.join(filename);
+    if !filepath.exists() {
+        return Err(AppError::EventStore {
+            message: format!("アーカイブファイルが見つかりません: {}", filename),
+        });
+    }
+
+    if !delete_archive_file(dir, filename) {
+        return Err(AppError::EventStore {
+            message: format!("アーカイブファイルの削除に失敗しました: {}", filename),
+        });
+    }
+
+    Ok(())
+}
+
 /// アーカイブ処理の本体（ブロッキング）
 fn archive_events_blocking(
     conn: &Arc<StdMutex<Connection>>,
@@ -1049,6 +1074,8 @@ pub struct ArchiveInfo {
     pub size: u64,
     /// SHA-256 チェックサム
     pub checksum: Option<String>,
+    /// 作成日時（UNIX タイムスタンプ秒）
+    pub created_at: Option<i64>,
 }
 
 /// アーカイブファイル一覧を取得する
@@ -1087,10 +1114,17 @@ pub fn list_archives(archive_dir: &str) -> Result<Vec<ArchiveInfo>, AppError> {
             .ok()
             .and_then(|content| content.split_whitespace().next().map(|s| s.to_string()));
 
+        let created_at = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64);
+
         archives.push(ArchiveInfo {
             filename,
             size: meta.len(),
             checksum,
+            created_at,
         });
     }
 
@@ -3548,5 +3582,82 @@ mod tests {
 
         let remaining = list_archives(archive_dir).unwrap();
         assert_eq!(remaining.len(), 3);
+    }
+
+    #[test]
+    fn test_delete_archive_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_dir = dir.path().to_str().unwrap();
+
+        let filename = "events_20260101_20260201.jsonl";
+        std::fs::write(dir.path().join(filename), "test\n").unwrap();
+        std::fs::write(
+            dir.path().join(format!("{}.sha256", filename)),
+            "abc  test\n",
+        )
+        .unwrap();
+
+        let result = delete_archive(archive_dir, filename);
+        assert!(result.is_ok());
+        assert!(!dir.path().join(filename).exists());
+        assert!(!dir.path().join(format!("{}.sha256", filename)).exists());
+    }
+
+    #[test]
+    fn test_delete_archive_file_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_dir = dir.path().to_str().unwrap();
+
+        let result = delete_archive(archive_dir, "nonexistent.jsonl");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("見つかりません"));
+    }
+
+    #[test]
+    fn test_delete_archive_path_traversal_dotdot() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_dir = dir.path().to_str().unwrap();
+
+        let result = delete_archive(archive_dir, "../etc/passwd");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("不正なファイル名"));
+    }
+
+    #[test]
+    fn test_delete_archive_path_traversal_slash() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_dir = dir.path().to_str().unwrap();
+
+        let result = delete_archive(archive_dir, "sub/file.jsonl");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("不正なファイル名"));
+    }
+
+    #[test]
+    fn test_delete_archive_path_traversal_backslash() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_dir = dir.path().to_str().unwrap();
+
+        let result = delete_archive(archive_dir, "sub\\file.jsonl");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("不正なファイル名"));
+    }
+
+    #[test]
+    fn test_list_archives_created_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_dir = dir.path().to_str().unwrap();
+
+        let filename = "events_20260101_20260201.jsonl";
+        std::fs::write(dir.path().join(filename), "test\n").unwrap();
+
+        let archives = list_archives(archive_dir).unwrap();
+        assert_eq!(archives.len(), 1);
+        assert!(archives[0].created_at.is_some());
+        assert!(archives[0].created_at.unwrap() > 0);
     }
 }

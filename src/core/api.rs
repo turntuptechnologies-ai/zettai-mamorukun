@@ -81,6 +81,7 @@ impl AsyncWrite for MaybeTlsStream {
 enum HttpMethod {
     Get,
     Post,
+    Delete,
     Options,
     Other,
 }
@@ -250,6 +251,18 @@ pub struct ApiServer {
     access_log: Arc<AtomicBool>,
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
     mtls_status: String,
+    archive_dir: Option<String>,
+    archive_config: ArchiveApiConfig,
+}
+
+/// アーカイブ API 用の設定
+#[derive(Clone)]
+struct ArchiveApiConfig {
+    archive_after_days: u64,
+    compress: bool,
+    max_age_days: u64,
+    max_total_mb: u64,
+    max_files: u64,
 }
 
 /// TLS アクセプターを構築する
@@ -411,6 +424,7 @@ impl ApiServer {
         reload_sender: mpsc::Sender<()>,
         event_bus: Option<broadcast::Sender<SecurityEvent>>,
         shared_scoring: Option<Arc<StdMutex<SharedSecurityScore>>>,
+        event_store_config: Option<&crate::config::EventStoreConfig>,
     ) -> Self {
         let rate_limiter = if config.rate_limit.enabled {
             Some(RateLimiter::new(&config.rate_limit))
@@ -474,6 +488,24 @@ impl ApiServer {
             } else {
                 "無効".to_string()
             },
+            archive_dir: event_store_config
+                .filter(|c| c.archive_enabled)
+                .map(|c| c.archive_dir.clone()),
+            archive_config: event_store_config
+                .map(|c| ArchiveApiConfig {
+                    archive_after_days: c.archive_after_days,
+                    compress: c.archive_compress,
+                    max_age_days: c.archive_max_age_days,
+                    max_total_mb: c.archive_max_total_mb,
+                    max_files: c.archive_max_files,
+                })
+                .unwrap_or(ArchiveApiConfig {
+                    archive_after_days: 30,
+                    compress: true,
+                    max_age_days: 365,
+                    max_total_mb: 0,
+                    max_files: 0,
+                }),
         }
     }
 
@@ -517,6 +549,8 @@ impl ApiServer {
         let access_log = self.access_log;
         let tls_acceptor = self.tls_acceptor;
         let mtls_status = self.mtls_status;
+        let archive_dir = self.archive_dir;
+        let archive_config = self.archive_config;
 
         // クリーンアップタスク
         if self.rate_limit_config.enabled {
@@ -572,6 +606,8 @@ impl ApiServer {
                                 let mrbs = max_request_body_size;
                                 let scoring = shared_scoring.clone();
                                 let al = Arc::clone(&access_log);
+                                let arch_dir = archive_dir.clone();
+                                let arch_cfg = archive_config.clone();
                                 let tls_acc = tls_acceptor.clone();
                                 tokio::spawn(async move {
                                     let maybe_stream = if let Some(ref acceptor) = tls_acc {
@@ -590,6 +626,7 @@ impl ApiServer {
                                         started, &db_path, &cfg_path, &sender, &toks,
                                         client_ip, &rl, &eb, &wsc, &wsc_count, &cors,
                                         oa_enabled, dps, mps, bms, mrbs, &scoring, &al,
+                                        &arch_dir, &arch_cfg,
                                     ).await {
                                         tracing::debug!(error = %e, "API 接続の処理に失敗");
                                     }
@@ -668,11 +705,18 @@ impl ApiServer {
             | (HttpMethod::Get, "/api/v1/modules")
             | (HttpMethod::Get, "/api/v1/events")
             | (HttpMethod::Get, "/api/v1/events/stream")
-            | (HttpMethod::Get, "/api/v1/score") => Some(ApiRole::ReadOnly),
+            | (HttpMethod::Get, "/api/v1/score")
+            | (HttpMethod::Get, "/api/v1/archives") => Some(ApiRole::ReadOnly),
             (HttpMethod::Post, "/api/v1/reload") => Some(ApiRole::Admin),
             (HttpMethod::Post, "/api/v1/events/batch/delete") => Some(ApiRole::Admin),
             (HttpMethod::Post, "/api/v1/events/batch/export") => Some(ApiRole::ReadOnly),
             (HttpMethod::Post, "/api/v1/events/batch/acknowledge") => Some(ApiRole::Admin),
+            (HttpMethod::Post, "/api/v1/archives") => Some(ApiRole::Admin),
+            (HttpMethod::Post, "/api/v1/archives/restore") => Some(ApiRole::Admin),
+            (HttpMethod::Post, "/api/v1/archives/rotate") => Some(ApiRole::Admin),
+            _ if matches!(method, HttpMethod::Delete) && path.starts_with("/api/v1/archives/") => {
+                Some(ApiRole::Admin)
+            }
             _ => None,
         }
     }
@@ -757,6 +801,8 @@ impl ApiServer {
         max_request_body_size: usize,
         shared_scoring: &Option<Arc<StdMutex<SharedSecurityScore>>>,
         access_log: &Arc<AtomicBool>,
+        archive_dir: &Option<String>,
+        archive_config: &ArchiveApiConfig,
     ) -> Result<(), io::Error> {
         let request_start = Instant::now();
 
@@ -781,6 +827,7 @@ impl ApiServer {
         let method_str = match &method {
             HttpMethod::Get => "GET",
             HttpMethod::Post => "POST",
+            HttpMethod::Delete => "DELETE",
             HttpMethod::Options => "OPTIONS",
             HttpMethod::Other => "OTHER",
         };
@@ -1514,6 +1561,504 @@ impl ApiServer {
                     .await?;
                 }
             },
+            (HttpMethod::Get, "/api/v1/archives") => match archive_dir {
+                Some(dir) => match Self::handle_archives_list(dir) {
+                    Ok(body) => {
+                        resp_status = 200;
+                        resp_size = body.len() as u64;
+                        Self::send_json_response_with_headers(&mut stream, 200, "OK", &body, extra)
+                            .await?;
+                    }
+                    Err(msg) => {
+                        let err_body =
+                            format!(r#"{{"error":"{}"}}"#, Self::escape_json_string(&msg));
+                        resp_status = 500;
+                        resp_size = err_body.len() as u64;
+                        Self::send_error_with_headers(
+                            &mut stream,
+                            500,
+                            "Internal Server Error",
+                            &msg,
+                            extra,
+                        )
+                        .await?;
+                    }
+                },
+                None => {
+                    resp_status = 503;
+                    let err_body = format!(
+                        r#"{{"error":"{}"}}"#,
+                        Self::escape_json_string("アーカイブ機能が無効です")
+                    );
+                    resp_size = err_body.len() as u64;
+                    Self::send_error_with_headers(
+                        &mut stream,
+                        503,
+                        "Service Unavailable",
+                        "アーカイブ機能が無効です",
+                        extra,
+                    )
+                    .await?;
+                }
+            },
+            (HttpMethod::Post, "/api/v1/archives") => match archive_dir {
+                Some(dir) => match event_store_db_path {
+                    Some(db_path) => {
+                        let body_result = tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            Self::read_request_with_body(&mut stream, max_request_body_size),
+                        )
+                        .await;
+                        let full = match body_result {
+                            Ok(Ok(s)) => s,
+                            Ok(Err(e)) => {
+                                let msg = format!("リクエストの読み取りに失敗: {}", e);
+                                Self::send_error_with_headers(
+                                    &mut stream,
+                                    400,
+                                    "Bad Request",
+                                    &msg,
+                                    extra,
+                                )
+                                .await?;
+                                let err_body =
+                                    format!(r#"{{"error":"{}"}}"#, Self::escape_json_string(&msg));
+                                if access_log_enabled {
+                                    Self::log_access(
+                                        method_str,
+                                        &path,
+                                        400,
+                                        request_start,
+                                        client_ip,
+                                        user_agent,
+                                        request_size,
+                                        err_body.len() as u64,
+                                    );
+                                }
+                                stream.shutdown().await?;
+                                return Ok(());
+                            }
+                            Err(_) => {
+                                Self::send_error_with_headers(
+                                    &mut stream,
+                                    408,
+                                    "Request Timeout",
+                                    "リクエストタイムアウト",
+                                    extra,
+                                )
+                                .await?;
+                                let err_body = format!(
+                                    r#"{{"error":"{}"}}"#,
+                                    Self::escape_json_string("リクエストタイムアウト")
+                                );
+                                if access_log_enabled {
+                                    Self::log_access(
+                                        method_str,
+                                        &path,
+                                        408,
+                                        request_start,
+                                        client_ip,
+                                        user_agent,
+                                        request_size,
+                                        err_body.len() as u64,
+                                    );
+                                }
+                                stream.shutdown().await?;
+                                return Ok(());
+                            }
+                        };
+                        let body = full.split("\r\n\r\n").nth(1).unwrap_or("");
+                        match Self::handle_archives_create(
+                            db_path,
+                            dir,
+                            body,
+                            archive_config,
+                            is_dry_run(&query_params),
+                        ) {
+                            Ok(resp) => {
+                                resp_status = 200;
+                                resp_size = resp.len() as u64;
+                                Self::send_json_response_with_headers(
+                                    &mut stream,
+                                    200,
+                                    "OK",
+                                    &resp,
+                                    extra,
+                                )
+                                .await?;
+                            }
+                            Err((status, msg)) => {
+                                let status_text = match status {
+                                    400 => "Bad Request",
+                                    500 => "Internal Server Error",
+                                    _ => "Error",
+                                };
+                                let err_body =
+                                    format!(r#"{{"error":"{}"}}"#, Self::escape_json_string(&msg));
+                                resp_status = status;
+                                resp_size = err_body.len() as u64;
+                                Self::send_error_with_headers(
+                                    &mut stream,
+                                    status,
+                                    status_text,
+                                    &msg,
+                                    extra,
+                                )
+                                .await?;
+                            }
+                        }
+                    }
+                    None => {
+                        resp_status = 503;
+                        let err_body = format!(
+                            r#"{{"error":"{}"}}"#,
+                            Self::escape_json_string("イベントストアが無効です")
+                        );
+                        resp_size = err_body.len() as u64;
+                        Self::send_error_with_headers(
+                            &mut stream,
+                            503,
+                            "Service Unavailable",
+                            "イベントストアが無効です",
+                            extra,
+                        )
+                        .await?;
+                    }
+                },
+                None => {
+                    resp_status = 503;
+                    let err_body = format!(
+                        r#"{{"error":"{}"}}"#,
+                        Self::escape_json_string("アーカイブ機能が無効です")
+                    );
+                    resp_size = err_body.len() as u64;
+                    Self::send_error_with_headers(
+                        &mut stream,
+                        503,
+                        "Service Unavailable",
+                        "アーカイブ機能が無効です",
+                        extra,
+                    )
+                    .await?;
+                }
+            },
+            (HttpMethod::Post, "/api/v1/archives/restore") => match archive_dir {
+                Some(dir) => match event_store_db_path {
+                    Some(db_path) => {
+                        let body_result = tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            Self::read_request_with_body(&mut stream, max_request_body_size),
+                        )
+                        .await;
+                        let full = match body_result {
+                            Ok(Ok(s)) => s,
+                            Ok(Err(e)) => {
+                                let msg = format!("リクエストの読み取りに失敗: {}", e);
+                                Self::send_error_with_headers(
+                                    &mut stream,
+                                    400,
+                                    "Bad Request",
+                                    &msg,
+                                    extra,
+                                )
+                                .await?;
+                                let err_body =
+                                    format!(r#"{{"error":"{}"}}"#, Self::escape_json_string(&msg));
+                                if access_log_enabled {
+                                    Self::log_access(
+                                        method_str,
+                                        &path,
+                                        400,
+                                        request_start,
+                                        client_ip,
+                                        user_agent,
+                                        request_size,
+                                        err_body.len() as u64,
+                                    );
+                                }
+                                stream.shutdown().await?;
+                                return Ok(());
+                            }
+                            Err(_) => {
+                                Self::send_error_with_headers(
+                                    &mut stream,
+                                    408,
+                                    "Request Timeout",
+                                    "リクエストタイムアウト",
+                                    extra,
+                                )
+                                .await?;
+                                let err_body = format!(
+                                    r#"{{"error":"{}"}}"#,
+                                    Self::escape_json_string("リクエストタイムアウト")
+                                );
+                                if access_log_enabled {
+                                    Self::log_access(
+                                        method_str,
+                                        &path,
+                                        408,
+                                        request_start,
+                                        client_ip,
+                                        user_agent,
+                                        request_size,
+                                        err_body.len() as u64,
+                                    );
+                                }
+                                stream.shutdown().await?;
+                                return Ok(());
+                            }
+                        };
+                        let body = full.split("\r\n\r\n").nth(1).unwrap_or("");
+                        match Self::handle_archives_restore(
+                            db_path,
+                            dir,
+                            body,
+                            is_dry_run(&query_params),
+                        ) {
+                            Ok(resp) => {
+                                resp_status = 200;
+                                resp_size = resp.len() as u64;
+                                Self::send_json_response_with_headers(
+                                    &mut stream,
+                                    200,
+                                    "OK",
+                                    &resp,
+                                    extra,
+                                )
+                                .await?;
+                            }
+                            Err((status, msg)) => {
+                                let status_text = match status {
+                                    400 => "Bad Request",
+                                    500 => "Internal Server Error",
+                                    _ => "Error",
+                                };
+                                let err_body =
+                                    format!(r#"{{"error":"{}"}}"#, Self::escape_json_string(&msg));
+                                resp_status = status;
+                                resp_size = err_body.len() as u64;
+                                Self::send_error_with_headers(
+                                    &mut stream,
+                                    status,
+                                    status_text,
+                                    &msg,
+                                    extra,
+                                )
+                                .await?;
+                            }
+                        }
+                    }
+                    None => {
+                        resp_status = 503;
+                        let err_body = format!(
+                            r#"{{"error":"{}"}}"#,
+                            Self::escape_json_string("イベントストアが無効です")
+                        );
+                        resp_size = err_body.len() as u64;
+                        Self::send_error_with_headers(
+                            &mut stream,
+                            503,
+                            "Service Unavailable",
+                            "イベントストアが無効です",
+                            extra,
+                        )
+                        .await?;
+                    }
+                },
+                None => {
+                    resp_status = 503;
+                    let err_body = format!(
+                        r#"{{"error":"{}"}}"#,
+                        Self::escape_json_string("アーカイブ機能が無効です")
+                    );
+                    resp_size = err_body.len() as u64;
+                    Self::send_error_with_headers(
+                        &mut stream,
+                        503,
+                        "Service Unavailable",
+                        "アーカイブ機能が無効です",
+                        extra,
+                    )
+                    .await?;
+                }
+            },
+            (HttpMethod::Post, "/api/v1/archives/rotate") => match archive_dir {
+                Some(dir) => {
+                    let body_result = tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        Self::read_request_with_body(&mut stream, max_request_body_size),
+                    )
+                    .await;
+                    let full = match body_result {
+                        Ok(Ok(s)) => s,
+                        Ok(Err(e)) => {
+                            let msg = format!("リクエストの読み取りに失敗: {}", e);
+                            Self::send_error_with_headers(
+                                &mut stream,
+                                400,
+                                "Bad Request",
+                                &msg,
+                                extra,
+                            )
+                            .await?;
+                            let err_body =
+                                format!(r#"{{"error":"{}"}}"#, Self::escape_json_string(&msg));
+                            if access_log_enabled {
+                                Self::log_access(
+                                    method_str,
+                                    &path,
+                                    400,
+                                    request_start,
+                                    client_ip,
+                                    user_agent,
+                                    request_size,
+                                    err_body.len() as u64,
+                                );
+                            }
+                            stream.shutdown().await?;
+                            return Ok(());
+                        }
+                        Err(_) => {
+                            Self::send_error_with_headers(
+                                &mut stream,
+                                408,
+                                "Request Timeout",
+                                "リクエストタイムアウト",
+                                extra,
+                            )
+                            .await?;
+                            let err_body = format!(
+                                r#"{{"error":"{}"}}"#,
+                                Self::escape_json_string("リクエストタイムアウト")
+                            );
+                            if access_log_enabled {
+                                Self::log_access(
+                                    method_str,
+                                    &path,
+                                    408,
+                                    request_start,
+                                    client_ip,
+                                    user_agent,
+                                    request_size,
+                                    err_body.len() as u64,
+                                );
+                            }
+                            stream.shutdown().await?;
+                            return Ok(());
+                        }
+                    };
+                    let body = full.split("\r\n\r\n").nth(1).unwrap_or("");
+                    match Self::handle_archives_rotate(
+                        dir,
+                        body,
+                        archive_config,
+                        is_dry_run(&query_params),
+                    ) {
+                        Ok(resp) => {
+                            resp_status = 200;
+                            resp_size = resp.len() as u64;
+                            Self::send_json_response_with_headers(
+                                &mut stream,
+                                200,
+                                "OK",
+                                &resp,
+                                extra,
+                            )
+                            .await?;
+                        }
+                        Err((status, msg)) => {
+                            let status_text = match status {
+                                400 => "Bad Request",
+                                500 => "Internal Server Error",
+                                _ => "Error",
+                            };
+                            let err_body =
+                                format!(r#"{{"error":"{}"}}"#, Self::escape_json_string(&msg));
+                            resp_status = status;
+                            resp_size = err_body.len() as u64;
+                            Self::send_error_with_headers(
+                                &mut stream,
+                                status,
+                                status_text,
+                                &msg,
+                                extra,
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                None => {
+                    resp_status = 503;
+                    let err_body = format!(
+                        r#"{{"error":"{}"}}"#,
+                        Self::escape_json_string("アーカイブ機能が無効です")
+                    );
+                    resp_size = err_body.len() as u64;
+                    Self::send_error_with_headers(
+                        &mut stream,
+                        503,
+                        "Service Unavailable",
+                        "アーカイブ機能が無効です",
+                        extra,
+                    )
+                    .await?;
+                }
+            },
+            (HttpMethod::Delete, p) if p.starts_with("/api/v1/archives/") => match archive_dir {
+                Some(dir) => {
+                    let filename = &p["/api/v1/archives/".len()..];
+                    match Self::handle_archive_delete(dir, filename, is_dry_run(&query_params)) {
+                        Ok(resp) => {
+                            resp_status = 200;
+                            resp_size = resp.len() as u64;
+                            Self::send_json_response_with_headers(
+                                &mut stream,
+                                200,
+                                "OK",
+                                &resp,
+                                extra,
+                            )
+                            .await?;
+                        }
+                        Err((status, msg)) => {
+                            let status_text = match status {
+                                400 => "Bad Request",
+                                404 => "Not Found",
+                                500 => "Internal Server Error",
+                                _ => "Error",
+                            };
+                            let err_body =
+                                format!(r#"{{"error":"{}"}}"#, Self::escape_json_string(&msg));
+                            resp_status = status;
+                            resp_size = err_body.len() as u64;
+                            Self::send_error_with_headers(
+                                &mut stream,
+                                status,
+                                status_text,
+                                &msg,
+                                extra,
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                None => {
+                    resp_status = 503;
+                    let err_body = format!(
+                        r#"{{"error":"{}"}}"#,
+                        Self::escape_json_string("アーカイブ機能が無効です")
+                    );
+                    resp_size = err_body.len() as u64;
+                    Self::send_error_with_headers(
+                        &mut stream,
+                        503,
+                        "Service Unavailable",
+                        "アーカイブ機能が無効です",
+                        extra,
+                    )
+                    .await?;
+                }
+            },
             (HttpMethod::Get, "/api/v1/openapi.json") => {
                 if openapi_enabled {
                     let schema = openapi::generate_openapi_schema();
@@ -1546,7 +2091,10 @@ impl ApiServer {
                     .await?;
                 }
             }
-            (HttpMethod::Get, _) | (HttpMethod::Options, _) | (HttpMethod::Other, _) => {
+            (HttpMethod::Get, _)
+            | (HttpMethod::Options, _)
+            | (HttpMethod::Delete, _)
+            | (HttpMethod::Other, _) => {
                 if matches!(
                     path.as_str(),
                     "/api/v1/health"
@@ -1558,7 +2106,11 @@ impl ApiServer {
                         | "/api/v1/events/batch/delete"
                         | "/api/v1/events/batch/export"
                         | "/api/v1/events/batch/acknowledge"
-                ) {
+                        | "/api/v1/archives"
+                        | "/api/v1/archives/restore"
+                        | "/api/v1/archives/rotate"
+                ) || path.starts_with("/api/v1/archives/")
+                {
                     let err_body = format!(
                         r#"{{"error":"{}"}}"#,
                         Self::escape_json_string("許可されていないメソッドです")
@@ -1591,14 +2143,19 @@ impl ApiServer {
                 }
             }
             (HttpMethod::Post, _) => {
-                if matches!(
+                let is_known_non_post = matches!(
                     path.as_str(),
                     "/api/v1/health"
                         | "/api/v1/status"
                         | "/api/v1/modules"
                         | "/api/v1/events"
                         | "/api/v1/openapi.json"
-                ) {
+                ) || (path.starts_with("/api/v1/archives/")
+                    && !matches!(
+                        path.as_str(),
+                        "/api/v1/archives/restore" | "/api/v1/archives/rotate"
+                    ));
+                if is_known_non_post {
                     let err_body = format!(
                         r#"{{"error":"{}"}}"#,
                         Self::escape_json_string("許可されていないメソッドです")
@@ -2097,6 +2654,7 @@ impl ApiServer {
             match parts[0] {
                 "GET" => HttpMethod::Get,
                 "POST" => HttpMethod::Post,
+                "DELETE" => HttpMethod::Delete,
                 "OPTIONS" => HttpMethod::Options,
                 _ => HttpMethod::Other,
             }
@@ -2664,6 +3222,212 @@ impl ApiServer {
         Ok(format!(r#"{{"acknowledged":{}}}"#, acknowledged))
     }
 
+    fn handle_archives_list(archive_dir: &str) -> Result<String, String> {
+        let archives =
+            crate::core::event_store::list_archives(archive_dir).map_err(|e| format!("{}", e))?;
+
+        let items: Vec<String> = archives
+            .iter()
+            .map(|a| {
+                let checksum_part = match &a.checksum {
+                    Some(c) => format!(r#","checksum":"{}""#, Self::escape_json_string(c)),
+                    None => String::new(),
+                };
+                let created_at_part = match a.created_at {
+                    Some(ts) => format!(r#","created_at":{}"#, ts),
+                    None => String::new(),
+                };
+                format!(
+                    r#"{{"filename":"{}","size":{}{}{}}}"#,
+                    Self::escape_json_string(&a.filename),
+                    a.size,
+                    checksum_part,
+                    created_at_part,
+                )
+            })
+            .collect();
+
+        Ok(format!(
+            r#"{{"archives":[{}],"count":{}}}"#,
+            items.join(","),
+            archives.len()
+        ))
+    }
+
+    fn handle_archives_create(
+        db_path: &str,
+        archive_dir: &str,
+        body: &str,
+        config: &ArchiveApiConfig,
+        dry_run: bool,
+    ) -> Result<String, (u16, String)> {
+        let (after_days, compress) = if body.trim().is_empty() || body.trim() == "{}" {
+            (config.archive_after_days, config.compress)
+        } else {
+            let json: serde_json::Value = serde_json::from_str(body)
+                .map_err(|e| (400u16, format!("JSON パースに失敗: {}", e)))?;
+            let after_days = json
+                .get("archive_after_days")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(config.archive_after_days);
+            let compress = json
+                .get("compress")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(config.compress);
+            (after_days, compress)
+        };
+
+        if dry_run {
+            return Ok(format!(
+                r#"{{"dry_run":true,"message":"手動アーカイブをプレビューします","details":{{"archive_after_days":{},"compress":{},"archive_dir":"{}"}}}}"#,
+                after_days,
+                compress,
+                Self::escape_json_string(archive_dir),
+            ));
+        }
+
+        let archived = crate::core::event_store::run_archive_manual(
+            db_path,
+            after_days,
+            archive_dir,
+            compress,
+        )
+        .map_err(|e| (500u16, format!("{}", e)))?;
+
+        Ok(format!(
+            r#"{{"message":"アーカイブが完了しました","archived":{}}}"#,
+            archived
+        ))
+    }
+
+    fn handle_archives_restore(
+        db_path: &str,
+        archive_dir: &str,
+        body: &str,
+        dry_run: bool,
+    ) -> Result<String, (u16, String)> {
+        let json: serde_json::Value = serde_json::from_str(body)
+            .map_err(|e| (400u16, format!("JSON パースに失敗: {}", e)))?;
+
+        let filename = json
+            .get("filename")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| (400u16, "filename を指定してください".to_string()))?;
+
+        if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+            return Err((400, "不正なファイル名です".to_string()));
+        }
+
+        if dry_run {
+            let filepath = std::path::Path::new(archive_dir).join(filename);
+            let exists = filepath.exists();
+            return Ok(format!(
+                r#"{{"dry_run":true,"message":"復元をプレビューします","details":{{"filename":"{}","file_exists":{}}}}}"#,
+                Self::escape_json_string(filename),
+                exists,
+            ));
+        }
+
+        let restored = crate::core::event_store::restore_archive(db_path, archive_dir, filename)
+            .map_err(|e| (500u16, format!("{}", e)))?;
+
+        Ok(format!(
+            r#"{{"message":"復元が完了しました","restored":{}}}"#,
+            restored
+        ))
+    }
+
+    fn handle_archives_rotate(
+        archive_dir: &str,
+        body: &str,
+        config: &ArchiveApiConfig,
+        dry_run: bool,
+    ) -> Result<String, (u16, String)> {
+        let (max_age_days, max_total_mb, max_files) =
+            if body.trim().is_empty() || body.trim() == "{}" {
+                (config.max_age_days, config.max_total_mb, config.max_files)
+            } else {
+                let json: serde_json::Value = serde_json::from_str(body)
+                    .map_err(|e| (400u16, format!("JSON パースに失敗: {}", e)))?;
+                let max_age = json
+                    .get("max_age_days")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(config.max_age_days);
+                let max_mb = json
+                    .get("max_total_mb")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(config.max_total_mb);
+                let max_f = json
+                    .get("max_files")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(config.max_files);
+                (max_age, max_mb, max_f)
+            };
+
+        if dry_run {
+            let archives = crate::core::event_store::list_archives(archive_dir)
+                .map_err(|e| (500u16, format!("{}", e)))?;
+            return Ok(format!(
+                r#"{{"dry_run":true,"message":"ローテーションをプレビューします","details":{{"current_files":{},"max_age_days":{},"max_total_mb":{},"max_files":{}}}}}"#,
+                archives.len(),
+                max_age_days,
+                max_total_mb,
+                max_files,
+            ));
+        }
+
+        let deleted = crate::core::event_store::rotate_archives(
+            archive_dir,
+            max_age_days,
+            max_total_mb,
+            max_files,
+        )
+        .map_err(|e| (500u16, format!("{}", e)))?;
+
+        Ok(format!(
+            r#"{{"message":"ローテーションが完了しました","deleted":{}}}"#,
+            deleted
+        ))
+    }
+
+    fn handle_archive_delete(
+        archive_dir: &str,
+        filename: &str,
+        dry_run: bool,
+    ) -> Result<String, (u16, String)> {
+        if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+            return Err((400, "不正なファイル名です".to_string()));
+        }
+
+        if filename.is_empty() {
+            return Err((400, "ファイル名を指定してください".to_string()));
+        }
+
+        if dry_run {
+            let filepath = std::path::Path::new(archive_dir).join(filename);
+            let exists = filepath.exists();
+            return Ok(format!(
+                r#"{{"dry_run":true,"message":"削除をプレビューします","details":{{"filename":"{}","file_exists":{}}}}}"#,
+                Self::escape_json_string(filename),
+                exists,
+            ));
+        }
+
+        crate::core::event_store::delete_archive(archive_dir, filename).map_err(|e| {
+            let msg = format!("{}", e);
+            if msg.contains("見つかりません") {
+                (404u16, msg)
+            } else {
+                (500u16, msg)
+            }
+        })?;
+
+        Ok(format!(
+            r#"{{"message":"アーカイブファイルを削除しました","filename":"{}"}}"#,
+            Self::escape_json_string(filename)
+        ))
+    }
+
     async fn send_json_response_with_headers(
         stream: &mut MaybeTlsStream,
         status: u16,
@@ -2786,6 +3550,7 @@ mod tests {
             reload_tx,
             None,
             None,
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -2851,6 +3616,7 @@ mod tests {
             None,
             None,
             reload_tx,
+            None,
             None,
             None,
         );
@@ -2920,6 +3686,7 @@ mod tests {
             reload_tx,
             None,
             None,
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -2980,6 +3747,7 @@ mod tests {
             None,
             None,
             reload_tx,
+            None,
             None,
             None,
         );
@@ -3045,6 +3813,7 @@ mod tests {
             reload_tx,
             None,
             None,
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -3104,6 +3873,7 @@ mod tests {
             reload_tx,
             None,
             None,
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -3161,6 +3931,7 @@ mod tests {
             None,
             None,
             reload_tx,
+            None,
             None,
             None,
         );
@@ -3308,6 +4079,7 @@ mod tests {
             None,
             None,
             reload_tx,
+            None,
             None,
             None,
         );
@@ -3492,6 +4264,7 @@ mod tests {
             None,
             reload_tx,
             Some(event_tx.clone()),
+            None,
             None,
         );
         let cancel = server.cancel_token();
@@ -3957,6 +4730,7 @@ mod tests {
             reload_tx,
             None,
             None,
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -4189,6 +4963,7 @@ mod tests {
             reload_tx,
             None,
             None,
+            None,
         );
         let server_cancel = server.cancel_token();
         let cancel_clone = cancel.clone();
@@ -4255,6 +5030,7 @@ mod tests {
             None,
             None,
             reload_tx,
+            None,
             None,
             None,
         );
@@ -4324,6 +5100,7 @@ mod tests {
             reload_tx,
             None,
             None,
+            None,
         );
         let server_cancel = server.cancel_token();
         let cancel_clone = cancel.clone();
@@ -4387,6 +5164,7 @@ mod tests {
             reload_tx,
             None,
             None,
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -4445,6 +5223,7 @@ mod tests {
             None,
             None,
             reload_tx,
+            None,
             None,
             None,
         );
@@ -4612,6 +5391,7 @@ mod tests {
             None,
             None,
             tokio::sync::mpsc::channel(1).0,
+            None,
             None,
             None,
         );
@@ -5011,5 +5791,46 @@ mod tests {
             "mTLS 無効時は CA パスが不正でもエラーにならないべき: {:?}",
             result.err()
         );
+    }
+
+    #[test]
+    fn test_parse_request_delete() {
+        let (method, path, params) = ApiServer::parse_request(
+            "DELETE /api/v1/archives/events_20260101.jsonl HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert!(matches!(method, HttpMethod::Delete));
+        assert_eq!(path, "/api/v1/archives/events_20260101.jsonl");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_required_role_archives_list() {
+        let role = ApiServer::required_role(&HttpMethod::Get, "/api/v1/archives");
+        assert_eq!(role, Some(ApiRole::ReadOnly));
+    }
+
+    #[test]
+    fn test_required_role_archives_create() {
+        let role = ApiServer::required_role(&HttpMethod::Post, "/api/v1/archives");
+        assert_eq!(role, Some(ApiRole::Admin));
+    }
+
+    #[test]
+    fn test_required_role_archives_restore() {
+        let role = ApiServer::required_role(&HttpMethod::Post, "/api/v1/archives/restore");
+        assert_eq!(role, Some(ApiRole::Admin));
+    }
+
+    #[test]
+    fn test_required_role_archives_rotate() {
+        let role = ApiServer::required_role(&HttpMethod::Post, "/api/v1/archives/rotate");
+        assert_eq!(role, Some(ApiRole::Admin));
+    }
+
+    #[test]
+    fn test_required_role_archives_delete() {
+        let role =
+            ApiServer::required_role(&HttpMethod::Delete, "/api/v1/archives/some_file.jsonl");
+        assert_eq!(role, Some(ApiRole::Admin));
     }
 }

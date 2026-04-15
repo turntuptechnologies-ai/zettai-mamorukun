@@ -424,6 +424,11 @@ impl Daemon {
             } else {
                 None
             };
+            let event_store_cfg = if self.config.event_store.enabled {
+                Some(&self.config.event_store)
+            } else {
+                None
+            };
             let api_server = ApiServer::new(
                 &self.config.api,
                 Arc::clone(&shared_module_names),
@@ -435,6 +440,7 @@ impl Daemon {
                 reload_sender.clone(),
                 event_bus.as_ref().map(|b| b.sender()),
                 shared_scoring.clone(),
+                event_store_cfg,
             );
             api_cancel_token = Some(api_server.cancel_token());
             match api_server.spawn() {
@@ -821,6 +827,11 @@ impl Daemon {
                                     } else {
                                         None
                                     };
+                                    let es_cfg_b = if new_config.event_store.enabled {
+                                        Some(&new_config.event_store)
+                                    } else {
+                                        None
+                                    };
                                     let api_server = ApiServer::new(
                                         &new_config.api,
                                         Arc::clone(&shared_module_names),
@@ -832,6 +843,7 @@ impl Daemon {
                                         reload_sender.clone(),
                                         event_bus.as_ref().map(|b| b.sender()),
                                         shared_scoring.clone(),
+                                        es_cfg_b,
                                     );
                                     api_cancel_token = Some(api_server.cancel_token());
                                     match api_server.spawn() {
@@ -854,6 +866,11 @@ impl Daemon {
                                     } else {
                                         None
                                     };
+                                    let es_cfg_c = if new_config.event_store.enabled {
+                                        Some(&new_config.event_store)
+                                    } else {
+                                        None
+                                    };
                                     let api_server = ApiServer::new(
                                         &new_config.api,
                                         Arc::clone(&shared_module_names),
@@ -865,6 +882,7 @@ impl Daemon {
                                         reload_sender.clone(),
                                         event_bus.as_ref().map(|b| b.sender()),
                                         shared_scoring.clone(),
+                                        es_cfg_c,
                                     );
                                     api_cancel_token = Some(api_server.cancel_token());
                                     match api_server.spawn() {
@@ -883,6 +901,11 @@ impl Daemon {
                                             } else {
                                                 None
                                             };
+                                            let es_cfg_fb = if self.config.event_store.enabled {
+                                                Some(&self.config.event_store)
+                                            } else {
+                                                None
+                                            };
                                             let fallback = ApiServer::new(
                                                 &self.config.api,
                                                 Arc::clone(&shared_module_names),
@@ -894,6 +917,7 @@ impl Daemon {
                                                 reload_sender.clone(),
                                                 event_bus.as_ref().map(|b| b.sender()),
                                                 shared_scoring.clone(),
+                                                es_cfg_fb,
                                             );
                                             api_cancel_token =
                                                 Some(fallback.cancel_token());

@@ -845,7 +845,8 @@ port = 9100
 # REST API サーバーの有効/無効
 # 有効にすると HTTP REST API でデーモンのステータス確認、イベント検索、
 # モジュール一覧、設定リロードをリモートから操作可能にする
-# エンドポイント: /api/v1/health, /api/v1/status, /api/v1/modules, /api/v1/events, /api/v1/reload, /api/v1/openapi.json
+# エンドポイント: /api/v1/health, /api/v1/status, /api/v1/modules, /api/v1/events, /api/v1/reload,
+#   /api/v1/archives, /api/v1/archives/restore, /api/v1/archives/rotate, /api/v1/openapi.json
 # SIGHUP でホットリロード可能（enabled, bind_address, port, tokens の変更が即時反映される）
 enabled = false
 # バインドアドレス
@@ -858,8 +859,8 @@ port = 9201
 # トークンハッシュは `zettai-mamorukun hash-token <TOKEN>` で生成できる
 #
 # ロール:
-#   read_only — 参照系エンドポイント（/api/v1/status, /api/v1/modules, /api/v1/events）のみ
-#   admin    — 全エンドポイント（参照系 + /api/v1/reload）
+#   read_only — 参照系エンドポイント（/api/v1/status, /api/v1/modules, /api/v1/events, GET /api/v1/archives）のみ
+#   admin    — 全エンドポイント（参照系 + /api/v1/reload, /api/v1/archives 操作）
 # /api/v1/health は認証不要（常にアクセス可能）
 #
 # [[api.tokens]]
