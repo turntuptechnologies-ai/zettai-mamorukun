@@ -1,4 +1,5 @@
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{Shell, generate};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process;
@@ -196,6 +197,12 @@ enum Commands {
     },
     /// 暗号化鍵を生成する
     GenerateKey,
+    /// シェル補完スクリプトを生成する
+    Completions {
+        /// 対象シェル (bash, zsh, fish, elvish, powershell)
+        #[arg(value_enum)]
+        shell: Shell,
+    },
     /// 暗号化鍵をローテーションする（既存の暗号化値を新しい鍵で再暗号化）
     RotateKey {
         /// 旧鍵のソース（env:変数名、ファイルパス、またはBase64文字列）
@@ -1586,6 +1593,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             run_rotate_key(&cli.config, old_key, new_key, *dry_run, *backup);
             return Ok(());
         }
+        Some(Commands::Completions { shell }) => {
+            let mut cmd = Cli::command();
+            generate(*shell, &mut cmd, "zettai-mamorukun", &mut std::io::stdout());
+            return Ok(());
+        }
         Some(Commands::HashToken { token }) => {
             let token_str = match token {
                 Some(t) => t.clone(),
@@ -1779,5 +1791,47 @@ mod tests {
         let record = rdr.records().next().unwrap().unwrap();
         assert!(record[4].contains("カンマ,を含む"));
         assert!(record[5].contains("commas"));
+    }
+
+    #[test]
+    fn test_completions_bash() {
+        let mut cmd = Cli::command();
+        let mut buf = Vec::new();
+        generate(Shell::Bash, &mut cmd, "zettai-mamorukun", &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        assert!(
+            output.contains("complete"),
+            "bash completion should contain 'complete'"
+        );
+        assert!(
+            output.contains("zettai-mamorukun"),
+            "bash completion should contain binary name"
+        );
+    }
+
+    #[test]
+    fn test_completions_zsh() {
+        let mut cmd = Cli::command();
+        let mut buf = Vec::new();
+        generate(Shell::Zsh, &mut cmd, "zettai-mamorukun", &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        assert!(!output.is_empty(), "zsh completion should not be empty");
+        assert!(
+            output.contains("zettai-mamorukun"),
+            "zsh completion should contain binary name"
+        );
+    }
+
+    #[test]
+    fn test_completions_fish() {
+        let mut cmd = Cli::command();
+        let mut buf = Vec::new();
+        generate(Shell::Fish, &mut cmd, "zettai-mamorukun", &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        assert!(!output.is_empty(), "fish completion should not be empty");
+        assert!(
+            output.contains("zettai-mamorukun"),
+            "fish completion should contain binary name"
+        );
     }
 }
