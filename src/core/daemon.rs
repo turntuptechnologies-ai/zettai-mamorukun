@@ -58,6 +58,7 @@ impl Daemon {
         let mut status_cancel_token: Option<CancellationToken> = None;
         let mut prometheus_cancel_token: Option<CancellationToken> = None;
         let mut api_cancel_token: Option<CancellationToken> = None;
+        let mut api_shared_action_config: Option<Arc<StdMutex<crate::config::ActionConfig>>> = None;
         let prometheus_started_at = Instant::now();
 
         // API サーバー用リロードチャネル
@@ -441,8 +442,10 @@ impl Daemon {
                 event_bus.as_ref().map(|b| b.sender()),
                 shared_scoring.clone(),
                 event_store_cfg,
+                &self.config.actions,
             );
             api_cancel_token = Some(api_server.cancel_token());
+            api_shared_action_config = Some(api_server.shared_action_config());
             match api_server.spawn() {
                 Ok(()) => {}
                 Err(e) => {
@@ -844,8 +847,11 @@ impl Daemon {
                                         event_bus.as_ref().map(|b| b.sender()),
                                         shared_scoring.clone(),
                                         es_cfg_b,
+                                        &new_config.actions,
                                     );
                                     api_cancel_token = Some(api_server.cancel_token());
+                                    api_shared_action_config =
+                                        Some(api_server.shared_action_config());
                                     match api_server.spawn() {
                                         Ok(()) => tracing::info!(
                                             "REST API サーバーを起動しました（ホットリロード）"
@@ -883,8 +889,11 @@ impl Daemon {
                                         event_bus.as_ref().map(|b| b.sender()),
                                         shared_scoring.clone(),
                                         es_cfg_c,
+                                        &new_config.actions,
                                     );
                                     api_cancel_token = Some(api_server.cancel_token());
+                                    api_shared_action_config =
+                                        Some(api_server.shared_action_config());
                                     match api_server.spawn() {
                                         Ok(()) => tracing::info!(
                                             bind_address = %new_config.api.bind_address,
@@ -918,9 +927,12 @@ impl Daemon {
                                                 event_bus.as_ref().map(|b| b.sender()),
                                                 shared_scoring.clone(),
                                                 es_cfg_fb,
+                                                &self.config.actions,
                                             );
                                             api_cancel_token =
                                                 Some(fallback.cancel_token());
+                                            api_shared_action_config =
+                                                Some(fallback.shared_action_config());
                                             match fallback.spawn() {
                                                 Ok(()) => tracing::info!(
                                                     "旧設定で REST API サーバーを復旧しました"
@@ -933,6 +945,13 @@ impl Daemon {
                                         }
                                     }
                                 }
+                            }
+
+                            // API Webhook 設定のリロード
+                            if let Some(ref cfg) = api_shared_action_config {
+                                // unwrap safety: Mutex が poisoned になるのはパニック時のみ
+                                *cfg.lock().unwrap() = new_config.actions.clone();
+                                tracing::info!("API Webhook 設定をリロードしました");
                             }
 
                             self.config = new_config;

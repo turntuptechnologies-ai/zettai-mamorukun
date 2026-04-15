@@ -5,7 +5,8 @@
 //! JSON レスポンス形式で `/api/v1/` プレフィックスのエンドポイントを提供する。
 
 use crate::config::{
-    ApiConfig, ApiRateLimitConfig, ApiRole, ApiTokenConfig, CorsConfig, WebSocketConfig,
+    ActionConfig, ApiConfig, ApiRateLimitConfig, ApiRole, ApiTokenConfig, CorsConfig,
+    WebSocketConfig,
 };
 use crate::core::event::{SecurityEvent, Severity};
 use crate::core::metrics::SharedMetrics;
@@ -253,6 +254,7 @@ pub struct ApiServer {
     mtls_status: String,
     archive_dir: Option<String>,
     archive_config: ArchiveApiConfig,
+    shared_action_config: Arc<StdMutex<ActionConfig>>,
 }
 
 /// アーカイブ API 用の設定
@@ -425,6 +427,7 @@ impl ApiServer {
         event_bus: Option<broadcast::Sender<SecurityEvent>>,
         shared_scoring: Option<Arc<StdMutex<SharedSecurityScore>>>,
         event_store_config: Option<&crate::config::EventStoreConfig>,
+        action_config: &ActionConfig,
     ) -> Self {
         let rate_limiter = if config.rate_limit.enabled {
             Some(RateLimiter::new(&config.rate_limit))
@@ -506,6 +509,7 @@ impl ApiServer {
                     max_total_mb: 0,
                     max_files: 0,
                 }),
+            shared_action_config: Arc::new(StdMutex::new(action_config.clone())),
         }
     }
 
@@ -517,6 +521,11 @@ impl ApiServer {
     /// アクセスログフラグの共有参照を取得する（ホットリロード用）
     pub fn access_log_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.access_log)
+    }
+
+    /// アクション設定の共有参照を取得する（ホットリロード用）
+    pub fn shared_action_config(&self) -> Arc<StdMutex<ActionConfig>> {
+        Arc::clone(&self.shared_action_config)
     }
 
     /// API サーバーを非同期タスクとして起動する
@@ -551,6 +560,7 @@ impl ApiServer {
         let mtls_status = self.mtls_status;
         let archive_dir = self.archive_dir;
         let archive_config = self.archive_config;
+        let shared_action_config = self.shared_action_config;
 
         // クリーンアップタスク
         if self.rate_limit_config.enabled {
@@ -608,6 +618,7 @@ impl ApiServer {
                                 let al = Arc::clone(&access_log);
                                 let arch_dir = archive_dir.clone();
                                 let arch_cfg = archive_config.clone();
+                                let act_cfg = Arc::clone(&shared_action_config);
                                 let tls_acc = tls_acceptor.clone();
                                 tokio::spawn(async move {
                                     let maybe_stream = if let Some(ref acceptor) = tls_acc {
@@ -626,7 +637,7 @@ impl ApiServer {
                                         started, &db_path, &cfg_path, &sender, &toks,
                                         client_ip, &rl, &eb, &wsc, &wsc_count, &cors,
                                         oa_enabled, dps, mps, bms, mrbs, &scoring, &al,
-                                        &arch_dir, &arch_cfg,
+                                        &arch_dir, &arch_cfg, &act_cfg,
                                     ).await {
                                         tracing::debug!(error = %e, "API 接続の処理に失敗");
                                     }
@@ -706,7 +717,8 @@ impl ApiServer {
             | (HttpMethod::Get, "/api/v1/events")
             | (HttpMethod::Get, "/api/v1/events/stream")
             | (HttpMethod::Get, "/api/v1/score")
-            | (HttpMethod::Get, "/api/v1/archives") => Some(ApiRole::ReadOnly),
+            | (HttpMethod::Get, "/api/v1/archives")
+            | (HttpMethod::Get, "/api/v1/webhooks") => Some(ApiRole::ReadOnly),
             (HttpMethod::Post, "/api/v1/reload") => Some(ApiRole::Admin),
             (HttpMethod::Post, "/api/v1/events/batch/delete") => Some(ApiRole::Admin),
             (HttpMethod::Post, "/api/v1/events/batch/export") => Some(ApiRole::ReadOnly),
@@ -714,6 +726,7 @@ impl ApiServer {
             (HttpMethod::Post, "/api/v1/archives") => Some(ApiRole::Admin),
             (HttpMethod::Post, "/api/v1/archives/restore") => Some(ApiRole::Admin),
             (HttpMethod::Post, "/api/v1/archives/rotate") => Some(ApiRole::Admin),
+            (HttpMethod::Post, "/api/v1/webhooks/test") => Some(ApiRole::Admin),
             _ if matches!(method, HttpMethod::Delete) && path.starts_with("/api/v1/archives/") => {
                 Some(ApiRole::Admin)
             }
@@ -803,6 +816,7 @@ impl ApiServer {
         access_log: &Arc<AtomicBool>,
         archive_dir: &Option<String>,
         archive_config: &ArchiveApiConfig,
+        shared_action_config: &Arc<StdMutex<ActionConfig>>,
     ) -> Result<(), io::Error> {
         let request_start = Instant::now();
 
@@ -2091,6 +2105,109 @@ impl ApiServer {
                     .await?;
                 }
             }
+            (HttpMethod::Get, "/api/v1/webhooks") => {
+                let body = Self::build_webhooks_response(shared_action_config);
+                resp_status = 200;
+                resp_size = body.len() as u64;
+                Self::send_json_response_with_headers(&mut stream, 200, "OK", &body, extra).await?;
+            }
+            (HttpMethod::Post, "/api/v1/webhooks/test") => {
+                let body_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    Self::read_request_with_body(&mut stream, max_request_body_size),
+                )
+                .await;
+                let full = match body_result {
+                    Ok(Ok(s)) => s,
+                    Ok(Err(e)) => {
+                        let msg = format!("リクエストの読み取りに失敗: {}", e);
+                        Self::send_error_with_headers(&mut stream, 400, "Bad Request", &msg, extra)
+                            .await?;
+                        let err_body =
+                            format!(r#"{{"error":"{}"}}"#, Self::escape_json_string(&msg));
+                        if access_log_enabled {
+                            Self::log_access(
+                                method_str,
+                                &path,
+                                400,
+                                request_start,
+                                client_ip,
+                                user_agent,
+                                request_size,
+                                err_body.len() as u64,
+                            );
+                        }
+                        stream.shutdown().await?;
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        Self::send_error_with_headers(
+                            &mut stream,
+                            408,
+                            "Request Timeout",
+                            "リクエストタイムアウト",
+                            extra,
+                        )
+                        .await?;
+                        let err_body = format!(
+                            r#"{{"error":"{}"}}"#,
+                            Self::escape_json_string("リクエストタイムアウト")
+                        );
+                        if access_log_enabled {
+                            Self::log_access(
+                                method_str,
+                                &path,
+                                408,
+                                request_start,
+                                client_ip,
+                                user_agent,
+                                request_size,
+                                err_body.len() as u64,
+                            );
+                        }
+                        stream.shutdown().await?;
+                        return Ok(());
+                    }
+                };
+                let req_body = full.split("\r\n\r\n").nth(1).unwrap_or("");
+                if req_body.is_empty() {
+                    resp_status = 400;
+                    let err_body = r#"{"error":"リクエストボディが必要です"}"#;
+                    resp_size = err_body.len() as u64;
+                    Self::send_error_with_headers(
+                        &mut stream,
+                        400,
+                        "Bad Request",
+                        "リクエストボディが必要です",
+                        extra,
+                    )
+                    .await?;
+                } else {
+                    let body = Self::handle_webhook_test(shared_action_config, req_body).await;
+                    let status = if body.contains(r#""success":true"#) {
+                        200
+                    } else if body.contains("が見つかりません") {
+                        404
+                    } else {
+                        502
+                    };
+                    resp_status = status;
+                    resp_size = body.len() as u64;
+                    let status_text = match status {
+                        200 => "OK",
+                        404 => "Not Found",
+                        _ => "Bad Gateway",
+                    };
+                    Self::send_json_response_with_headers(
+                        &mut stream,
+                        status,
+                        status_text,
+                        &body,
+                        extra,
+                    )
+                    .await?;
+                }
+            }
             (HttpMethod::Get, _)
             | (HttpMethod::Options, _)
             | (HttpMethod::Delete, _)
@@ -2109,6 +2226,8 @@ impl ApiServer {
                         | "/api/v1/archives"
                         | "/api/v1/archives/restore"
                         | "/api/v1/archives/rotate"
+                        | "/api/v1/webhooks"
+                        | "/api/v1/webhooks/test"
                 ) || path.starts_with("/api/v1/archives/")
                 {
                     let err_body = format!(
@@ -2150,6 +2269,7 @@ impl ApiServer {
                         | "/api/v1/modules"
                         | "/api/v1/events"
                         | "/api/v1/openapi.json"
+                        | "/api/v1/webhooks"
                 ) || (path.starts_with("/api/v1/archives/")
                     && !matches!(
                         path.as_str(),
@@ -3461,11 +3581,250 @@ impl ApiServer {
         Self::send_json_response_with_headers(stream, status, status_text, &body, extra_headers)
             .await
     }
+
+    /// Webhook 一覧レスポンスを構築する
+    fn build_webhooks_response(shared_action_config: &Arc<StdMutex<ActionConfig>>) -> String {
+        use crate::core::action::ActionEngine;
+
+        // unwrap safety: Mutex が poisoned になるのはパニック時のみ
+        let config = shared_action_config.lock().unwrap();
+        let mut webhooks = Vec::new();
+
+        // アクションルールの Webhook を収集
+        for rule in &config.rules {
+            if rule.action == "webhook"
+                && let Some(ref url) = rule.url
+            {
+                let entry = format!(
+                    r#"{{"name":"{}","action_type":"rule","severity_filter":{},"module_filter":{},"url_masked":"{}","method":"{}","has_headers":{},"has_body_template":{},"max_retries":{},"timeout_secs":{}}}"#,
+                    Self::escape_json_string(&rule.name),
+                    match &rule.severity {
+                        Some(s) => format!(r#""{}""#, Self::escape_json_string(s)),
+                        None => "null".to_string(),
+                    },
+                    match &rule.module {
+                        Some(m) => format!(r#""{}""#, Self::escape_json_string(m)),
+                        None => "null".to_string(),
+                    },
+                    Self::escape_json_string(&ActionEngine::mask_url(url)),
+                    Self::escape_json_string(rule.method.as_deref().unwrap_or("POST")),
+                    rule.headers.as_ref().is_some_and(|h| !h.is_empty()),
+                    rule.body_template.is_some(),
+                    rule.max_retries.unwrap_or(3),
+                    rule.timeout_secs,
+                );
+                webhooks.push(entry);
+            }
+        }
+
+        // ダイジェスト Webhook を収集
+        if let Some(ref digest) = config.digest
+            && digest.enabled
+            && let Some(ref url) = digest.webhook_url
+        {
+            let entry = format!(
+                r#"{{"name":"digest_notification","action_type":"digest","severity_filter":null,"module_filter":null,"url_masked":"{}","method":"{}","has_headers":{},"has_body_template":{},"max_retries":{},"timeout_secs":null}}"#,
+                Self::escape_json_string(&ActionEngine::mask_url(url)),
+                Self::escape_json_string(&digest.method),
+                !digest.headers.is_empty(),
+                digest.body_template.is_some(),
+                digest.max_retries,
+            );
+            webhooks.push(entry);
+        }
+
+        let total = webhooks.len();
+        format!(
+            r#"{{"webhooks":[{}],"total":{}}}"#,
+            webhooks.join(","),
+            total
+        )
+    }
+
+    /// Webhook テスト送信を処理する
+    async fn handle_webhook_test(
+        shared_action_config: &Arc<StdMutex<ActionConfig>>,
+        body: &str,
+    ) -> String {
+        use crate::core::action::ActionEngine;
+
+        // リクエストボディの解析
+        let name = match Self::extract_json_string(body, "name") {
+            Some(n) => n,
+            None => {
+                return r#"{"error":"'name' フィールドが必要です"}"#.to_string();
+            }
+        };
+
+        // 設定から Webhook を検索
+        let (url, method, headers, body_template, timeout_secs) = {
+            // unwrap safety: Mutex が poisoned になるのはパニック時のみ
+            let config = shared_action_config.lock().unwrap();
+
+            // まずルール Webhook を検索
+            let rule_match = config
+                .rules
+                .iter()
+                .find(|r| r.action == "webhook" && r.name == name);
+            if let Some(rule) = rule_match {
+                let url = match &rule.url {
+                    Some(u) => u.clone(),
+                    None => {
+                        return format!(
+                            r#"{{"error":"Webhook '{}' に URL が設定されていません"}}"#,
+                            Self::escape_json_string(&name)
+                        );
+                    }
+                };
+                (
+                    url,
+                    rule.method.clone().unwrap_or_else(|| "POST".to_string()),
+                    rule.headers.clone().unwrap_or_default(),
+                    rule.body_template.clone(),
+                    rule.timeout_secs,
+                )
+            } else if name == "digest_notification" {
+                // ダイジェスト Webhook を検索
+                match &config.digest {
+                    Some(digest) if digest.enabled && digest.webhook_url.is_some() => (
+                        digest.webhook_url.clone().unwrap_or_default(),
+                        digest.method.clone(),
+                        digest.headers.clone(),
+                        digest.body_template.clone(),
+                        30,
+                    ),
+                    _ => {
+                        return format!(
+                            r#"{{"error":"Webhook '{}' が見つかりません"}}"#,
+                            Self::escape_json_string(&name)
+                        );
+                    }
+                }
+            } else {
+                return format!(
+                    r#"{{"error":"Webhook '{}' が見つかりません"}}"#,
+                    Self::escape_json_string(&name)
+                );
+            }
+        };
+
+        let masked_url = ActionEngine::mask_url(&url);
+
+        // テスト用 SecurityEvent を作成
+        let test_event = crate::core::event::SecurityEvent::new(
+            "webhook_test",
+            crate::core::event::Severity::Info,
+            "api_server",
+            "Webhook テスト送信",
+        );
+
+        // ボディの構築
+        let request_body = match &body_template {
+            Some(tmpl) => ActionEngine::expand_placeholders(tmpl, &test_event),
+            None => {
+                let ts_secs = test_event
+                    .timestamp
+                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                format!(
+                    r#"{{"source":"{}","message":"{}","severity":"{}","event_type":"{}","timestamp":{}}}"#,
+                    test_event.source_module,
+                    Self::escape_json_string(&test_event.message),
+                    test_event.severity,
+                    test_event.event_type,
+                    ts_secs,
+                )
+            }
+        };
+
+        // HTTP リクエストを送信
+        let start = std::time::Instant::now();
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                return format!(
+                    r#"{{"success":false,"name":"{}","url_masked":"{}","error":"HTTP クライアントの構築に失敗: {}"}}"#,
+                    Self::escape_json_string(&name),
+                    Self::escape_json_string(&masked_url),
+                    Self::escape_json_string(&e.to_string()),
+                );
+            }
+        };
+
+        let mut req = match method.to_uppercase().as_str() {
+            "GET" => client.get(&url),
+            "PUT" => client.put(&url).body(request_body),
+            "PATCH" => client.patch(&url).body(request_body),
+            _ => client.post(&url).body(request_body),
+        };
+
+        req = req.header("Content-Type", "application/json");
+        for (key, value) in &headers {
+            req = req.header(key.as_str(), value.as_str());
+        }
+
+        match req.send().await {
+            Ok(response) => {
+                let status_code = response.status().as_u16();
+                let elapsed_ms = start.elapsed().as_millis();
+                format!(
+                    r#"{{"success":true,"name":"{}","url_masked":"{}","status_code":{},"response_time_ms":{}}}"#,
+                    Self::escape_json_string(&name),
+                    Self::escape_json_string(&masked_url),
+                    status_code,
+                    elapsed_ms,
+                )
+            }
+            Err(e) => {
+                let elapsed_ms = start.elapsed().as_millis();
+                format!(
+                    r#"{{"success":false,"name":"{}","url_masked":"{}","error":"{}","response_time_ms":{}}}"#,
+                    Self::escape_json_string(&name),
+                    Self::escape_json_string(&masked_url),
+                    Self::escape_json_string(&e.to_string()),
+                    elapsed_ms,
+                )
+            }
+        }
+    }
+
+    /// JSON 文字列からフィールドを抽出する簡易パーサー
+    fn extract_json_string(json: &str, field: &str) -> Option<String> {
+        let pattern = format!(r#""{}""#, field);
+        let pos = json.find(&pattern)?;
+        let after_key = &json[pos + pattern.len()..];
+        let colon_pos = after_key.find(':')?;
+        let after_colon = after_key[colon_pos + 1..].trim_start();
+        if !after_colon.starts_with('"') {
+            return None;
+        }
+        let value_start = 1;
+        let mut chars = after_colon[value_start..].chars();
+        let mut value = String::new();
+        loop {
+            match chars.next() {
+                Some('\\') => {
+                    if let Some(c) = chars.next() {
+                        value.push(c);
+                    }
+                }
+                Some('"') => break,
+                Some(c) => value.push(c),
+                None => return None,
+            }
+        }
+        Some(value)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{ActionRuleConfig, DigestConfig};
     use std::collections::HashMap;
 
     #[test]
@@ -3551,6 +3910,7 @@ mod tests {
             None,
             None,
             None,
+            &ActionConfig::default(),
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -3619,6 +3979,7 @@ mod tests {
             None,
             None,
             None,
+            &ActionConfig::default(),
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -3687,6 +4048,7 @@ mod tests {
             None,
             None,
             None,
+            &ActionConfig::default(),
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -3750,6 +4112,7 @@ mod tests {
             None,
             None,
             None,
+            &ActionConfig::default(),
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -3814,6 +4177,7 @@ mod tests {
             None,
             None,
             None,
+            &ActionConfig::default(),
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -3874,6 +4238,7 @@ mod tests {
             None,
             None,
             None,
+            &ActionConfig::default(),
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -3934,6 +4299,7 @@ mod tests {
             None,
             None,
             None,
+            &ActionConfig::default(),
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -4082,6 +4448,7 @@ mod tests {
             None,
             None,
             None,
+            &ActionConfig::default(),
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -4266,6 +4633,7 @@ mod tests {
             Some(event_tx.clone()),
             None,
             None,
+            &ActionConfig::default(),
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -4731,6 +5099,7 @@ mod tests {
             None,
             None,
             None,
+            &ActionConfig::default(),
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -4964,6 +5333,7 @@ mod tests {
             None,
             None,
             None,
+            &ActionConfig::default(),
         );
         let server_cancel = server.cancel_token();
         let cancel_clone = cancel.clone();
@@ -5033,6 +5403,7 @@ mod tests {
             None,
             None,
             None,
+            &ActionConfig::default(),
         );
         let server_cancel = server.cancel_token();
         let cancel_clone = cancel.clone();
@@ -5101,6 +5472,7 @@ mod tests {
             None,
             None,
             None,
+            &ActionConfig::default(),
         );
         let server_cancel = server.cancel_token();
         let cancel_clone = cancel.clone();
@@ -5165,6 +5537,7 @@ mod tests {
             None,
             None,
             None,
+            &ActionConfig::default(),
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -5226,6 +5599,7 @@ mod tests {
             None,
             None,
             None,
+            &ActionConfig::default(),
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -5394,6 +5768,7 @@ mod tests {
             None,
             None,
             None,
+            &ActionConfig::default(),
         );
         let flag = server.access_log_flag();
         assert!(!flag.load(Ordering::Relaxed));
@@ -5832,5 +6207,120 @@ mod tests {
         let role =
             ApiServer::required_role(&HttpMethod::Delete, "/api/v1/archives/some_file.jsonl");
         assert_eq!(role, Some(ApiRole::Admin));
+    }
+
+    #[test]
+    fn test_webhooks_response_empty() {
+        let config = ActionConfig {
+            enabled: true,
+            rules: vec![],
+            rate_limit: None,
+            digest: None,
+        };
+        let shared = Arc::new(StdMutex::new(config));
+        let body = ApiServer::build_webhooks_response(&shared);
+        assert!(body.contains(r#""total":0"#));
+        assert!(body.contains(r#""webhooks":[]"#));
+    }
+
+    #[test]
+    fn test_webhooks_response_with_rule() {
+        let config = ActionConfig {
+            enabled: true,
+            rules: vec![ActionRuleConfig {
+                name: "test_webhook".to_string(),
+                severity: Some("Critical".to_string()),
+                module: None,
+                action: "webhook".to_string(),
+                command: None,
+                timeout_secs: 10,
+                url: Some("https://hooks.example.com/services/abc".to_string()),
+                method: Some("POST".to_string()),
+                headers: Some(std::collections::HashMap::new()),
+                body_template: None,
+                max_retries: Some(3),
+            }],
+            rate_limit: None,
+            digest: None,
+        };
+        let shared = Arc::new(StdMutex::new(config));
+        let body = ApiServer::build_webhooks_response(&shared);
+        assert!(body.contains(r#""total":1"#));
+        assert!(body.contains(r#""name":"test_webhook""#));
+        assert!(body.contains(r#""action_type":"rule""#));
+        assert!(body.contains(r#""url_masked":"https://hooks.example.com/*****""#));
+        assert!(body.contains(r#""has_body_template":false"#));
+    }
+
+    #[test]
+    fn test_webhooks_response_with_digest() {
+        let config = ActionConfig {
+            enabled: true,
+            rules: vec![],
+            rate_limit: None,
+            digest: Some(DigestConfig {
+                enabled: true,
+                webhook_url: Some("https://example.com/digest".to_string()),
+                ..DigestConfig::default()
+            }),
+        };
+        let shared = Arc::new(StdMutex::new(config));
+        let body = ApiServer::build_webhooks_response(&shared);
+        assert!(body.contains(r#""total":1"#));
+        assert!(body.contains(r#""action_type":"digest""#));
+        assert!(body.contains(r#""name":"digest_notification""#));
+    }
+
+    #[test]
+    fn test_webhooks_response_skips_non_webhook_rules() {
+        let config = ActionConfig {
+            enabled: true,
+            rules: vec![ActionRuleConfig {
+                name: "log_only".to_string(),
+                severity: None,
+                module: None,
+                action: "log".to_string(),
+                command: None,
+                timeout_secs: 30,
+                url: None,
+                method: None,
+                headers: None,
+                body_template: None,
+                max_retries: None,
+            }],
+            rate_limit: None,
+            digest: None,
+        };
+        let shared = Arc::new(StdMutex::new(config));
+        let body = ApiServer::build_webhooks_response(&shared);
+        assert!(body.contains(r#""total":0"#));
+    }
+
+    #[test]
+    fn test_webhooks_required_roles() {
+        let role = ApiServer::required_role(&HttpMethod::Get, "/api/v1/webhooks");
+        assert_eq!(role, Some(ApiRole::ReadOnly));
+
+        let role = ApiServer::required_role(&HttpMethod::Post, "/api/v1/webhooks/test");
+        assert_eq!(role, Some(ApiRole::Admin));
+    }
+
+    #[test]
+    fn test_extract_json_string() {
+        let json = r#"{"name": "test_webhook", "other": 123}"#;
+        assert_eq!(
+            ApiServer::extract_json_string(json, "name"),
+            Some("test_webhook".to_string())
+        );
+        assert_eq!(ApiServer::extract_json_string(json, "missing"), None);
+    }
+
+    #[test]
+    fn test_extract_json_string_escaped() {
+        let json = r#"{"name": "test\"quoted"}"#;
+        assert_eq!(
+            ApiServer::extract_json_string(json, "name"),
+            Some(r#"test"quoted"#.to_string())
+        );
     }
 }

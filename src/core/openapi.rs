@@ -38,6 +38,8 @@ pub fn generate_openapi_schema() -> Value {
             "/api/v1/archives/restore": archives_restore_path(),
             "/api/v1/archives/rotate": archives_rotate_path(),
             "/api/v1/archives/{filename}": archives_delete_path(),
+            "/api/v1/webhooks": webhooks_list_path(),
+            "/api/v1/webhooks/test": webhooks_test_path(),
         },
         "components": {
             "securitySchemes": {
@@ -792,6 +794,92 @@ fn archives_delete_path() -> Value {
     })
 }
 
+fn webhooks_list_path() -> Value {
+    json!({
+        "get": {
+            "summary": "Webhook 一覧取得",
+            "description": "設定済みの Webhook 通知先一覧を取得する。URL はマスク表示。",
+            "operationId": "listWebhooks",
+            "tags": ["webhooks"],
+            "security": [{ "BearerAuth": [] }],
+            "responses": {
+                "200": {
+                    "description": "Webhook 一覧",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "webhooks": {
+                                        "type": "array",
+                                        "items": {
+                                            "$ref": "#/components/schemas/WebhookInfo"
+                                        }
+                                    },
+                                    "total": {
+                                        "type": "integer",
+                                        "description": "Webhook 総数"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "401": {
+                    "description": "認証エラー"
+                }
+            }
+        }
+    })
+}
+
+fn webhooks_test_path() -> Value {
+    json!({
+        "post": {
+            "summary": "Webhook テスト送信",
+            "description": "指定した Webhook にテスト用イベントを送信し、接続性を確認する。",
+            "operationId": "testWebhook",
+            "tags": ["webhooks"],
+            "security": [{ "BearerAuth": [] }],
+            "requestBody": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "required": ["name"],
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "description": "テスト送信する Webhook 名"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "responses": {
+                "200": {
+                    "description": "テスト送信成功",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/WebhookTestResult"
+                            }
+                        }
+                    }
+                },
+                "404": {
+                    "description": "指定した Webhook が見つからない"
+                },
+                "502": {
+                    "description": "Webhook 送信失敗"
+                }
+            }
+        }
+    })
+}
+
 fn component_schemas() -> Value {
     json!({
         "ErrorResponse": {
@@ -1274,6 +1362,32 @@ fn component_schemas() -> Value {
                 "filename": { "type": "string", "description": "削除されたファイル名" }
             },
             "required": ["message", "filename"]
+        },
+        "WebhookInfo": {
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Webhook 名" },
+                "action_type": { "type": "string", "enum": ["rule", "digest"], "description": "Webhook 種別" },
+                "severity_filter": { "type": "string", "nullable": true, "description": "Severity フィルタ" },
+                "module_filter": { "type": "string", "nullable": true, "description": "モジュール名フィルタ" },
+                "url_masked": { "type": "string", "description": "マスク済み URL" },
+                "method": { "type": "string", "description": "HTTP メソッド" },
+                "has_headers": { "type": "boolean", "description": "カスタムヘッダーの有無" },
+                "has_body_template": { "type": "boolean", "description": "ボディテンプレートの有無" },
+                "max_retries": { "type": "integer", "description": "最大リトライ回数" },
+                "timeout_secs": { "type": "integer", "nullable": true, "description": "タイムアウト秒数" }
+            }
+        },
+        "WebhookTestResult": {
+            "type": "object",
+            "properties": {
+                "success": { "type": "boolean", "description": "送信成功か" },
+                "name": { "type": "string", "description": "Webhook 名" },
+                "url_masked": { "type": "string", "description": "マスク済み URL" },
+                "status_code": { "type": "integer", "description": "HTTP ステータスコード" },
+                "response_time_ms": { "type": "integer", "description": "応答時間（ミリ秒）" },
+                "error": { "type": "string", "description": "エラーメッセージ（失敗時のみ）" }
+            }
         }
     })
 }
