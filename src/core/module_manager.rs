@@ -686,6 +686,52 @@ impl ModuleManager {
         report
     }
 
+    /// 既知のモジュール名かどうかを確認する
+    pub fn is_known_module(name: &str) -> bool {
+        macro_rules! check_known {
+            ($name:expr, $field:ident, $ModuleType:ty, $label:expr) => {
+                if $name == $label {
+                    return true;
+                }
+            };
+        }
+        for_each_module!(check_known!(name,));
+        false
+    }
+
+    /// 指定モジュールが実行中かどうかを確認する
+    pub fn is_module_running(&self, name: &str) -> bool {
+        self.running_modules.iter().any(|m| m.name == name)
+    }
+
+    /// 指定モジュールを停止する
+    pub fn stop_module_by_name(&mut self, name: &str) -> bool {
+        if let Some(pos) = self.running_modules.iter().position(|m| m.name == name) {
+            let removed = self.running_modules.remove(pos);
+            removed.cancel_token.cancel();
+            tracing::info!(module = %name, "モジュールを停止しました（API 経由）");
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 指定モジュールを起動する（設定に基づいて）
+    pub async fn start_module_by_name(
+        &mut self,
+        name: &str,
+        config: &ModulesConfig,
+        event_bus: &Option<EventBus>,
+    ) -> Result<(), String> {
+        match Self::restart_module_by_name(name, config, event_bus).await {
+            Some(running) => {
+                self.running_modules.push(running);
+                Ok(())
+            }
+            None => Err(format!("モジュール '{}' の起動に失敗しました", name)),
+        }
+    }
+
     /// 名前に基づいてモジュールを再起動する
     async fn restart_module_by_name(
         name: &str,
@@ -1031,5 +1077,69 @@ mod tests {
         let (manager, _) = ModuleManager::start_modules(&config, &event_bus, false).await;
         let counts = manager.module_restart_counts();
         assert!(counts.is_empty());
+    }
+
+    #[test]
+    fn test_is_known_module() {
+        assert!(ModuleManager::is_known_module("DNS設定改ざん検知モジュール"));
+        assert!(ModuleManager::is_known_module(
+            "ファイル整合性監視モジュール"
+        ));
+        assert!(!ModuleManager::is_known_module("存在しないモジュール"));
+        assert!(!ModuleManager::is_known_module(""));
+    }
+
+    #[tokio::test]
+    async fn test_is_module_running() {
+        let mut config = ModulesConfig::default();
+        config.dns_monitor.enabled = true;
+        let event_bus = None;
+        let (manager, _) = ModuleManager::start_modules(&config, &event_bus, false).await;
+        assert!(manager.is_module_running("DNS設定改ざん検知モジュール"));
+        assert!(!manager.is_module_running("ファイル整合性監視モジュール"));
+    }
+
+    #[tokio::test]
+    async fn test_stop_module_by_name() {
+        let mut config = ModulesConfig::default();
+        config.dns_monitor.enabled = true;
+        let event_bus = None;
+        let (mut manager, _) = ModuleManager::start_modules(&config, &event_bus, false).await;
+        assert_eq!(manager.running_modules.len(), 1);
+
+        let stopped = manager.stop_module_by_name("DNS設定改ざん検知モジュール");
+        assert!(stopped);
+        assert!(manager.running_modules.is_empty());
+
+        let stopped_again = manager.stop_module_by_name("DNS設定改ざん検知モジュール");
+        assert!(!stopped_again);
+    }
+
+    #[tokio::test]
+    async fn test_start_module_by_name() {
+        let mut config = ModulesConfig::default();
+        config.dns_monitor.enabled = true;
+        let event_bus = None;
+        let (mut manager, _) = ModuleManager::start_modules(&config, &event_bus, false).await;
+        manager.stop_module_by_name("DNS設定改ざん検知モジュール");
+        assert!(manager.running_modules.is_empty());
+
+        let result = manager
+            .start_module_by_name("DNS設定改ざん検知モジュール", &config, &event_bus)
+            .await;
+        assert!(result.is_ok());
+        assert_eq!(manager.running_modules.len(), 1);
+        manager.stop_all();
+    }
+
+    #[tokio::test]
+    async fn test_start_module_by_name_unknown() {
+        let config = ModulesConfig::default();
+        let event_bus = None;
+        let (mut manager, _) = ModuleManager::start_modules(&config, &event_bus, false).await;
+        let result = manager
+            .start_module_by_name("存在しないモジュール", &config, &event_bus)
+            .await;
+        assert!(result.is_err());
     }
 }

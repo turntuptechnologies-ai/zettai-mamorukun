@@ -2,7 +2,7 @@ use crate::config::AppConfig;
 use crate::config::DigestConfig;
 use crate::core::action::{ActionEngine, ActionEngineConfig, DigestCollector, InFlightTracker};
 use crate::core::alert_rule::{AlertRuleEngine, AlertRuleEngineConfig};
-use crate::core::api::ApiServer;
+use crate::core::api::{ApiServer, ModuleControlCommand, ModuleControlResult};
 use crate::core::correlation::{CorrelationEngine, CorrelationRuntimeConfig};
 use crate::core::event::{self, EventBus, SecurityEvent, Severity};
 use crate::core::event_store::{EventStore, EventStoreRuntimeConfig};
@@ -63,6 +63,12 @@ impl Daemon {
 
         // API サーバー用リロードチャネル
         let (reload_sender, mut reload_receiver) = tokio::sync::mpsc::channel::<()>(1);
+
+        // API サーバー用モジュール制御チャネル
+        let (module_control_sender, mut module_control_receiver) = tokio::sync::mpsc::channel::<(
+            ModuleControlCommand,
+            tokio::sync::oneshot::Sender<ModuleControlResult>,
+        )>(8);
 
         // イベントバスの初期化
         let mut action_config_sender: Option<watch::Sender<ActionEngineConfig>> = None;
@@ -439,6 +445,7 @@ impl Daemon {
                 event_store_db_path,
                 Some(self.config_path.to_string_lossy().to_string()),
                 reload_sender.clone(),
+                module_control_sender.clone(),
                 event_bus.as_ref().map(|b| b.sender()),
                 shared_scoring.clone(),
                 event_store_cfg,
@@ -844,6 +851,7 @@ impl Daemon {
                                         event_store_db_path,
                                         Some(self.config_path.to_string_lossy().to_string()),
                                         reload_sender.clone(),
+                                        module_control_sender.clone(),
                                         event_bus.as_ref().map(|b| b.sender()),
                                         shared_scoring.clone(),
                                         es_cfg_b,
@@ -886,6 +894,7 @@ impl Daemon {
                                         event_store_db_path,
                                         Some(self.config_path.to_string_lossy().to_string()),
                                         reload_sender.clone(),
+                                        module_control_sender.clone(),
                                         event_bus.as_ref().map(|b| b.sender()),
                                         shared_scoring.clone(),
                                         es_cfg_c,
@@ -924,6 +933,7 @@ impl Daemon {
                                                 fallback_db_path,
                                                 Some(self.config_path.to_string_lossy().to_string()),
                                                 reload_sender.clone(),
+                                                module_control_sender.clone(),
                                                 event_bus.as_ref().map(|b| b.sender()),
                                                 shared_scoring.clone(),
                                                 es_cfg_fb,
@@ -975,6 +985,87 @@ impl Daemon {
                     // SAFETY: 自プロセスに SIGHUP を送信してリロードをトリガー
                     // libc::kill は POSIX 標準の安全な関数だが、Rust の FFI 経由なので unsafe が必要
                     unsafe { libc::kill(std::process::id() as libc::pid_t, libc::SIGHUP); }
+                }
+                Some((cmd, reply)) = module_control_receiver.recv() => {
+                    let result = match cmd {
+                        ModuleControlCommand::Start(ref name) => {
+                            if !ModuleManager::is_known_module(name) {
+                                ModuleControlResult::NotFound(format!("モジュール '{}' は存在しません", name))
+                            } else if module_manager.is_module_running(name) {
+                                ModuleControlResult::Conflict(format!("モジュール '{}' は既に起動中です", name))
+                            } else {
+                                match module_manager.start_module_by_name(name, &self.config.modules, &event_bus).await {
+                                    Ok(()) => {
+                                        {
+                                            let mut names = shared_module_names.lock().unwrap();
+                                            *names = module_manager.running_module_names();
+                                        }
+                                        if let Some(ref bus) = event_bus {
+                                            bus.publish(SecurityEvent::new(
+                                                "module_started_api",
+                                                Severity::Info,
+                                                "api",
+                                                format!("API 経由でモジュールを起動しました: {}", name),
+                                            ));
+                                        }
+                                        ModuleControlResult::Ok(format!("モジュール '{}' を起動しました", name))
+                                    }
+                                    Err(e) => ModuleControlResult::Error(e),
+                                }
+                            }
+                        }
+                        ModuleControlCommand::Stop(ref name) => {
+                            if !ModuleManager::is_known_module(name) {
+                                ModuleControlResult::NotFound(format!("モジュール '{}' は存在しません", name))
+                            } else if !module_manager.is_module_running(name) {
+                                ModuleControlResult::Conflict(format!("モジュール '{}' は起動していません", name))
+                            } else {
+                                module_manager.stop_module_by_name(name);
+                                {
+                                    let mut names = shared_module_names.lock().unwrap();
+                                    *names = module_manager.running_module_names();
+                                }
+                                if let Some(ref bus) = event_bus {
+                                    bus.publish(SecurityEvent::new(
+                                        "module_stopped_api",
+                                        Severity::Info,
+                                        "api",
+                                        format!("API 経由でモジュールを停止しました: {}", name),
+                                    ));
+                                }
+                                ModuleControlResult::Ok(format!("モジュール '{}' を停止しました", name))
+                            }
+                        }
+                        ModuleControlCommand::Restart(ref name) => {
+                            if !ModuleManager::is_known_module(name) {
+                                ModuleControlResult::NotFound(format!("モジュール '{}' は存在しません", name))
+                            } else {
+                                let was_running = module_manager.is_module_running(name);
+                                if was_running {
+                                    module_manager.stop_module_by_name(name);
+                                }
+                                match module_manager.start_module_by_name(name, &self.config.modules, &event_bus).await {
+                                    Ok(()) => {
+                                        {
+                                            let mut names = shared_module_names.lock().unwrap();
+                                            *names = module_manager.running_module_names();
+                                        }
+                                        if let Some(ref bus) = event_bus {
+                                            bus.publish(SecurityEvent::new(
+                                                "module_restarted_api",
+                                                Severity::Info,
+                                                "api",
+                                                format!("API 経由でモジュールを再起動しました: {}", name),
+                                            ));
+                                        }
+                                        ModuleControlResult::Ok(format!("モジュール '{}' を再起動しました", name))
+                                    }
+                                    Err(e) => ModuleControlResult::Error(e),
+                                }
+                            }
+                        }
+                    };
+                    let _ = reply.send(result);
                 }
                 _ = heartbeat.tick(), if health_enabled => {
                     let status = health_checker.status();

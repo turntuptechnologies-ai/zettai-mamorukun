@@ -40,6 +40,9 @@ pub fn generate_openapi_schema() -> Value {
             "/api/v1/archives/{filename}": archives_delete_path(),
             "/api/v1/webhooks": webhooks_list_path(),
             "/api/v1/webhooks/test": webhooks_test_path(),
+            "/api/v1/modules/{name}/start": module_start_path(),
+            "/api/v1/modules/{name}/stop": module_stop_path(),
+            "/api/v1/modules/{name}/restart": module_restart_path(),
         },
         "components": {
             "securitySchemes": {
@@ -880,6 +883,93 @@ fn webhooks_test_path() -> Value {
     })
 }
 
+fn module_control_params() -> Value {
+    json!([{
+        "name": "name",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" },
+        "description": "モジュール名"
+    }, {
+        "name": "dry_run",
+        "in": "query",
+        "required": false,
+        "schema": { "type": "boolean", "default": false },
+        "description": "true の場合、実際の操作を行わずバリデーションのみ実行する"
+    }])
+}
+
+fn module_control_responses() -> Value {
+    json!({
+        "200": {
+            "description": "操作成功",
+            "content": {
+                "application/json": {
+                    "schema": { "$ref": "#/components/schemas/ModuleControlResponse" }
+                }
+            }
+        },
+        "404": {
+            "description": "モジュールが見つからない",
+            "content": {
+                "application/json": {
+                    "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+                }
+            }
+        },
+        "409": {
+            "description": "状態の競合（既に起動中/停止中）",
+            "content": {
+                "application/json": {
+                    "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+                }
+            }
+        }
+    })
+}
+
+fn module_start_path() -> Value {
+    json!({
+        "post": {
+            "summary": "モジュール起動",
+            "description": "指定したモジュールを起動する。既に起動中の場合は 409 Conflict を返す。",
+            "operationId": "startModule",
+            "tags": ["modules"],
+            "security": [{ "BearerAuth": [] }],
+            "parameters": module_control_params(),
+            "responses": module_control_responses()
+        }
+    })
+}
+
+fn module_stop_path() -> Value {
+    json!({
+        "post": {
+            "summary": "モジュール停止",
+            "description": "指定したモジュールを停止する。既に停止中の場合は 409 Conflict を返す。",
+            "operationId": "stopModule",
+            "tags": ["modules"],
+            "security": [{ "BearerAuth": [] }],
+            "parameters": module_control_params(),
+            "responses": module_control_responses()
+        }
+    })
+}
+
+fn module_restart_path() -> Value {
+    json!({
+        "post": {
+            "summary": "モジュール再起動",
+            "description": "指定したモジュールを再起動する。停止中の場合は起動する。",
+            "operationId": "restartModule",
+            "tags": ["modules"],
+            "security": [{ "BearerAuth": [] }],
+            "parameters": module_control_params(),
+            "responses": module_control_responses()
+        }
+    })
+}
+
 fn component_schemas() -> Value {
     json!({
         "ErrorResponse": {
@@ -1378,6 +1468,16 @@ fn component_schemas() -> Value {
                 "timeout_secs": { "type": "integer", "nullable": true, "description": "タイムアウト秒数" }
             }
         },
+        "ModuleControlResponse": {
+            "type": "object",
+            "properties": {
+                "success": { "type": "boolean", "description": "操作成功か" },
+                "module": { "type": "string", "description": "モジュール名" },
+                "action": { "type": "string", "enum": ["start", "stop", "restart"], "description": "実行されたアクション" },
+                "message": { "type": "string", "description": "結果メッセージ" }
+            },
+            "required": ["success", "module", "action", "message"]
+        },
         "WebhookTestResult": {
             "type": "object",
             "properties": {
@@ -1417,6 +1517,9 @@ mod tests {
         assert!(paths.contains_key("/api/v1/reload"));
         assert!(paths.contains_key("/api/v1/events/stream"));
         assert!(paths.contains_key("/api/v1/openapi.json"));
+        assert!(paths.contains_key("/api/v1/modules/{name}/start"));
+        assert!(paths.contains_key("/api/v1/modules/{name}/stop"));
+        assert!(paths.contains_key("/api/v1/modules/{name}/restart"));
     }
 
     #[test]
