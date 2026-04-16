@@ -40,6 +40,10 @@ pub fn generate_openapi_schema() -> Value {
             "/api/v1/archives/{filename}": archives_delete_path(),
             "/api/v1/webhooks": webhooks_list_path(),
             "/api/v1/webhooks/test": webhooks_test_path(),
+            "/api/v1/events/summary": events_summary_path(),
+            "/api/v1/events/summary/timeline": events_summary_timeline_path(),
+            "/api/v1/events/summary/modules": events_summary_modules_path(),
+            "/api/v1/events/summary/severity": events_summary_severity_path(),
             "/api/v1/modules/{name}/start": module_start_path(),
             "/api/v1/modules/{name}/stop": module_stop_path(),
             "/api/v1/modules/{name}/restart": module_restart_path(),
@@ -966,6 +970,287 @@ fn module_restart_path() -> Value {
             "security": [{ "BearerAuth": [] }],
             "parameters": module_control_params(),
             "responses": module_control_responses()
+        }
+    })
+}
+
+fn summary_common_params() -> Value {
+    json!([
+        {
+            "name": "since",
+            "in": "query",
+            "description": "開始日時（ISO 8601 形式: YYYY-MM-DDTHH:MM:SSZ または YYYY-MM-DD）。デフォルト: 7日前",
+            "required": false,
+            "schema": { "type": "string", "format": "date-time" }
+        },
+        {
+            "name": "until",
+            "in": "query",
+            "description": "終了日時（ISO 8601 形式）。デフォルト: 現在",
+            "required": false,
+            "schema": { "type": "string", "format": "date-time" }
+        },
+        {
+            "name": "module",
+            "in": "query",
+            "description": "ソースモジュール名でフィルタリング",
+            "required": false,
+            "schema": { "type": "string" }
+        },
+        {
+            "name": "severity",
+            "in": "query",
+            "description": "Severity でフィルタリング（INFO, WARNING, CRITICAL）",
+            "required": false,
+            "schema": {
+                "type": "string",
+                "enum": ["INFO", "WARNING", "CRITICAL"]
+            }
+        }
+    ])
+}
+
+fn summary_error_responses() -> Value {
+    json!({
+        "400": {
+            "description": "リクエストパラメータが不正",
+            "content": {
+                "application/json": {
+                    "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+                }
+            }
+        },
+        "401": { "$ref": "#/components/schemas/ErrorResponse" },
+        "503": {
+            "description": "イベントストアが無効",
+            "content": {
+                "application/json": {
+                    "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+                }
+            }
+        }
+    })
+}
+
+fn events_summary_path() -> Value {
+    let mut responses = serde_json::Map::new();
+    responses.insert("200".to_string(), json!({
+        "description": "イベントサマリー（総件数・Severity別・モジュール別）",
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "total": { "type": "integer", "description": "総件数" },
+                        "since": { "type": "integer", "description": "開始タイムスタンプ（UNIX 秒）" },
+                        "until": { "type": "integer", "description": "終了タイムスタンプ（UNIX 秒）" },
+                        "by_severity": {
+                            "type": "object",
+                            "additionalProperties": { "type": "integer" },
+                            "description": "Severity 別件数"
+                        },
+                        "by_module": {
+                            "type": "object",
+                            "additionalProperties": { "type": "integer" },
+                            "description": "モジュール別件数（上位20件）"
+                        }
+                    },
+                    "required": ["total", "since", "until", "by_severity", "by_module"]
+                }
+            }
+        }
+    }));
+    let err = summary_error_responses();
+    if let Value::Object(err_map) = err {
+        for (k, v) in err_map {
+            responses.insert(k, v);
+        }
+    }
+    json!({
+        "get": {
+            "summary": "イベントサマリー",
+            "description": "指定期間のイベント総件数、Severity 別件数、モジュール別件数を返す。",
+            "operationId": "getEventsSummary",
+            "tags": ["events"],
+            "security": [{"BearerAuth": []}],
+            "parameters": summary_common_params(),
+            "responses": Value::Object(responses)
+        }
+    })
+}
+
+fn events_summary_timeline_path() -> Value {
+    let mut params = summary_common_params()
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    params.push(json!({
+        "name": "interval",
+        "in": "query",
+        "description": "集計間隔（hour, day, week）。デフォルト: day",
+        "required": false,
+        "schema": {
+            "type": "string",
+            "enum": ["hour", "day", "week"],
+            "default": "day"
+        }
+    }));
+    let mut responses = serde_json::Map::new();
+    responses.insert("200".to_string(), json!({
+        "description": "時系列イベント集計",
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "interval": { "type": "string", "description": "集計間隔" },
+                        "since": { "type": "integer", "description": "開始タイムスタンプ（UNIX 秒）" },
+                        "until": { "type": "integer", "description": "終了タイムスタンプ（UNIX 秒）" },
+                        "buckets": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "timestamp": { "type": "integer", "description": "バケット開始タイムスタンプ（UNIX 秒）" },
+                                    "count": { "type": "integer", "description": "件数" }
+                                },
+                                "required": ["timestamp", "count"]
+                            }
+                        }
+                    },
+                    "required": ["interval", "since", "until", "buckets"]
+                }
+            }
+        }
+    }));
+    let err = summary_error_responses();
+    if let Value::Object(err_map) = err {
+        for (k, v) in err_map {
+            responses.insert(k, v);
+        }
+    }
+    json!({
+        "get": {
+            "summary": "イベントタイムライン",
+            "description": "指定期間のイベントを時系列で集計する。欠損バケットは 0 で補完される。",
+            "operationId": "getEventsSummaryTimeline",
+            "tags": ["events"],
+            "security": [{"BearerAuth": []}],
+            "parameters": params,
+            "responses": Value::Object(responses)
+        }
+    })
+}
+
+fn events_summary_modules_path() -> Value {
+    let mut params = summary_common_params()
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    params.push(json!({
+        "name": "limit",
+        "in": "query",
+        "description": "最大取得件数（デフォルト: 20、上限: 200）",
+        "required": false,
+        "schema": {
+            "type": "integer",
+            "default": 20,
+            "minimum": 1,
+            "maximum": 200
+        }
+    }));
+    let mut responses = serde_json::Map::new();
+    responses.insert("200".to_string(), json!({
+        "description": "モジュール別イベント集計",
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "since": { "type": "integer", "description": "開始タイムスタンプ（UNIX 秒）" },
+                        "until": { "type": "integer", "description": "終了タイムスタンプ（UNIX 秒）" },
+                        "modules": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "module": { "type": "string", "description": "モジュール名" },
+                                    "count": { "type": "integer", "description": "件数" },
+                                    "latest_timestamp": { "type": "integer", "description": "最新イベントのタイムスタンプ（UNIX 秒）" }
+                                },
+                                "required": ["module", "count", "latest_timestamp"]
+                            }
+                        }
+                    },
+                    "required": ["since", "until", "modules"]
+                }
+            }
+        }
+    }));
+    let err = summary_error_responses();
+    if let Value::Object(err_map) = err {
+        for (k, v) in err_map {
+            responses.insert(k, v);
+        }
+    }
+    json!({
+        "get": {
+            "summary": "モジュール別イベントサマリー",
+            "description": "指定期間のイベントをモジュール別に集計する。件数降順でソート。",
+            "operationId": "getEventsSummaryModules",
+            "tags": ["events"],
+            "security": [{"BearerAuth": []}],
+            "parameters": params,
+            "responses": Value::Object(responses)
+        }
+    })
+}
+
+fn events_summary_severity_path() -> Value {
+    let mut responses = serde_json::Map::new();
+    responses.insert("200".to_string(), json!({
+        "description": "Severity 別イベント集計",
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "since": { "type": "integer", "description": "開始タイムスタンプ（UNIX 秒）" },
+                        "until": { "type": "integer", "description": "終了タイムスタンプ（UNIX 秒）" },
+                        "total": { "type": "integer", "description": "総件数" },
+                        "severities": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "severity": { "type": "string", "description": "Severity 名" },
+                                    "count": { "type": "integer", "description": "件数" },
+                                    "percentage": { "type": "number", "format": "double", "description": "割合（%）" }
+                                },
+                                "required": ["severity", "count", "percentage"]
+                            }
+                        }
+                    },
+                    "required": ["since", "until", "total", "severities"]
+                }
+            }
+        }
+    }));
+    let err = summary_error_responses();
+    if let Value::Object(err_map) = err {
+        for (k, v) in err_map {
+            responses.insert(k, v);
+        }
+    }
+    json!({
+        "get": {
+            "summary": "Severity 別イベントサマリー",
+            "description": "指定期間のイベントを Severity 別に集計する。割合（パーセンテージ）も含む。",
+            "operationId": "getEventsSummarySeverity",
+            "tags": ["events"],
+            "security": [{"BearerAuth": []}],
+            "parameters": summary_common_params(),
+            "responses": Value::Object(responses)
         }
     })
 }
