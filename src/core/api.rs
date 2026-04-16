@@ -750,6 +750,10 @@ impl ApiServer {
             (HttpMethod::Get, "/api/v1/status")
             | (HttpMethod::Get, "/api/v1/modules")
             | (HttpMethod::Get, "/api/v1/events")
+            | (HttpMethod::Get, "/api/v1/events/summary")
+            | (HttpMethod::Get, "/api/v1/events/summary/timeline")
+            | (HttpMethod::Get, "/api/v1/events/summary/modules")
+            | (HttpMethod::Get, "/api/v1/events/summary/severity")
             | (HttpMethod::Get, "/api/v1/events/stream")
             | (HttpMethod::Get, "/api/v1/score")
             | (HttpMethod::Get, "/api/v1/archives")
@@ -1120,6 +1124,54 @@ impl ApiServer {
                 resp_status = 200;
                 resp_size = body.len() as u64;
                 Self::send_json_response_with_headers(&mut stream, 200, "OK", &body, extra).await?;
+            }
+            (HttpMethod::Get, path_str) if path_str.starts_with("/api/v1/events/summary") => {
+                match event_store_db_path {
+                    Some(db_path) => {
+                        let sub_path = &path_str["/api/v1/events/summary".len()..];
+                        match Self::handle_events_summary(db_path, sub_path, &query_params) {
+                            Ok(body) => {
+                                resp_status = 200;
+                                resp_size = body.len() as u64;
+                                Self::send_json_response_with_headers(
+                                    &mut stream,
+                                    200,
+                                    "OK",
+                                    &body,
+                                    extra,
+                                )
+                                .await?;
+                            }
+                            Err((status, msg)) => {
+                                let err_body =
+                                    format!(r#"{{"error":"{}"}}"#, Self::escape_json_string(&msg));
+                                resp_status = status;
+                                resp_size = err_body.len() as u64;
+                                Self::send_error_with_headers(
+                                    &mut stream,
+                                    status,
+                                    "Error",
+                                    &err_body,
+                                    extra,
+                                )
+                                .await?;
+                            }
+                        }
+                    }
+                    None => {
+                        let err_body = r#"{"error":"イベントストアが無効です"}"#;
+                        resp_status = 503;
+                        resp_size = err_body.len() as u64;
+                        Self::send_error_with_headers(
+                            &mut stream,
+                            503,
+                            "Service Unavailable",
+                            err_body,
+                            extra,
+                        )
+                        .await?;
+                    }
+                }
             }
             (HttpMethod::Get, "/api/v1/events") => match event_store_db_path {
                 Some(db_path) => match Self::build_events_response(
@@ -3077,6 +3129,128 @@ impl ApiServer {
         }
 
         format!(r#"{{"modules":[{}]}}"#, modules_json.join(","))
+    }
+
+    fn handle_events_summary(
+        db_path: &str,
+        sub_path: &str,
+        query_params: &HashMap<String, String>,
+    ) -> Result<String, (u16, String)> {
+        use crate::core::event_store::{self, SummaryQuery, TimelineInterval};
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        // since: デフォルト 7 日前
+        let since = match query_params.get("since") {
+            Some(s) => Self::parse_iso8601_to_timestamp(s)
+                .ok_or_else(|| (400u16, format!("無効な日時形式です: {}", s)))?,
+            None => now - 7 * 86400,
+        };
+
+        // until: デフォルト 現在
+        let until = match query_params.get("until") {
+            Some(s) => Self::parse_iso8601_to_timestamp(s)
+                .ok_or_else(|| (400u16, format!("無効な日時形式です: {}", s)))?,
+            None => now,
+        };
+
+        if since > until {
+            return Err((
+                400,
+                "since は until より前の日時を指定してください".to_string(),
+            ));
+        }
+
+        // 期間上限: 90 日
+        if until - since > 90 * 86400 {
+            return Err((400, "期間は最大 90 日までです".to_string()));
+        }
+
+        let severity = query_params.get("severity").map(|s| s.to_uppercase());
+        if let Some(ref sev) = severity
+            && !["INFO", "WARNING", "CRITICAL"].contains(&sev.as_str())
+        {
+            return Err((400, format!("無効な severity です: {}", sev)));
+        }
+
+        let module = query_params.get("module").cloned();
+
+        let summary_query = SummaryQuery {
+            since,
+            until,
+            module,
+            severity,
+        };
+
+        let conn = event_store::open_readonly(db_path)
+            .map_err(|e| (500u16, format!("データベース接続に失敗: {}", e)))?;
+
+        match sub_path {
+            "" => {
+                let result = event_store::query_event_summary(&conn, &summary_query)
+                    .map_err(|e| (500u16, format!("集計クエリの実行に失敗: {}", e)))?;
+                serde_json::to_string(&result)
+                    .map_err(|e| (500u16, format!("JSON シリアライズに失敗: {}", e)))
+            }
+            "/timeline" => {
+                let interval_str = query_params
+                    .get("interval")
+                    .map(|s| s.as_str())
+                    .unwrap_or("day");
+                let interval = TimelineInterval::parse(interval_str).ok_or_else(|| {
+                    (
+                        400u16,
+                        "無効な interval です（hour, day, week のいずれかを指定）".to_string(),
+                    )
+                })?;
+                let buckets = event_store::query_event_timeline(&conn, &summary_query, interval)
+                    .map_err(|e| (500u16, format!("集計クエリの実行に失敗: {}", e)))?;
+                let json = serde_json::json!({
+                    "interval": interval_str,
+                    "since": since,
+                    "until": until,
+                    "buckets": buckets,
+                });
+                serde_json::to_string(&json)
+                    .map_err(|e| (500u16, format!("JSON シリアライズに失敗: {}", e)))
+            }
+            "/modules" => {
+                let limit = query_params
+                    .get("limit")
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .unwrap_or(20)
+                    .min(200);
+                if limit == 0 {
+                    return Err((400, "limit は 1〜200 の範囲で指定してください".to_string()));
+                }
+                let modules = event_store::query_module_summary(&conn, &summary_query, limit)
+                    .map_err(|e| (500u16, format!("集計クエリの実行に失敗: {}", e)))?;
+                let json = serde_json::json!({
+                    "since": since,
+                    "until": until,
+                    "modules": modules,
+                });
+                serde_json::to_string(&json)
+                    .map_err(|e| (500u16, format!("JSON シリアライズに失敗: {}", e)))
+            }
+            "/severity" => {
+                let (total, severities) =
+                    event_store::query_severity_summary(&conn, &summary_query)
+                        .map_err(|e| (500u16, format!("集計クエリの実行に失敗: {}", e)))?;
+                let json = serde_json::json!({
+                    "since": since,
+                    "until": until,
+                    "total": total,
+                    "severities": severities,
+                });
+                serde_json::to_string(&json)
+                    .map_err(|e| (500u16, format!("JSON シリアライズに失敗: {}", e)))
+            }
+            _ => Err((404, "エンドポイントが見つかりません".to_string())),
+        }
     }
 
     fn build_events_response(
