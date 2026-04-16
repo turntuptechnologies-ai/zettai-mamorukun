@@ -7,10 +7,16 @@
 use crate::config::ModuleStatsConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
+
+/// スキャン実行時間ヒストグラムに保持するサンプル数の上限（リングバッファ）
+///
+/// 百分位点（P50/P95/P99）はこのバッファ内のサンプルから計算される。
+/// 上限に達すると最古のサンプルが破棄される。
+pub const SCAN_HISTOGRAM_CAPACITY: usize = 1024;
 
 /// モジュール単位の統計情報
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -37,14 +43,64 @@ pub struct ModuleStats {
     pub initial_scan_summary: Option<String>,
     /// 起動時スキャンを実行した時刻（RFC3339 UTC）
     pub initial_scan_at: Option<String>,
+    /// スキャン実行回数（ヒストグラムのサンプル総数。バッファ上限を超過した累積数）
+    #[serde(default)]
+    pub scan_count: u64,
+    /// スキャン実行時間の累積（ミリ秒）。Prometheus の `_sum` 系列で利用
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_total_ms: Option<u64>,
+    /// リングバッファ内の最小スキャン時間（ミリ秒）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_min_ms: Option<u64>,
+    /// リングバッファ内の最大スキャン時間（ミリ秒）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_max_ms: Option<u64>,
+    /// リングバッファ内の平均スキャン時間（ミリ秒）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_avg_ms: Option<u64>,
+    /// 50 パーセンタイル（中央値）スキャン時間（ミリ秒）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_p50_ms: Option<u64>,
+    /// 95 パーセンタイル スキャン時間（ミリ秒）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_p95_ms: Option<u64>,
+    /// 99 パーセンタイル スキャン時間（ミリ秒）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_p99_ms: Option<u64>,
+}
+
+/// モジュール統計レジストリ内部の単一エントリ
+///
+/// `ModuleStats`（公開・シリアライズ用）に加え、百分位点を計算するための
+/// サンプル用リングバッファ（`scan_samples_ms`）と累積合計（`scan_total_ms_acc`）を保持する。
+#[derive(Debug, Clone, Default)]
+struct Entry {
+    stats: ModuleStats,
+    /// 直近 `SCAN_HISTOGRAM_CAPACITY` 件までのスキャン時間（ミリ秒）
+    scan_samples_ms: VecDeque<u64>,
+    /// スキャン時間の累積合計（全期間・オーバーフロー防止のため u128）
+    scan_total_ms_acc: u128,
 }
 
 /// モジュール統計レジストリ
 ///
-/// 内部に `Arc<RwLock<HashMap<String, ModuleStats>>>` を持ち、Clone 可能なハンドルとして共有する。
+/// 内部に `Arc<RwLock<HashMap<String, Entry>>>` を持ち、Clone 可能なハンドルとして共有する。
+/// `Entry` は公開用 `ModuleStats` に加えてスキャン実行時間のリングバッファを保持し、
+/// `snapshot()` 呼び出し時に百分位点（P50/P95/P99）などを算出する。
 #[derive(Clone, Default)]
 pub struct ModuleStatsHandle {
-    inner: Arc<StdRwLock<HashMap<String, ModuleStats>>>,
+    inner: Arc<StdRwLock<HashMap<String, Entry>>>,
+}
+
+fn new_entry(module: &str) -> Entry {
+    Entry {
+        stats: ModuleStats {
+            module: module.to_string(),
+            ..Default::default()
+        },
+        scan_samples_ms: VecDeque::new(),
+        scan_total_ms_acc: 0,
+    }
 }
 
 impl ModuleStatsHandle {
@@ -59,10 +115,7 @@ impl ModuleStatsHandle {
         let mut guard = self.inner.write().unwrap();
         guard
             .entry(module.to_string())
-            .or_insert_with(|| ModuleStats {
-                module: module.to_string(),
-                ..Default::default()
-            });
+            .or_insert_with(|| new_entry(module));
     }
 
     /// 複数のモジュール名を一度に登録する
@@ -77,14 +130,14 @@ impl ModuleStatsHandle {
             let name = m.as_ref();
             guard
                 .entry(name.to_string())
-                .or_insert_with(|| ModuleStats {
-                    module: name.to_string(),
-                    ..Default::default()
-                });
+                .or_insert_with(|| new_entry(name));
         }
     }
 
     /// 起動時スキャン結果を記録する
+    ///
+    /// `initial_scan_*` フィールド（直近の起動時スキャン結果）を更新するとともに、
+    /// スキャン実行時間ヒストグラムにもサンプルを追加する。
     pub fn record_initial_scan(
         &self,
         module: &str,
@@ -93,19 +146,33 @@ impl ModuleStatsHandle {
         issues: usize,
         summary: &str,
     ) {
+        let duration_ms = duration.as_millis().min(u64::MAX as u128) as u64;
         // unwrap safety: RwLock が poisoned になるのはパニック時のみ
         let mut guard = self.inner.write().unwrap();
         let entry = guard
             .entry(module.to_string())
-            .or_insert_with(|| ModuleStats {
-                module: module.to_string(),
-                ..Default::default()
-            });
-        entry.initial_scan_duration_ms = Some(duration.as_millis() as u64);
-        entry.initial_scan_items_scanned = Some(items);
-        entry.initial_scan_issues_found = Some(issues);
-        entry.initial_scan_summary = Some(summary.to_string());
-        entry.initial_scan_at = Some(current_rfc3339());
+            .or_insert_with(|| new_entry(module));
+        entry.stats.initial_scan_duration_ms = Some(duration_ms);
+        entry.stats.initial_scan_items_scanned = Some(items);
+        entry.stats.initial_scan_issues_found = Some(issues);
+        entry.stats.initial_scan_summary = Some(summary.to_string());
+        entry.stats.initial_scan_at = Some(current_rfc3339());
+        push_scan_sample(entry, duration_ms);
+    }
+
+    /// スキャン実行時間サンプルを記録する（ヒストグラム用）
+    ///
+    /// 定期スキャン等から呼び出してサンプルを追加する。リングバッファの上限を超えると
+    /// 最古のサンプルが破棄される。累積カウンタ（`scan_count` / `scan_total_ms_acc`）は
+    /// すべてのサンプルを反映する。
+    pub fn record_scan_duration(&self, module: &str, duration: Duration) {
+        let duration_ms = duration.as_millis().min(u64::MAX as u128) as u64;
+        // unwrap safety: RwLock が poisoned になるのはパニック時のみ
+        let mut guard = self.inner.write().unwrap();
+        let entry = guard
+            .entry(module.to_string())
+            .or_insert_with(|| new_entry(module));
+        push_scan_sample(entry, duration_ms);
     }
 
     /// SecurityEvent を記録する（source_module 別の集計）
@@ -114,34 +181,95 @@ impl ModuleStatsHandle {
         let mut guard = self.inner.write().unwrap();
         let entry = guard
             .entry(event.source_module.clone())
-            .or_insert_with(|| ModuleStats {
-                module: event.source_module.clone(),
-                ..Default::default()
-            });
-        entry.events_total = entry.events_total.saturating_add(1);
+            .or_insert_with(|| new_entry(&event.source_module));
+        let stats = &mut entry.stats;
+        stats.events_total = stats.events_total.saturating_add(1);
         match event.severity {
-            Severity::Info => entry.events_info = entry.events_info.saturating_add(1),
-            Severity::Warning => entry.events_warning = entry.events_warning.saturating_add(1),
-            Severity::Critical => entry.events_critical = entry.events_critical.saturating_add(1),
+            Severity::Info => stats.events_info = stats.events_info.saturating_add(1),
+            Severity::Warning => stats.events_warning = stats.events_warning.saturating_add(1),
+            Severity::Critical => stats.events_critical = stats.events_critical.saturating_add(1),
         }
-        entry.last_event_at = Some(current_rfc3339());
+        stats.last_event_at = Some(current_rfc3339());
     }
 
-    /// 指定モジュールの統計を取得する
+    /// 指定モジュールの統計を取得する（百分位点などを計算して返す）
     pub fn get(&self, module: &str) -> Option<ModuleStats> {
         // unwrap safety: RwLock が poisoned になるのはパニック時のみ
         let guard = self.inner.read().unwrap();
-        guard.get(module).cloned()
+        guard.get(module).map(materialize_stats)
     }
 
     /// 全モジュールの統計をモジュール名でソートして返す
+    ///
+    /// 各モジュールについて、リングバッファから百分位点（P50/P95/P99）、最小/最大/平均、
+    /// 累積合計を計算して返す。
     pub fn snapshot(&self) -> Vec<ModuleStats> {
         // unwrap safety: RwLock が poisoned になるのはパニック時のみ
         let guard = self.inner.read().unwrap();
-        let mut list: Vec<ModuleStats> = guard.values().cloned().collect();
+        let mut list: Vec<ModuleStats> = guard.values().map(materialize_stats).collect();
         list.sort_by(|a, b| a.module.cmp(&b.module));
         list
     }
+}
+
+fn push_scan_sample(entry: &mut Entry, duration_ms: u64) {
+    if entry.scan_samples_ms.len() >= SCAN_HISTOGRAM_CAPACITY {
+        entry.scan_samples_ms.pop_front();
+    }
+    entry.scan_samples_ms.push_back(duration_ms);
+    entry.stats.scan_count = entry.stats.scan_count.saturating_add(1);
+    entry.scan_total_ms_acc = entry.scan_total_ms_acc.saturating_add(duration_ms as u128);
+}
+
+/// `Entry` からスナップショット用の `ModuleStats` を生成する
+///
+/// リングバッファの内容から百分位点・最小/最大/平均を計算し、
+/// 累積合計（`scan_total_ms_acc`）を `scan_total_ms` として反映する。
+fn materialize_stats(entry: &Entry) -> ModuleStats {
+    let mut stats = entry.stats.clone();
+    if entry.scan_samples_ms.is_empty() {
+        stats.scan_total_ms = None;
+        stats.scan_min_ms = None;
+        stats.scan_max_ms = None;
+        stats.scan_avg_ms = None;
+        stats.scan_p50_ms = None;
+        stats.scan_p95_ms = None;
+        stats.scan_p99_ms = None;
+    } else {
+        let mut samples: Vec<u64> = entry.scan_samples_ms.iter().copied().collect();
+        samples.sort_unstable();
+        let min = samples.first().copied();
+        let max = samples.last().copied();
+        let sum: u128 = samples.iter().map(|v| *v as u128).sum();
+        let avg = (sum / samples.len() as u128) as u64;
+        stats.scan_min_ms = min;
+        stats.scan_max_ms = max;
+        stats.scan_avg_ms = Some(avg);
+        stats.scan_p50_ms = Some(percentile_sorted(&samples, 50.0));
+        stats.scan_p95_ms = Some(percentile_sorted(&samples, 95.0));
+        stats.scan_p99_ms = Some(percentile_sorted(&samples, 99.0));
+        stats.scan_total_ms = Some(entry.scan_total_ms_acc.min(u64::MAX as u128) as u64);
+    }
+    stats
+}
+
+/// ソート済みサンプル列から nearest-rank 法で百分位点を取り出す
+///
+/// `p` は 0.0 〜 100.0。空の入力では 0 を返す（呼び出し側で空チェック推奨）。
+/// ランク計算: `ceil(p/100 * n)`（Wikipedia "Percentile — Nearest-rank method" 準拠）
+fn percentile_sorted(sorted_samples: &[u64], p: f64) -> u64 {
+    if sorted_samples.is_empty() {
+        return 0;
+    }
+    let n = sorted_samples.len();
+    let clamped = p.clamp(0.0, 100.0);
+    if clamped <= 0.0 {
+        return sorted_samples[0];
+    }
+    // nearest-rank: ceil(p/100 * n)、インデックスは rank-1
+    let rank = ((clamped / 100.0) * n as f64).ceil() as usize;
+    let idx = rank.saturating_sub(1).min(n - 1);
+    sorted_samples[idx]
 }
 
 /// 現在時刻を RFC3339 形式の文字列で返す（UTC 秒精度）
@@ -412,6 +540,108 @@ mod tests {
         assert_eq!(s.events_total, 2);
         assert_eq!(s.events_info, 1);
         assert_eq!(s.events_critical, 1);
+    }
+
+    #[test]
+    fn test_percentile_sorted_basic() {
+        let samples: Vec<u64> = (1..=100).collect();
+        assert_eq!(percentile_sorted(&samples, 50.0), 50);
+        assert_eq!(percentile_sorted(&samples, 95.0), 95);
+        assert_eq!(percentile_sorted(&samples, 99.0), 99);
+        assert_eq!(percentile_sorted(&samples, 100.0), 100);
+    }
+
+    #[test]
+    fn test_percentile_sorted_edge_cases() {
+        assert_eq!(percentile_sorted(&[], 50.0), 0);
+        assert_eq!(percentile_sorted(&[42], 0.0), 42);
+        assert_eq!(percentile_sorted(&[42], 50.0), 42);
+        assert_eq!(percentile_sorted(&[42], 99.0), 42);
+        assert_eq!(percentile_sorted(&[10, 20], 50.0), 10);
+        assert_eq!(percentile_sorted(&[10, 20], 95.0), 20);
+        // p=0 は最小値
+        assert_eq!(percentile_sorted(&[5, 10, 15], 0.0), 5);
+        // 範囲外は clamp される
+        assert_eq!(percentile_sorted(&[1, 2, 3], -50.0), 1);
+        assert_eq!(percentile_sorted(&[1, 2, 3], 500.0), 3);
+    }
+
+    #[test]
+    fn test_record_scan_duration_populates_histogram() {
+        let handle = ModuleStatsHandle::new();
+        for ms in [10u64, 20, 30, 40, 50] {
+            handle.record_scan_duration("m", Duration::from_millis(ms));
+        }
+        let s = handle.get("m").expect("m");
+        assert_eq!(s.scan_count, 5);
+        assert_eq!(s.scan_min_ms, Some(10));
+        assert_eq!(s.scan_max_ms, Some(50));
+        assert_eq!(s.scan_avg_ms, Some(30));
+        assert_eq!(s.scan_total_ms, Some(150));
+        // nearest-rank: ceil(0.5 * 5) = 3 -> idx 2 -> 30
+        assert_eq!(s.scan_p50_ms, Some(30));
+        // ceil(0.95 * 5) = 5 -> idx 4 -> 50
+        assert_eq!(s.scan_p95_ms, Some(50));
+        assert_eq!(s.scan_p99_ms, Some(50));
+    }
+
+    #[test]
+    fn test_record_initial_scan_feeds_histogram() {
+        let handle = ModuleStatsHandle::new();
+        handle.record_initial_scan("m", Duration::from_millis(100), 10, 1, "summary");
+        handle.record_initial_scan("m", Duration::from_millis(300), 10, 1, "summary");
+        let s = handle.get("m").expect("m");
+        assert_eq!(s.scan_count, 2);
+        assert_eq!(s.scan_min_ms, Some(100));
+        assert_eq!(s.scan_max_ms, Some(300));
+        // 最新の initial_scan は 300ms
+        assert_eq!(s.initial_scan_duration_ms, Some(300));
+    }
+
+    #[test]
+    fn test_histogram_ring_buffer_caps_at_capacity() {
+        let handle = ModuleStatsHandle::new();
+        // 上限 + 余剰を投入
+        for i in 0..(SCAN_HISTOGRAM_CAPACITY + 50) {
+            handle.record_scan_duration("m", Duration::from_millis(i as u64));
+        }
+        let s = handle.get("m").expect("m");
+        // scan_count は累積（破棄された分も含む）
+        assert_eq!(s.scan_count as usize, SCAN_HISTOGRAM_CAPACITY + 50);
+        // 最初の 50 件は破棄されているため、最小値は 50 以上
+        assert!(s.scan_min_ms.unwrap() >= 50, "min={:?}", s.scan_min_ms);
+        // 最大値は投入した最後の値
+        assert_eq!(
+            s.scan_max_ms,
+            Some((SCAN_HISTOGRAM_CAPACITY + 50 - 1) as u64)
+        );
+    }
+
+    #[test]
+    fn test_no_histogram_when_no_samples() {
+        let handle = ModuleStatsHandle::new();
+        handle.ensure("m");
+        let s = handle.get("m").expect("m");
+        assert_eq!(s.scan_count, 0);
+        assert_eq!(s.scan_p50_ms, None);
+        assert_eq!(s.scan_p95_ms, None);
+        assert_eq!(s.scan_p99_ms, None);
+        assert_eq!(s.scan_min_ms, None);
+        assert_eq!(s.scan_max_ms, None);
+        assert_eq!(s.scan_avg_ms, None);
+        assert_eq!(s.scan_total_ms, None);
+    }
+
+    #[test]
+    fn test_histogram_serialized_with_samples() {
+        let handle = ModuleStatsHandle::new();
+        handle.record_scan_duration("m", Duration::from_millis(100));
+        handle.record_scan_duration("m", Duration::from_millis(200));
+        let s = handle.get("m").expect("m");
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"scan_count\":2"));
+        assert!(json.contains("\"scan_p50_ms\":100"));
+        assert!(json.contains("\"scan_p95_ms\":200"));
     }
 
     #[test]

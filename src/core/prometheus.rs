@@ -550,6 +550,52 @@ impl PrometheusExporter {
                     }
                     output.push('\n');
                 }
+
+                // スキャン実行時間ヒストグラム（P50/P95/P99）
+                let histo_entries: Vec<_> = snapshot
+                    .iter()
+                    .filter(|s| s.scan_count > 0 && s.scan_p50_ms.is_some())
+                    .collect();
+                if !histo_entries.is_empty() {
+                    output.push_str(
+                        "# HELP zettai_module_scan_duration_seconds モジュール別スキャン実行時間の百分位点（秒）\n",
+                    );
+                    output.push_str("# TYPE zettai_module_scan_duration_seconds summary\n");
+                    for stats in &histo_entries {
+                        let label = escape_prometheus_label(&stats.module);
+                        if let Some(v) = stats.scan_p50_ms {
+                            output.push_str(&format!(
+                                "zettai_module_scan_duration_seconds{{module=\"{}\",quantile=\"0.5\"}} {:.3}\n",
+                                label,
+                                v as f64 / 1000.0
+                            ));
+                        }
+                        if let Some(v) = stats.scan_p95_ms {
+                            output.push_str(&format!(
+                                "zettai_module_scan_duration_seconds{{module=\"{}\",quantile=\"0.95\"}} {:.3}\n",
+                                label,
+                                v as f64 / 1000.0
+                            ));
+                        }
+                        if let Some(v) = stats.scan_p99_ms {
+                            output.push_str(&format!(
+                                "zettai_module_scan_duration_seconds{{module=\"{}\",quantile=\"0.99\"}} {:.3}\n",
+                                label,
+                                v as f64 / 1000.0
+                            ));
+                        }
+                        output.push_str(&format!(
+                            "zettai_module_scan_duration_seconds_count{{module=\"{}\"}} {}\n",
+                            label, stats.scan_count
+                        ));
+                        let sum_secs = stats.scan_total_ms.unwrap_or(0) as f64 / 1000.0;
+                        output.push_str(&format!(
+                            "zettai_module_scan_duration_seconds_sum{{module=\"{}\"}} {:.3}\n",
+                            label, sum_secs
+                        ));
+                    }
+                    output.push('\n');
+                }
             }
         }
 
@@ -1181,6 +1227,50 @@ mod tests {
         );
         // ただしイベント未記録でもモジュール名が登録されていれば events_total では 0 として出力される
         assert!(output.contains("zettai_module_events_total{module=\"idle_module\"} 0"));
+    }
+
+    #[test]
+    fn test_format_metrics_module_scan_duration_histogram() {
+        let shared = Arc::new(StdMutex::new(SharedMetrics::default()));
+        let handle = ModuleStatsHandle::new();
+        // 5 サンプル (100, 200, 300, 400, 500) を投入
+        for ms in [100u64, 200, 300, 400, 500] {
+            handle.record_scan_duration("file_integrity", std::time::Duration::from_millis(ms));
+        }
+        // サンプル未記録のモジュールはヒストグラムに出さない
+        handle.ensure("idle_module");
+
+        let output =
+            PrometheusExporter::format_metrics(&shared, &None, &Some(handle), Instant::now());
+
+        assert!(output.contains("# HELP zettai_module_scan_duration_seconds"));
+        assert!(output.contains("# TYPE zettai_module_scan_duration_seconds summary"));
+        // nearest-rank: p50=300ms=0.300, p95=500ms=0.500, p99=500ms=0.500
+        assert!(output.contains(
+            "zettai_module_scan_duration_seconds{module=\"file_integrity\",quantile=\"0.5\"} 0.300"
+        ));
+        assert!(output.contains(
+            "zettai_module_scan_duration_seconds{module=\"file_integrity\",quantile=\"0.95\"} 0.500"
+        ));
+        assert!(output.contains(
+            "zettai_module_scan_duration_seconds{module=\"file_integrity\",quantile=\"0.99\"} 0.500"
+        ));
+        assert!(
+            output
+                .contains("zettai_module_scan_duration_seconds_count{module=\"file_integrity\"} 5")
+        );
+        assert!(
+            output.contains(
+                "zettai_module_scan_duration_seconds_sum{module=\"file_integrity\"} 1.500"
+            )
+        );
+
+        // サンプルがないモジュールはヒストグラムに出ない
+        assert!(
+            !output.contains("zettai_module_scan_duration_seconds{module=\"idle_module\""),
+            "idle_module は scan_duration に出てはいけない:\n{}",
+            output
+        );
     }
 
     #[test]

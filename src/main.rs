@@ -1191,6 +1191,36 @@ fn format_module_stats_list(stats: &[zettai_mamorukun::core::module_stats::Modul
             );
         }
     }
+    let _ = writeln!(out);
+
+    // スキャン実行時間ヒストグラム（P95 降順・サンプルが 1 件以上あるもののみ）
+    let mut by_p95: Vec<&zettai_mamorukun::core::module_stats::ModuleStats> =
+        stats.iter().filter(|s| s.scan_count > 0).collect();
+    by_p95.sort_by(|a, b| b.scan_p95_ms.unwrap_or(0).cmp(&a.scan_p95_ms.unwrap_or(0)));
+
+    let _ = writeln!(out, "■ スキャン実行時間ヒストグラム（P95 降順）");
+    if by_p95.is_empty() {
+        let _ = writeln!(out, "  （スキャン時間サンプルはありません）");
+    } else {
+        let _ = writeln!(
+            out,
+            "  {:<24} {:>6}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}",
+            "モジュール", "件数", "P50", "P95", "P99", "avg", "max"
+        );
+        for s in by_p95.iter().take(10) {
+            let _ = writeln!(
+                out,
+                "  {:<24} {:>6}  {:>5} ms  {:>5} ms  {:>5} ms  {:>5} ms  {:>5} ms",
+                s.module,
+                format_number(s.scan_count),
+                s.scan_p50_ms.unwrap_or(0),
+                s.scan_p95_ms.unwrap_or(0),
+                s.scan_p99_ms.unwrap_or(0),
+                s.scan_avg_ms.unwrap_or(0),
+                s.scan_max_ms.unwrap_or(0),
+            );
+        }
+    }
     out
 }
 
@@ -1245,6 +1275,39 @@ fn format_module_stats_single(stats: &zettai_mamorukun::core::module_stats::Modu
         }
         if let Some(ts) = &stats.initial_scan_at {
             let _ = writeln!(out, "  実行時刻:   {}", ts);
+        }
+    }
+    let _ = writeln!(out);
+
+    let _ = writeln!(out, "■ スキャン実行時間ヒストグラム");
+    if stats.scan_count == 0 {
+        let _ = writeln!(out, "  （スキャン時間サンプルはありません）");
+    } else {
+        let _ = writeln!(
+            out,
+            "  サンプル数:   {} 件",
+            format_number(stats.scan_count)
+        );
+        if let Some(v) = stats.scan_min_ms {
+            let _ = writeln!(out, "  最小:         {} ms", format_number(v));
+        }
+        if let Some(v) = stats.scan_avg_ms {
+            let _ = writeln!(out, "  平均:         {} ms", format_number(v));
+        }
+        if let Some(v) = stats.scan_p50_ms {
+            let _ = writeln!(out, "  P50 (中央値): {} ms", format_number(v));
+        }
+        if let Some(v) = stats.scan_p95_ms {
+            let _ = writeln!(out, "  P95:          {} ms", format_number(v));
+        }
+        if let Some(v) = stats.scan_p99_ms {
+            let _ = writeln!(out, "  P99:          {} ms", format_number(v));
+        }
+        if let Some(v) = stats.scan_max_ms {
+            let _ = writeln!(out, "  最大:         {} ms", format_number(v));
+        }
+        if let Some(v) = stats.scan_total_ms {
+            let _ = writeln!(out, "  累積時間:     {} ms", format_number(v));
         }
     }
     out
@@ -2124,11 +2187,7 @@ mod tests {
                 events_warning: 50,
                 events_critical: 50,
                 last_event_at: Some("2026-04-16T10:00:00Z".to_string()),
-                initial_scan_duration_ms: None,
-                initial_scan_items_scanned: None,
-                initial_scan_issues_found: None,
-                initial_scan_summary: None,
-                initial_scan_at: None,
+                ..Default::default()
             },
             ModuleStats {
                 module: "file_integrity".to_string(),
@@ -2142,19 +2201,18 @@ mod tests {
                 initial_scan_issues_found: Some(3),
                 initial_scan_summary: Some("500 ファイル, 3 問題".to_string()),
                 initial_scan_at: Some("2026-04-16T00:00:00Z".to_string()),
+                scan_count: 3,
+                scan_total_ms: Some(600),
+                scan_min_ms: Some(100),
+                scan_max_ms: Some(300),
+                scan_avg_ms: Some(200),
+                scan_p50_ms: Some(200),
+                scan_p95_ms: Some(300),
+                scan_p99_ms: Some(300),
             },
             ModuleStats {
                 module: "process_monitor".to_string(),
-                events_total: 0,
-                events_info: 0,
-                events_warning: 0,
-                events_critical: 0,
-                last_event_at: None,
-                initial_scan_duration_ms: None,
-                initial_scan_items_scanned: None,
-                initial_scan_issues_found: None,
-                initial_scan_summary: None,
-                initial_scan_at: None,
+                ..Default::default()
             },
         ]
     }
@@ -2204,6 +2262,32 @@ mod tests {
         assert!(output.contains("500 items"));
         assert!(output.contains("3 issues"));
         assert!(output.contains("500 ファイル, 3 問題"));
+        // スキャン実行時間ヒストグラム セクション
+        assert!(output.contains("■ スキャン実行時間ヒストグラム"));
+        assert!(output.contains("サンプル数:"));
+        assert!(output.contains("P50 (中央値): 200 ms"));
+        assert!(output.contains("P95:          300 ms"));
+        assert!(output.contains("P99:          300 ms"));
+    }
+
+    #[test]
+    fn test_format_module_stats_list_contains_histogram_section() {
+        let stats = make_test_stats();
+        let output = format_module_stats_list(&stats);
+        assert!(output.contains("■ スキャン実行時間ヒストグラム（P95 降順）"));
+        assert!(output.contains("file_integrity"));
+        // 表ヘッダ
+        assert!(output.contains("P50"));
+        assert!(output.contains("P95"));
+        assert!(output.contains("P99"));
+    }
+
+    #[test]
+    fn test_format_module_stats_single_without_samples() {
+        let stats = &make_test_stats()[0]; // ssh_brute_force: no samples
+        let output = format_module_stats_single(stats);
+        assert!(output.contains("■ スキャン実行時間ヒストグラム"));
+        assert!(output.contains("（スキャン時間サンプルはありません）"));
     }
 
     #[test]
