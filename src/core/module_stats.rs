@@ -6,14 +6,14 @@
 
 use crate::config::ModuleStatsConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
 /// モジュール単位の統計情報
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModuleStats {
     /// モジュール名
     pub module: String,
