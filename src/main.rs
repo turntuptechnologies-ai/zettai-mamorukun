@@ -172,6 +172,21 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// モジュール実行統計を表示する
+    ModuleStats {
+        /// 特定モジュールのみ取得（省略時は全モジュール）
+        #[arg(long, value_name = "NAME")]
+        module: Option<String>,
+        /// JSON 形式で出力
+        #[arg(long)]
+        json: bool,
+        /// API サーバーの URL
+        #[arg(long, default_value = "http://127.0.0.1:9200")]
+        api_url: String,
+        /// API トークン
+        #[arg(long)]
+        api_token: Option<String>,
+    },
     /// API トークンの SHA-256 ハッシュを生成する
     HashToken {
         /// ハッシュ化するトークン文字列（省略時は標準入力から読み取る）
@@ -983,6 +998,258 @@ fn run_score_command(api_url: &str, api_token: Option<&str>, json: bool) {
     }
 }
 
+/// REST API 経由でモジュール実行統計を取得し、表示する
+fn run_module_stats_command(
+    api_url: &str,
+    api_token: Option<&str>,
+    module: Option<&str>,
+    json: bool,
+) {
+    use zettai_mamorukun::core::module_stats::ModuleStats;
+
+    let path = match module {
+        Some(name) => format!("/api/v1/stats/modules/{}", name),
+        None => "/api/v1/stats/modules".to_string(),
+    };
+
+    let body = match http_get_api(api_url, &path, api_token) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("エラー: {}", e);
+            process::exit(1);
+        }
+    };
+
+    if json {
+        // レスポンスの JSON をそのまま整形出力する
+        match serde_json::from_str::<serde_json::Value>(&body) {
+            Ok(v) => {
+                // unwrap safety: serde_json::Value の to_string_pretty は失敗しない
+                println!("{}", serde_json::to_string_pretty(&v).unwrap());
+            }
+            Err(_) => {
+                println!("{}", body);
+            }
+        }
+        return;
+    }
+
+    if let Some(name) = module {
+        match serde_json::from_str::<ModuleStats>(&body) {
+            Ok(stats) => {
+                print!("{}", format_module_stats_single(&stats));
+            }
+            Err(e) => {
+                eprintln!(
+                    "エラー: レスポンスの解析に失敗しました（モジュール: {}）: {}",
+                    name, e
+                );
+                println!("{}", body);
+                process::exit(1);
+            }
+        }
+    } else {
+        #[derive(serde::Deserialize)]
+        struct ListResponse {
+            #[allow(dead_code)]
+            total: usize,
+            modules: Vec<ModuleStats>,
+        }
+        match serde_json::from_str::<ListResponse>(&body) {
+            Ok(resp) => {
+                print!("{}", format_module_stats_list(&resp.modules));
+            }
+            Err(e) => {
+                eprintln!("エラー: レスポンスの解析に失敗しました: {}", e);
+                println!("{}", body);
+                process::exit(1);
+            }
+        }
+    }
+}
+
+/// REST API へ GET リクエストを送信し、レスポンスボディを返す
+fn http_get_api(api_url: &str, path: &str, api_token: Option<&str>) -> Result<String, String> {
+    use std::io::Read as _;
+    use std::net::TcpStream;
+
+    let url = api_url.trim_end_matches('/');
+    let stripped = url
+        .strip_prefix("http://")
+        .ok_or_else(|| "http:// で始まる URL を指定してください".to_string())?;
+    let (host_port, _) = stripped.split_once('/').unwrap_or((stripped, ""));
+
+    let mut stream = TcpStream::connect(host_port)
+        .map_err(|e| format!("API サーバーに接続できません ({}): {}", host_port, e))?;
+
+    let mut request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n",
+        path, host_port
+    );
+    if let Some(token) = api_token {
+        request.push_str(&format!("Authorization: Bearer {}\r\n", token));
+    }
+    request.push_str("\r\n");
+
+    std::io::Write::write_all(&mut stream, request.as_bytes())
+        .map_err(|e| format!("リクエストの送信に失敗しました: {}", e))?;
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|e| format!("レスポンスの読み取りに失敗しました: {}", e))?;
+
+    let body = response
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b)
+        .unwrap_or(&response);
+
+    let first_line = response.lines().next().unwrap_or("");
+    if !first_line.contains("200") {
+        return Err(format!(
+            "API エラー: {} (body: {})",
+            first_line.trim(),
+            body.trim()
+        ));
+    }
+
+    Ok(body.to_string())
+}
+
+/// モジュール統計の一覧をテキスト形式でフォーマットする
+fn format_module_stats_list(stats: &[zettai_mamorukun::core::module_stats::ModuleStats]) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "=== モジュール実行統計 ===");
+    let _ = writeln!(out);
+
+    let total_modules = stats.len();
+    let active_modules = stats.iter().filter(|s| s.events_total > 0).count();
+    let total_events: u64 = stats.iter().map(|s| s.events_total).sum();
+
+    let _ = writeln!(
+        out,
+        "全モジュール: {}, 検知ありモジュール: {}, 合計イベント: {}",
+        total_modules,
+        active_modules,
+        format_number(total_events)
+    );
+    let _ = writeln!(out);
+
+    // 検知イベント数 TOP 10（件数降順、0 件は除外）
+    let mut by_events: Vec<&zettai_mamorukun::core::module_stats::ModuleStats> =
+        stats.iter().filter(|s| s.events_total > 0).collect();
+    by_events.sort_by(|a, b| b.events_total.cmp(&a.events_total));
+
+    let _ = writeln!(out, "■ 検知イベント数 TOP 10（モジュール別）");
+    if by_events.is_empty() {
+        let _ = writeln!(out, "  （検知イベントはありません）");
+    } else {
+        for (i, s) in by_events.iter().take(10).enumerate() {
+            let _ = writeln!(
+                out,
+                "  {:>2}. {:<24} {:>6} 件 (INFO:{}, WARN:{}, CRIT:{})",
+                i + 1,
+                s.module,
+                format_number(s.events_total),
+                s.events_info,
+                s.events_warning,
+                s.events_critical
+            );
+            if let Some(ts) = &s.last_event_at {
+                let _ = writeln!(out, "     最終検知: {}", ts);
+            }
+        }
+    }
+    let _ = writeln!(out);
+
+    // 起動時スキャン結果（問題検知数の降順、実行記録のあるもののみ）
+    let mut by_scan: Vec<&zettai_mamorukun::core::module_stats::ModuleStats> = stats
+        .iter()
+        .filter(|s| s.initial_scan_duration_ms.is_some())
+        .collect();
+    by_scan.sort_by(|a, b| {
+        let ia = a.initial_scan_issues_found.unwrap_or(0);
+        let ib = b.initial_scan_issues_found.unwrap_or(0);
+        ib.cmp(&ia)
+    });
+
+    let _ = writeln!(out, "■ 起動時スキャン結果（問題検知順）");
+    if by_scan.is_empty() {
+        let _ = writeln!(out, "  （起動時スキャン実行記録はありません）");
+    } else {
+        for s in by_scan.iter() {
+            let dur = s.initial_scan_duration_ms.unwrap_or(0);
+            let items = s.initial_scan_items_scanned.unwrap_or(0);
+            let issues = s.initial_scan_issues_found.unwrap_or(0);
+            let summary = s.initial_scan_summary.as_deref().unwrap_or("");
+            let _ = writeln!(
+                out,
+                "  {:<24} {:>6} ms  {:>6} items  {:>4} issues — {}",
+                s.module, dur, items, issues, summary
+            );
+        }
+    }
+    out
+}
+
+/// 個別モジュールの統計をテキスト形式でフォーマットする
+fn format_module_stats_single(stats: &zettai_mamorukun::core::module_stats::ModuleStats) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "=== モジュール実行統計: {} ===", stats.module);
+    let _ = writeln!(out);
+
+    let _ = writeln!(out, "■ 検知イベント数");
+    let _ = writeln!(
+        out,
+        "  合計:     {:>6} 件",
+        format_number(stats.events_total)
+    );
+    let _ = writeln!(
+        out,
+        "  INFO:     {:>6} 件",
+        format_number(stats.events_info)
+    );
+    let _ = writeln!(
+        out,
+        "  WARNING:  {:>6} 件",
+        format_number(stats.events_warning)
+    );
+    let _ = writeln!(
+        out,
+        "  CRITICAL: {:>6} 件",
+        format_number(stats.events_critical)
+    );
+    if let Some(ts) = &stats.last_event_at {
+        let _ = writeln!(out, "  最終検知: {}", ts);
+    } else {
+        let _ = writeln!(out, "  最終検知: （なし）");
+    }
+    let _ = writeln!(out);
+
+    let _ = writeln!(out, "■ 起動時スキャン結果");
+    if stats.initial_scan_duration_ms.is_none() {
+        let _ = writeln!(out, "  （起動時スキャン実行記録はありません）");
+    } else {
+        let dur = stats.initial_scan_duration_ms.unwrap_or(0);
+        let items = stats.initial_scan_items_scanned.unwrap_or(0);
+        let issues = stats.initial_scan_issues_found.unwrap_or(0);
+        let _ = writeln!(out, "  実行時間:   {} ms", format_number(dur));
+        let _ = writeln!(out, "  スキャン数: {} items", format_number(items as u64));
+        let _ = writeln!(out, "  検知問題数: {} issues", format_number(issues as u64));
+        if let Some(summary) = &stats.initial_scan_summary {
+            let _ = writeln!(out, "  サマリー:   {}", summary);
+        }
+        if let Some(ts) = &stats.initial_scan_at {
+            let _ = writeln!(out, "  実行時刻:   {}", ts);
+        }
+    }
+    out
+}
+
 fn resolve_encryption_key(config_path: &Path) -> zettai_mamorukun::encryption::EncryptionKey {
     use zettai_mamorukun::encryption::resolve_key;
 
@@ -1568,6 +1835,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             run_score_command(api_url, api_token.as_deref(), *json);
             return Ok(());
         }
+        Some(Commands::ModuleStats {
+            module,
+            json,
+            api_url,
+            api_token,
+        }) => {
+            run_module_stats_command(api_url, api_token.as_deref(), module.as_deref(), *json);
+            return Ok(());
+        }
         Some(Commands::Archive { action }) => {
             run_archive_command(&cli.config, action);
             return Ok(());
@@ -1833,5 +2109,172 @@ mod tests {
             output.contains("zettai-mamorukun"),
             "fish completion should contain binary name"
         );
+    }
+
+    // --- module-stats CLI のテスト ---
+
+    use zettai_mamorukun::core::module_stats::ModuleStats;
+
+    fn make_test_stats() -> Vec<ModuleStats> {
+        vec![
+            ModuleStats {
+                module: "ssh_brute_force".to_string(),
+                events_total: 100,
+                events_info: 0,
+                events_warning: 50,
+                events_critical: 50,
+                last_event_at: Some("2026-04-16T10:00:00Z".to_string()),
+                initial_scan_duration_ms: None,
+                initial_scan_items_scanned: None,
+                initial_scan_issues_found: None,
+                initial_scan_summary: None,
+                initial_scan_at: None,
+            },
+            ModuleStats {
+                module: "file_integrity".to_string(),
+                events_total: 5,
+                events_info: 2,
+                events_warning: 3,
+                events_critical: 0,
+                last_event_at: Some("2026-04-16T09:00:00Z".to_string()),
+                initial_scan_duration_ms: Some(1234),
+                initial_scan_items_scanned: Some(500),
+                initial_scan_issues_found: Some(3),
+                initial_scan_summary: Some("500 ファイル, 3 問題".to_string()),
+                initial_scan_at: Some("2026-04-16T00:00:00Z".to_string()),
+            },
+            ModuleStats {
+                module: "process_monitor".to_string(),
+                events_total: 0,
+                events_info: 0,
+                events_warning: 0,
+                events_critical: 0,
+                last_event_at: None,
+                initial_scan_duration_ms: None,
+                initial_scan_items_scanned: None,
+                initial_scan_issues_found: None,
+                initial_scan_summary: None,
+                initial_scan_at: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn test_format_module_stats_list_contains_summary_and_top() {
+        let stats = make_test_stats();
+        let output = format_module_stats_list(&stats);
+        assert!(output.contains("=== モジュール実行統計 ==="));
+        assert!(output.contains("全モジュール: 3"));
+        assert!(output.contains("検知ありモジュール: 2"));
+        assert!(output.contains("合計イベント: 105"));
+        // TOP 10 で件数降順になっている
+        let top_pos = output.find("ssh_brute_force").expect("ssh_brute_force");
+        let second_pos = output.find("file_integrity").expect("file_integrity");
+        assert!(
+            top_pos < second_pos,
+            "ssh_brute_force should come before file_integrity"
+        );
+        assert!(output.contains("INFO:0, WARN:50, CRIT:50"));
+        assert!(output.contains("最終検知: 2026-04-16T10:00:00Z"));
+        // 起動時スキャンセクション
+        assert!(output.contains("■ 起動時スキャン結果"));
+        assert!(output.contains("1234 ms"));
+        assert!(output.contains("500 ファイル, 3 問題"));
+    }
+
+    #[test]
+    fn test_format_module_stats_list_empty() {
+        let stats: Vec<ModuleStats> = vec![];
+        let output = format_module_stats_list(&stats);
+        assert!(output.contains("全モジュール: 0"));
+        assert!(output.contains("（検知イベントはありません）"));
+        assert!(output.contains("（起動時スキャン実行記録はありません）"));
+    }
+
+    #[test]
+    fn test_format_module_stats_single_with_scan() {
+        let stats = &make_test_stats()[1]; // file_integrity
+        let output = format_module_stats_single(stats);
+        assert!(output.contains("=== モジュール実行統計: file_integrity ==="));
+        assert!(output.contains("合計:"));
+        assert!(output.contains("WARNING:"));
+        assert!(output.contains("最終検知: 2026-04-16T09:00:00Z"));
+        assert!(output.contains("実行時間:"));
+        assert!(output.contains("1,234 ms"));
+        assert!(output.contains("500 items"));
+        assert!(output.contains("3 issues"));
+        assert!(output.contains("500 ファイル, 3 問題"));
+    }
+
+    #[test]
+    fn test_format_module_stats_single_no_scan() {
+        let stats = &make_test_stats()[0]; // ssh_brute_force (no scan)
+        let output = format_module_stats_single(stats);
+        assert!(output.contains("ssh_brute_force"));
+        assert!(output.contains("（起動時スキャン実行記録はありません）"));
+    }
+
+    #[test]
+    fn test_module_stats_json_roundtrip() {
+        let stats = &make_test_stats()[1];
+        let json = serde_json::to_string(stats).unwrap();
+        assert!(json.contains("\"module\":\"file_integrity\""));
+        assert!(json.contains("\"events_total\":5"));
+        assert!(json.contains("\"initial_scan_duration_ms\":1234"));
+
+        // サーバからのレスポンスを再デシリアライズできること
+        let decoded: ModuleStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.module, "file_integrity");
+        assert_eq!(decoded.events_total, 5);
+        assert_eq!(decoded.initial_scan_duration_ms, Some(1234));
+        assert_eq!(
+            decoded.initial_scan_summary.as_deref(),
+            Some("500 ファイル, 3 問題")
+        );
+    }
+
+    #[test]
+    fn test_module_stats_list_response_deserialize() {
+        let body = r#"{
+            "total": 2,
+            "modules": [
+                {
+                    "module": "a",
+                    "events_total": 1,
+                    "events_info": 1,
+                    "events_warning": 0,
+                    "events_critical": 0,
+                    "last_event_at": null,
+                    "initial_scan_duration_ms": null,
+                    "initial_scan_items_scanned": null,
+                    "initial_scan_issues_found": null,
+                    "initial_scan_summary": null,
+                    "initial_scan_at": null
+                },
+                {
+                    "module": "b",
+                    "events_total": 0,
+                    "events_info": 0,
+                    "events_warning": 0,
+                    "events_critical": 0,
+                    "last_event_at": null,
+                    "initial_scan_duration_ms": 10,
+                    "initial_scan_items_scanned": 20,
+                    "initial_scan_issues_found": 0,
+                    "initial_scan_summary": "ok",
+                    "initial_scan_at": null
+                }
+            ]
+        }"#;
+        #[derive(serde::Deserialize)]
+        struct ListResponse {
+            total: usize,
+            modules: Vec<ModuleStats>,
+        }
+        let resp: ListResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(resp.total, 2);
+        assert_eq!(resp.modules.len(), 2);
+        assert_eq!(resp.modules[0].module, "a");
+        assert_eq!(resp.modules[1].initial_scan_duration_ms, Some(10));
     }
 }
