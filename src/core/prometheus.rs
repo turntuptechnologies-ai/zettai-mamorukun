@@ -5,6 +5,7 @@
 
 use crate::config::PrometheusConfig;
 use crate::core::metrics::SharedMetrics;
+use crate::core::module_stats::ModuleStatsHandle;
 use crate::core::scoring::SharedSecurityScore;
 use std::fs::File;
 use std::io::BufReader;
@@ -13,6 +14,23 @@ use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
+
+/// Prometheus テキスト形式のラベル値をエスケープする
+///
+/// ラベル値内に含まれる `\`, `"`, `\n` を安全な形式にエスケープする。
+/// 参考: https://prometheus.io/docs/instrumenting/exposition_formats/
+fn escape_prometheus_label(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            c => out.push(c),
+        }
+    }
+    out
+}
 
 fn build_prometheus_tls_acceptor(
     tls_config: &crate::config::PrometheusTlsConfig,
@@ -157,6 +175,7 @@ pub struct PrometheusExporter {
     port: u16,
     shared_metrics: Arc<StdMutex<SharedMetrics>>,
     shared_scoring: Option<Arc<StdMutex<SharedSecurityScore>>>,
+    module_stats: Option<ModuleStatsHandle>,
     started_at: Instant,
     cancel_token: CancellationToken,
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
@@ -209,6 +228,7 @@ impl PrometheusExporter {
             port: config.port,
             shared_metrics,
             shared_scoring: None,
+            module_stats: None,
             started_at,
             cancel_token: CancellationToken::new(),
             tls_acceptor,
@@ -219,6 +239,12 @@ impl PrometheusExporter {
     /// セキュリティスコアリングデータを設定する
     pub fn with_scoring(mut self, scoring: Option<Arc<StdMutex<SharedSecurityScore>>>) -> Self {
         self.shared_scoring = scoring;
+        self
+    }
+
+    /// モジュール実行統計ハンドルを設定する
+    pub fn with_module_stats(mut self, stats: Option<ModuleStatsHandle>) -> Self {
+        self.module_stats = stats;
         self
     }
 
@@ -236,6 +262,7 @@ impl PrometheusExporter {
 
         let shared_metrics = self.shared_metrics;
         let shared_scoring = self.shared_scoring;
+        let module_stats = self.module_stats;
         let started_at = self.started_at;
         let cancel_token = self.cancel_token;
         let tls_acc = self.tls_acceptor.clone();
@@ -250,13 +277,14 @@ impl PrometheusExporter {
                             Ok((stream, _)) => {
                                 let metrics = Arc::clone(&shared_metrics);
                                 let scoring = shared_scoring.clone();
+                                let stats = module_stats.clone();
                                 let started = started_at;
                                 let tls = tls_acc.clone();
                                 tokio::spawn(async move {
                                     if let Some(ref acceptor) = tls {
                                         match acceptor.accept(stream).await {
                                             Ok(tls_stream) => {
-                                                if let Err(e) = Self::handle_stream(tls_stream, &metrics, &scoring, started).await {
+                                                if let Err(e) = Self::handle_stream(tls_stream, &metrics, &scoring, &stats, started).await {
                                                     tracing::debug!(error = %e, "Prometheus TLS 接続の処理に失敗");
                                                 }
                                             }
@@ -264,7 +292,7 @@ impl PrometheusExporter {
                                                 tracing::debug!(error = %e, "Prometheus TLS ハンドシェイクに失敗");
                                             }
                                         }
-                                    } else if let Err(e) = Self::handle_stream(stream, &metrics, &scoring, started).await {
+                                    } else if let Err(e) = Self::handle_stream(stream, &metrics, &scoring, &stats, started).await {
                                         tracing::debug!(error = %e, "Prometheus 接続の処理に失敗");
                                     }
                                 });
@@ -295,6 +323,7 @@ impl PrometheusExporter {
         mut stream: S,
         shared_metrics: &Arc<StdMutex<SharedMetrics>>,
         shared_scoring: &Option<Arc<StdMutex<SharedSecurityScore>>>,
+        module_stats: &Option<ModuleStatsHandle>,
         started_at: Instant,
     ) -> Result<(), std::io::Error> {
         let result = tokio::time::timeout(
@@ -318,7 +347,8 @@ impl PrometheusExporter {
 
         match path {
             "/metrics" => {
-                let body = Self::format_metrics(shared_metrics, shared_scoring, started_at);
+                let body =
+                    Self::format_metrics(shared_metrics, shared_scoring, module_stats, started_at);
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),
@@ -374,6 +404,7 @@ impl PrometheusExporter {
     fn format_metrics(
         shared_metrics: &Arc<StdMutex<SharedMetrics>>,
         shared_scoring: &Option<Arc<StdMutex<SharedSecurityScore>>>,
+        module_stats: &Option<ModuleStatsHandle>,
         started_at: Instant,
     ) -> String {
         let mut output = String::new();
@@ -430,6 +461,96 @@ impl PrometheusExporter {
                 ));
             }
             output.push('\n');
+        }
+
+        // モジュール実行統計（module_stats ハンドル経由）
+        if let Some(stats_handle) = module_stats {
+            let snapshot = stats_handle.snapshot();
+            if !snapshot.is_empty() {
+                output
+                    .push_str("# HELP zettai_module_events_total モジュール別の検知イベント総数\n");
+                output.push_str("# TYPE zettai_module_events_total counter\n");
+                for stats in &snapshot {
+                    output.push_str(&format!(
+                        "zettai_module_events_total{{module=\"{}\"}} {}\n",
+                        escape_prometheus_label(&stats.module),
+                        stats.events_total
+                    ));
+                }
+                output.push('\n');
+
+                output.push_str(
+                    "# HELP zettai_module_events_by_severity_total モジュール別・Severity別の検知イベント数\n",
+                );
+                output.push_str("# TYPE zettai_module_events_by_severity_total counter\n");
+                for stats in &snapshot {
+                    let module_label = escape_prometheus_label(&stats.module);
+                    output.push_str(&format!(
+                        "zettai_module_events_by_severity_total{{module=\"{}\",severity=\"info\"}} {}\n",
+                        module_label, stats.events_info
+                    ));
+                    output.push_str(&format!(
+                        "zettai_module_events_by_severity_total{{module=\"{}\",severity=\"warning\"}} {}\n",
+                        module_label, stats.events_warning
+                    ));
+                    output.push_str(&format!(
+                        "zettai_module_events_by_severity_total{{module=\"{}\",severity=\"critical\"}} {}\n",
+                        module_label, stats.events_critical
+                    ));
+                }
+                output.push('\n');
+
+                let scan_entries: Vec<_> = snapshot
+                    .iter()
+                    .filter(|s| s.initial_scan_duration_ms.is_some())
+                    .collect();
+                if !scan_entries.is_empty() {
+                    output.push_str(
+                        "# HELP zettai_module_initial_scan_duration_seconds 起動時スキャンの実行時間（秒）\n",
+                    );
+                    output.push_str("# TYPE zettai_module_initial_scan_duration_seconds gauge\n");
+                    for stats in &scan_entries {
+                        if let Some(ms) = stats.initial_scan_duration_ms {
+                            output.push_str(&format!(
+                                "zettai_module_initial_scan_duration_seconds{{module=\"{}\"}} {:.3}\n",
+                                escape_prometheus_label(&stats.module),
+                                ms as f64 / 1000.0
+                            ));
+                        }
+                    }
+                    output.push('\n');
+
+                    output.push_str(
+                        "# HELP zettai_module_initial_scan_items_scanned 起動時スキャンでスキャンしたアイテム数\n",
+                    );
+                    output.push_str("# TYPE zettai_module_initial_scan_items_scanned gauge\n");
+                    for stats in &scan_entries {
+                        if let Some(items) = stats.initial_scan_items_scanned {
+                            output.push_str(&format!(
+                                "zettai_module_initial_scan_items_scanned{{module=\"{}\"}} {}\n",
+                                escape_prometheus_label(&stats.module),
+                                items
+                            ));
+                        }
+                    }
+                    output.push('\n');
+
+                    output.push_str(
+                        "# HELP zettai_module_initial_scan_issues_found 起動時スキャンで検知した問題数\n",
+                    );
+                    output.push_str("# TYPE zettai_module_initial_scan_issues_found gauge\n");
+                    for stats in &scan_entries {
+                        if let Some(issues) = stats.initial_scan_issues_found {
+                            output.push_str(&format!(
+                                "zettai_module_initial_scan_issues_found{{module=\"{}\"}} {}\n",
+                                escape_prometheus_label(&stats.module),
+                                issues
+                            ));
+                        }
+                    }
+                    output.push('\n');
+                }
+            }
         }
 
         // security score
@@ -507,7 +628,7 @@ mod tests {
     fn test_format_metrics_default() {
         let shared = Arc::new(StdMutex::new(SharedMetrics::default()));
         let started_at = Instant::now();
-        let output = PrometheusExporter::format_metrics(&shared, &None, started_at);
+        let output = PrometheusExporter::format_metrics(&shared, &None, &None, started_at);
 
         assert!(output.contains("# HELP zettai_uptime_seconds"));
         assert!(output.contains("# TYPE zettai_uptime_seconds gauge"));
@@ -535,7 +656,7 @@ mod tests {
             module_counts,
         }));
         let started_at = Instant::now();
-        let output = PrometheusExporter::format_metrics(&shared, &None, started_at);
+        let output = PrometheusExporter::format_metrics(&shared, &None, &None, started_at);
 
         assert!(output.contains("zettai_events_total 23"));
         assert!(output.contains("zettai_events_by_severity_total{severity=\"info\"} 10"));
@@ -559,7 +680,7 @@ mod tests {
             module_counts,
         }));
         let started_at = Instant::now();
-        let output = PrometheusExporter::format_metrics(&shared, &None, started_at);
+        let output = PrometheusExporter::format_metrics(&shared, &None, &None, started_at);
 
         // a_module が z_module より前に出力される
         let a_pos = output.find("a_module").unwrap();
@@ -690,6 +811,7 @@ mod tests {
 
         let output = PrometheusExporter::format_metrics(
             &exporter.shared_metrics,
+            &None,
             &None,
             exporter.started_at,
         );
@@ -939,5 +1061,222 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.client_ca_file, "/etc/certs/client-ca.crt");
         assert_eq!(config.client_auth_mode, "optional");
+    }
+
+    #[test]
+    fn test_escape_prometheus_label_plain() {
+        assert_eq!(escape_prometheus_label("file_integrity"), "file_integrity");
+        assert_eq!(escape_prometheus_label(""), "");
+    }
+
+    #[test]
+    fn test_escape_prometheus_label_quotes_backslash_newline() {
+        assert_eq!(escape_prometheus_label(r#"a"b"#), r#"a\"b"#);
+        assert_eq!(escape_prometheus_label(r"a\b"), r"a\\b");
+        assert_eq!(escape_prometheus_label("a\nb"), "a\\nb");
+        assert_eq!(escape_prometheus_label("a\\\"\nb"), "a\\\\\\\"\\nb");
+    }
+
+    #[test]
+    fn test_format_metrics_module_stats_empty_handle() {
+        let shared = Arc::new(StdMutex::new(SharedMetrics::default()));
+        let handle = ModuleStatsHandle::new();
+        let output =
+            PrometheusExporter::format_metrics(&shared, &None, &Some(handle), Instant::now());
+        // snapshot が空なのでモジュール統計セクションは出力されない
+        assert!(!output.contains("zettai_module_events_total"));
+        assert!(!output.contains("zettai_module_events_by_severity_total"));
+        assert!(!output.contains("zettai_module_initial_scan_duration_seconds"));
+    }
+
+    #[test]
+    fn test_format_metrics_module_stats_events_only() {
+        use crate::core::event::{SecurityEvent, Severity};
+
+        let shared = Arc::new(StdMutex::new(SharedMetrics::default()));
+        let handle = ModuleStatsHandle::new();
+        handle.record_event(&SecurityEvent::new(
+            "t",
+            Severity::Info,
+            "file_integrity",
+            "msg",
+        ));
+        handle.record_event(&SecurityEvent::new(
+            "t",
+            Severity::Warning,
+            "file_integrity",
+            "msg",
+        ));
+        handle.record_event(&SecurityEvent::new(
+            "t",
+            Severity::Critical,
+            "file_integrity",
+            "msg",
+        ));
+        handle.record_event(&SecurityEvent::new("t", Severity::Info, "ssh_brute", "msg"));
+
+        let output =
+            PrometheusExporter::format_metrics(&shared, &None, &Some(handle), Instant::now());
+
+        assert!(output.contains("# HELP zettai_module_events_total"));
+        assert!(output.contains("# TYPE zettai_module_events_total counter"));
+        assert!(output.contains("zettai_module_events_total{module=\"file_integrity\"} 3"));
+        assert!(output.contains("zettai_module_events_total{module=\"ssh_brute\"} 1"));
+
+        assert!(output.contains("# TYPE zettai_module_events_by_severity_total counter"));
+        assert!(output.contains(
+            "zettai_module_events_by_severity_total{module=\"file_integrity\",severity=\"info\"} 1"
+        ));
+        assert!(output.contains(
+            "zettai_module_events_by_severity_total{module=\"file_integrity\",severity=\"warning\"} 1"
+        ));
+        assert!(output.contains(
+            "zettai_module_events_by_severity_total{module=\"file_integrity\",severity=\"critical\"} 1"
+        ));
+        assert!(output.contains(
+            "zettai_module_events_by_severity_total{module=\"ssh_brute\",severity=\"info\"} 1"
+        ));
+
+        // initial_scan セクションは未記録なので出力されない
+        assert!(!output.contains("zettai_module_initial_scan_duration_seconds"));
+        assert!(!output.contains("zettai_module_initial_scan_items_scanned"));
+        assert!(!output.contains("zettai_module_initial_scan_issues_found"));
+    }
+
+    #[test]
+    fn test_format_metrics_module_stats_initial_scan() {
+        let shared = Arc::new(StdMutex::new(SharedMetrics::default()));
+        let handle = ModuleStatsHandle::new();
+        handle.record_initial_scan(
+            "file_integrity",
+            std::time::Duration::from_millis(1234),
+            500,
+            3,
+            "scan complete",
+        );
+        // 起動時スキャン記録なしのモジュールも混在
+        handle.ensure("idle_module");
+
+        let output =
+            PrometheusExporter::format_metrics(&shared, &None, &Some(handle), Instant::now());
+
+        assert!(output.contains("# TYPE zettai_module_initial_scan_duration_seconds gauge"));
+        assert!(output.contains(
+            "zettai_module_initial_scan_duration_seconds{module=\"file_integrity\"} 1.234"
+        ));
+        assert!(output.contains("# TYPE zettai_module_initial_scan_items_scanned gauge"));
+        assert!(
+            output.contains(
+                "zettai_module_initial_scan_items_scanned{module=\"file_integrity\"} 500"
+            )
+        );
+        assert!(output.contains("# TYPE zettai_module_initial_scan_issues_found gauge"));
+        assert!(
+            output.contains("zettai_module_initial_scan_issues_found{module=\"file_integrity\"} 3")
+        );
+
+        // 起動時スキャンしていない idle_module は initial_scan セクションには含まれない
+        assert!(
+            !output.contains("zettai_module_initial_scan_duration_seconds{module=\"idle_module\"}")
+        );
+        // ただしイベント未記録でもモジュール名が登録されていれば events_total では 0 として出力される
+        assert!(output.contains("zettai_module_events_total{module=\"idle_module\"} 0"));
+    }
+
+    #[test]
+    fn test_format_metrics_module_stats_sorted_by_module() {
+        let shared = Arc::new(StdMutex::new(SharedMetrics::default()));
+        let handle = ModuleStatsHandle::new();
+        handle.ensure_all(["zeta_mod", "alpha_mod", "mid_mod"]);
+
+        let output =
+            PrometheusExporter::format_metrics(&shared, &None, &Some(handle), Instant::now());
+
+        let alpha = output.find("module=\"alpha_mod\"").expect("alpha_mod");
+        let mid = output.find("module=\"mid_mod\"").expect("mid_mod");
+        let zeta = output.find("module=\"zeta_mod\"").expect("zeta_mod");
+        assert!(alpha < mid);
+        assert!(mid < zeta);
+    }
+
+    #[test]
+    fn test_with_module_stats_none_suppresses_section() {
+        let shared = Arc::new(StdMutex::new(SharedMetrics::default()));
+        let output = PrometheusExporter::format_metrics(&shared, &None, &None, Instant::now());
+        assert!(!output.contains("zettai_module_events_total"));
+        assert!(!output.contains("zettai_module_events_by_severity_total"));
+        assert!(!output.contains("zettai_module_initial_scan_"));
+    }
+
+    #[tokio::test]
+    async fn test_prometheus_exporter_serves_module_stats() {
+        use crate::core::event::{SecurityEvent, Severity};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let config = PrometheusConfig {
+            enabled: true,
+            bind_address: "127.0.0.1".to_string(),
+            port,
+            ..Default::default()
+        };
+
+        let handle = ModuleStatsHandle::new();
+        handle.record_event(&SecurityEvent::new(
+            "t",
+            Severity::Critical,
+            "backdoor_detector",
+            "msg",
+        ));
+        handle.record_initial_scan(
+            "backdoor_detector",
+            std::time::Duration::from_millis(42),
+            10,
+            1,
+            "scan done",
+        );
+
+        let shared = Arc::new(StdMutex::new(SharedMetrics::default()));
+        let exporter = PrometheusExporter::new(&config, shared, Instant::now())
+            .with_module_stats(Some(handle));
+        let cancel = exporter.cancel_token();
+        exporter.spawn().unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf);
+
+        assert!(response.contains("HTTP/1.1 200 OK"));
+        assert!(response.contains("zettai_module_events_total{module=\"backdoor_detector\"} 1"));
+        assert!(response.contains(
+            "zettai_module_events_by_severity_total{module=\"backdoor_detector\",severity=\"critical\"} 1"
+        ));
+        assert!(response.contains(
+            "zettai_module_initial_scan_duration_seconds{module=\"backdoor_detector\"} 0.042"
+        ));
+        assert!(
+            response.contains(
+                "zettai_module_initial_scan_items_scanned{module=\"backdoor_detector\"} 10"
+            )
+        );
+        assert!(
+            response.contains(
+                "zettai_module_initial_scan_issues_found{module=\"backdoor_detector\"} 1"
+            )
+        );
+
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }

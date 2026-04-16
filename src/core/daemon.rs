@@ -440,7 +440,8 @@ impl Daemon {
                     Arc::clone(metrics),
                     prometheus_started_at,
                 )
-                .with_scoring(shared_scoring.clone());
+                .with_scoring(shared_scoring.clone())
+                .with_module_stats(module_stats_handle.clone());
                 prometheus_cancel_token = Some(exporter.cancel_token());
                 match exporter.spawn() {
                     Ok(()) => {}
@@ -791,7 +792,8 @@ impl Daemon {
                                             Arc::clone(metrics),
                                             prometheus_started_at,
                                         )
-                                        .with_scoring(shared_scoring.clone());
+                                        .with_scoring(shared_scoring.clone())
+                                        .with_module_stats(module_stats_handle.clone());
                                         prometheus_cancel_token = Some(exporter.cancel_token());
                                         match exporter.spawn() {
                                             Ok(()) => tracing::info!(
@@ -815,7 +817,8 @@ impl Daemon {
                                             Arc::clone(metrics),
                                             prometheus_started_at,
                                         )
-                                        .with_scoring(shared_scoring.clone());
+                                        .with_scoring(shared_scoring.clone())
+                                        .with_module_stats(module_stats_handle.clone());
                                         prometheus_cancel_token = Some(exporter.cancel_token());
                                         match exporter.spawn() {
                                             Ok(()) => tracing::info!(
@@ -833,7 +836,8 @@ impl Daemon {
                                                     Arc::clone(metrics),
                                                     prometheus_started_at,
                                                 )
-                                                .with_scoring(shared_scoring.clone());
+                                                .with_scoring(shared_scoring.clone())
+                                                .with_module_stats(module_stats_handle.clone());
                                                 prometheus_cancel_token =
                                                     Some(fallback.cancel_token());
                                                 match fallback.spawn() {

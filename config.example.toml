@@ -860,6 +860,17 @@ socket_path = "/var/run/zettai-mamorukun/status.sock"
 # /metrics — メトリクス取得、/health — ヘルスチェック
 # 注意: metrics.enabled = true が必要
 # SIGHUP でホットリロード可能（enabled, bind_address, port の変更が即時反映される）
+# 公開メトリクス:
+#   - zettai_uptime_seconds（デーモンの稼働時間）
+#   - zettai_events_total / zettai_events_by_severity_total / zettai_events_by_module_total
+#     （全体統計、metrics.enabled が前提）
+#   - zettai_security_score_overall / zettai_security_score_category（scoring.enabled が前提）
+#   - zettai_module_events_total{module} / zettai_module_events_by_severity_total{module,severity}
+#     （module_stats.enabled が前提）
+#   - zettai_module_initial_scan_duration_seconds{module}
+#     / zettai_module_initial_scan_items_scanned{module}
+#     / zettai_module_initial_scan_issues_found{module}
+#     （module_stats.enabled かつ 起動時スキャンを行ったモジュールのみ）
 enabled = false
 # バインドアドレス
 bind_address = "127.0.0.1"
