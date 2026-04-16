@@ -90,7 +90,7 @@ pub struct EventStore {
 }
 
 /// SQLite データベースを初期化する（テーブル作成・PRAGMA 設定）
-fn init_database(conn: &Connection) -> Result<(), AppError> {
+pub(crate) fn init_database(conn: &Connection) -> Result<(), AppError> {
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;
@@ -4285,5 +4285,387 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM security_events", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    // ================================================================
+    // サマリー API 関連テスト
+    // ================================================================
+
+    /// テスト用ヘルパー: 指定タイムスタンプ・severity・module でイベントを挿入
+    fn insert_summary_event(
+        conn: &Connection,
+        timestamp: i64,
+        severity: &str,
+        module: &str,
+        message: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO security_events (timestamp, severity, source_module, event_type, message) \
+             VALUES (?1, ?2, ?3, 'test_event', ?4)",
+            params![timestamp, severity, module, message],
+        )
+        .unwrap();
+    }
+
+    /// テスト用ヘルパー: サマリーテスト用のデータベースを作成しイベントを投入
+    fn setup_summary_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+
+        // 基準時刻: 2026-04-10 00:00:00 UTC = 1775952000
+        let base = 1_775_952_000i64;
+
+        // モジュール A: INFO x2, WARNING x1
+        insert_summary_event(&conn, base, "INFO", "module_a", "info event 1");
+        insert_summary_event(&conn, base + 3600, "INFO", "module_a", "info event 2");
+        insert_summary_event(&conn, base + 7200, "WARNING", "module_a", "warning event");
+
+        // モジュール B: CRITICAL x1, WARNING x1
+        insert_summary_event(&conn, base + 1800, "CRITICAL", "module_b", "critical event");
+        insert_summary_event(&conn, base + 5400, "WARNING", "module_b", "warning event b");
+
+        conn
+    }
+
+    #[test]
+    fn test_timeline_interval_parse_valid() {
+        assert!(matches!(
+            TimelineInterval::parse("hour"),
+            Some(TimelineInterval::Hour)
+        ));
+        assert!(matches!(
+            TimelineInterval::parse("day"),
+            Some(TimelineInterval::Day)
+        ));
+        assert!(matches!(
+            TimelineInterval::parse("week"),
+            Some(TimelineInterval::Week)
+        ));
+    }
+
+    #[test]
+    fn test_timeline_interval_parse_invalid() {
+        assert!(TimelineInterval::parse("minute").is_none());
+        assert!(TimelineInterval::parse("month").is_none());
+        assert!(TimelineInterval::parse("").is_none());
+        assert!(TimelineInterval::parse("HOUR").is_none());
+    }
+
+    #[test]
+    fn test_build_summary_where_no_filters() {
+        let query = SummaryQuery {
+            since: 1000,
+            until: 2000,
+            module: None,
+            severity: None,
+        };
+        let (sql, params) = build_summary_where(&query);
+        assert_eq!(sql, " WHERE timestamp >= ?1 AND timestamp <= ?2");
+        assert_eq!(params.len(), 2);
+    }
+
+    #[test]
+    fn test_build_summary_where_with_module() {
+        let query = SummaryQuery {
+            since: 1000,
+            until: 2000,
+            module: Some("test_mod".to_string()),
+            severity: None,
+        };
+        let (sql, params) = build_summary_where(&query);
+        assert!(sql.contains("AND source_module = ?3"));
+        assert_eq!(params.len(), 3);
+    }
+
+    #[test]
+    fn test_build_summary_where_with_severity() {
+        let query = SummaryQuery {
+            since: 1000,
+            until: 2000,
+            module: None,
+            severity: Some("CRITICAL".to_string()),
+        };
+        let (sql, params) = build_summary_where(&query);
+        assert!(sql.contains("AND severity = ?3"));
+        assert_eq!(params.len(), 3);
+    }
+
+    #[test]
+    fn test_build_summary_where_with_module_and_severity() {
+        let query = SummaryQuery {
+            since: 1000,
+            until: 2000,
+            module: Some("mod_a".to_string()),
+            severity: Some("WARNING".to_string()),
+        };
+        let (sql, params) = build_summary_where(&query);
+        assert!(sql.contains("AND source_module = ?3"));
+        assert!(sql.contains("AND severity = ?4"));
+        assert_eq!(params.len(), 4);
+    }
+
+    #[test]
+    fn test_query_event_summary_basic() {
+        let conn = setup_summary_db();
+        let base = 1_775_952_000i64;
+
+        let query = SummaryQuery {
+            since: base,
+            until: base + 86400,
+            module: None,
+            severity: None,
+        };
+        let result = query_event_summary(&conn, &query).unwrap();
+
+        assert_eq!(result["total"], 5);
+        assert_eq!(result["by_severity"]["INFO"], 2);
+        assert_eq!(result["by_severity"]["WARNING"], 2);
+        assert_eq!(result["by_severity"]["CRITICAL"], 1);
+        assert_eq!(result["by_module"]["module_a"], 3);
+        assert_eq!(result["by_module"]["module_b"], 2);
+    }
+
+    #[test]
+    fn test_query_event_summary_with_module_filter() {
+        let conn = setup_summary_db();
+        let base = 1_775_952_000i64;
+
+        let query = SummaryQuery {
+            since: base,
+            until: base + 86400,
+            module: Some("module_a".to_string()),
+            severity: None,
+        };
+        let result = query_event_summary(&conn, &query).unwrap();
+
+        assert_eq!(result["total"], 3);
+        assert_eq!(result["by_severity"]["INFO"], 2);
+        assert_eq!(result["by_severity"]["WARNING"], 1);
+        assert!(result["by_severity"].get("CRITICAL").is_none());
+    }
+
+    #[test]
+    fn test_query_event_summary_with_severity_filter() {
+        let conn = setup_summary_db();
+        let base = 1_775_952_000i64;
+
+        let query = SummaryQuery {
+            since: base,
+            until: base + 86400,
+            module: None,
+            severity: Some("WARNING".to_string()),
+        };
+        let result = query_event_summary(&conn, &query).unwrap();
+
+        assert_eq!(result["total"], 2);
+    }
+
+    #[test]
+    fn test_query_event_summary_empty_range() {
+        let conn = setup_summary_db();
+
+        let query = SummaryQuery {
+            since: 0,
+            until: 100,
+            module: None,
+            severity: None,
+        };
+        let result = query_event_summary(&conn, &query).unwrap();
+
+        assert_eq!(result["total"], 0);
+    }
+
+    #[test]
+    fn test_query_event_timeline_hour() {
+        let conn = setup_summary_db();
+        let base = 1_775_952_000i64;
+
+        let query = SummaryQuery {
+            since: base,
+            until: base + 3 * 3600,
+            module: None,
+            severity: None,
+        };
+        let buckets = query_event_timeline(&conn, &query, TimelineInterval::Hour).unwrap();
+
+        // base から base+3h = 4 バケット (0h, 1h, 2h, 3h)
+        assert_eq!(buckets.len(), 4);
+        // バケット 0 (base): module_a INFO + module_b CRITICAL = 2
+        assert_eq!(buckets[0].timestamp, base);
+        assert_eq!(buckets[0].count, 2);
+        // バケット 1 (base+3600): module_a INFO + module_b WARNING = 2
+        assert_eq!(buckets[1].timestamp, base + 3600);
+        assert_eq!(buckets[1].count, 2);
+        // バケット 2 (base+7200): module_a WARNING = 1
+        assert_eq!(buckets[2].timestamp, base + 7200);
+        assert_eq!(buckets[2].count, 1);
+        // バケット 3: 0 (補完)
+        assert_eq!(buckets[3].count, 0);
+    }
+
+    #[test]
+    fn test_query_event_timeline_day() {
+        let conn = setup_summary_db();
+        let base = 1_775_952_000i64;
+
+        let query = SummaryQuery {
+            since: base,
+            until: base + 86400,
+            module: None,
+            severity: None,
+        };
+        let buckets = query_event_timeline(&conn, &query, TimelineInterval::Day).unwrap();
+
+        // base/86400 と (base+86400)/86400 = 2 バケット
+        assert_eq!(buckets.len(), 2);
+        // 全イベントは同じ日に入る
+        assert_eq!(buckets[0].count, 5);
+    }
+
+    #[test]
+    fn test_query_event_timeline_empty_buckets_filled() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+
+        // 1時間ごとに3バケット分の範囲を問い合わせるが、データなし
+        let query = SummaryQuery {
+            since: 0,
+            until: 2 * 3600,
+            module: None,
+            severity: None,
+        };
+        let buckets = query_event_timeline(&conn, &query, TimelineInterval::Hour).unwrap();
+
+        assert_eq!(buckets.len(), 3);
+        for b in &buckets {
+            assert_eq!(b.count, 0);
+        }
+    }
+
+    #[test]
+    fn test_query_module_summary_basic() {
+        let conn = setup_summary_db();
+        let base = 1_775_952_000i64;
+
+        let query = SummaryQuery {
+            since: base,
+            until: base + 86400,
+            module: None,
+            severity: None,
+        };
+        let modules = query_module_summary(&conn, &query, 20).unwrap();
+
+        // module_a(3件) > module_b(2件) の降順
+        assert_eq!(modules.len(), 2);
+        assert_eq!(modules[0].module, "module_a");
+        assert_eq!(modules[0].count, 3);
+        assert_eq!(modules[1].module, "module_b");
+        assert_eq!(modules[1].count, 2);
+    }
+
+    #[test]
+    fn test_query_module_summary_limit() {
+        let conn = setup_summary_db();
+        let base = 1_775_952_000i64;
+
+        let query = SummaryQuery {
+            since: base,
+            until: base + 86400,
+            module: None,
+            severity: None,
+        };
+        let modules = query_module_summary(&conn, &query, 1).unwrap();
+
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].module, "module_a");
+    }
+
+    #[test]
+    fn test_query_module_summary_latest_timestamp() {
+        let conn = setup_summary_db();
+        let base = 1_775_952_000i64;
+
+        let query = SummaryQuery {
+            since: base,
+            until: base + 86400,
+            module: None,
+            severity: None,
+        };
+        let modules = query_module_summary(&conn, &query, 20).unwrap();
+
+        // module_a の最新は base + 7200
+        assert_eq!(modules[0].latest_timestamp, base + 7200);
+        // module_b の最新は base + 5400
+        assert_eq!(modules[1].latest_timestamp, base + 5400);
+    }
+
+    #[test]
+    fn test_query_severity_summary_basic() {
+        let conn = setup_summary_db();
+        let base = 1_775_952_000i64;
+
+        let query = SummaryQuery {
+            since: base,
+            until: base + 86400,
+            module: None,
+            severity: None,
+        };
+        let (total, severities) = query_severity_summary(&conn, &query).unwrap();
+
+        assert_eq!(total, 5);
+
+        let info = severities.iter().find(|s| s.severity == "INFO").unwrap();
+        assert_eq!(info.count, 2);
+        assert!((info.percentage - 40.0).abs() < 0.01);
+
+        let warning = severities.iter().find(|s| s.severity == "WARNING").unwrap();
+        assert_eq!(warning.count, 2);
+        assert!((warning.percentage - 40.0).abs() < 0.01);
+
+        let critical = severities
+            .iter()
+            .find(|s| s.severity == "CRITICAL")
+            .unwrap();
+        assert_eq!(critical.count, 1);
+        assert!((critical.percentage - 20.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_query_severity_summary_empty() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+
+        let query = SummaryQuery {
+            since: 0,
+            until: 99999999,
+            module: None,
+            severity: None,
+        };
+        let (total, severities) = query_severity_summary(&conn, &query).unwrap();
+
+        assert_eq!(total, 0);
+        assert!(severities.is_empty());
+    }
+
+    #[test]
+    fn test_query_severity_summary_single_severity() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+
+        insert_summary_event(&conn, 1000, "CRITICAL", "mod_a", "event");
+        insert_summary_event(&conn, 1001, "CRITICAL", "mod_b", "event");
+
+        let query = SummaryQuery {
+            since: 0,
+            until: 99999999,
+            module: None,
+            severity: None,
+        };
+        let (total, severities) = query_severity_summary(&conn, &query).unwrap();
+
+        assert_eq!(total, 2);
+        assert_eq!(severities.len(), 1);
+        assert_eq!(severities[0].severity, "CRITICAL");
+        assert!((severities[0].percentage - 100.0).abs() < 0.01);
     }
 }

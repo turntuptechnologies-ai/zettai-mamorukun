@@ -6755,4 +6755,197 @@ mod tests {
             Some(r#"test"quoted"#.to_string())
         );
     }
+
+    // ================================================================
+    // イベントサマリー API テスト
+    // ================================================================
+
+    #[test]
+    fn test_summary_endpoints_required_role() {
+        let paths = [
+            "/api/v1/events/summary",
+            "/api/v1/events/summary/timeline",
+            "/api/v1/events/summary/modules",
+            "/api/v1/events/summary/severity",
+        ];
+        for path in &paths {
+            let role = ApiServer::required_role(&HttpMethod::Get, path);
+            assert_eq!(role, Some(ApiRole::ReadOnly), "path={}", path);
+        }
+    }
+
+    /// テスト用ヘルパー: サマリーテスト用の SQLite DB ファイルを作成
+    fn create_summary_test_db() -> tempfile::NamedTempFile {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = rusqlite::Connection::open(tmp.path()).unwrap();
+        crate::core::event_store::init_database(&conn).unwrap();
+
+        let base = 1_775_952_000i64; // 2026-04-10 00:00:00 UTC
+        for (ts, sev, module) in &[
+            (base, "INFO", "mod_a"),
+            (base + 3600, "WARNING", "mod_a"),
+            (base + 7200, "CRITICAL", "mod_b"),
+        ] {
+            conn.execute(
+                "INSERT INTO security_events (timestamp, severity, source_module, event_type, message) \
+                 VALUES (?1, ?2, ?3, 'test', 'msg')",
+                rusqlite::params![ts, sev, module],
+            )
+            .unwrap();
+        }
+        tmp
+    }
+
+    #[test]
+    fn test_handle_events_summary_default() {
+        let db = create_summary_test_db();
+        let db_path = db.path().to_str().unwrap();
+        let params = HashMap::new();
+
+        let result = ApiServer::handle_events_summary(db_path, "", &params);
+        assert!(result.is_ok());
+        let body = result.unwrap();
+        assert!(body.contains("\"total\""));
+        assert!(body.contains("\"by_severity\""));
+        assert!(body.contains("\"by_module\""));
+    }
+
+    #[test]
+    fn test_handle_events_summary_invalid_since() {
+        let db = create_summary_test_db();
+        let db_path = db.path().to_str().unwrap();
+        let mut params = HashMap::new();
+        params.insert("since".to_string(), "not-a-date".to_string());
+
+        let result = ApiServer::handle_events_summary(db_path, "", &params);
+        assert!(result.is_err());
+        let (code, _msg) = result.unwrap_err();
+        assert_eq!(code, 400);
+    }
+
+    #[test]
+    fn test_handle_events_summary_since_after_until() {
+        let db = create_summary_test_db();
+        let db_path = db.path().to_str().unwrap();
+        let mut params = HashMap::new();
+        params.insert("since".to_string(), "2026-04-15".to_string());
+        params.insert("until".to_string(), "2026-04-10".to_string());
+
+        let result = ApiServer::handle_events_summary(db_path, "", &params);
+        assert!(result.is_err());
+        let (code, msg) = result.unwrap_err();
+        assert_eq!(code, 400);
+        assert!(msg.contains("since"));
+    }
+
+    #[test]
+    fn test_handle_events_summary_period_exceeds_90_days() {
+        let db = create_summary_test_db();
+        let db_path = db.path().to_str().unwrap();
+        let mut params = HashMap::new();
+        params.insert("since".to_string(), "2026-01-01".to_string());
+        params.insert("until".to_string(), "2026-06-01".to_string());
+
+        let result = ApiServer::handle_events_summary(db_path, "", &params);
+        assert!(result.is_err());
+        let (code, msg) = result.unwrap_err();
+        assert_eq!(code, 400);
+        assert!(msg.contains("90"));
+    }
+
+    #[test]
+    fn test_handle_events_summary_invalid_severity() {
+        let db = create_summary_test_db();
+        let db_path = db.path().to_str().unwrap();
+        let mut params = HashMap::new();
+        params.insert("severity".to_string(), "UNKNOWN".to_string());
+
+        let result = ApiServer::handle_events_summary(db_path, "", &params);
+        assert!(result.is_err());
+        let (code, _msg) = result.unwrap_err();
+        assert_eq!(code, 400);
+    }
+
+    #[test]
+    fn test_handle_events_summary_invalid_interval() {
+        let db = create_summary_test_db();
+        let db_path = db.path().to_str().unwrap();
+        let mut params = HashMap::new();
+        params.insert("interval".to_string(), "minute".to_string());
+
+        let result = ApiServer::handle_events_summary(db_path, "/timeline", &params);
+        assert!(result.is_err());
+        let (code, _msg) = result.unwrap_err();
+        assert_eq!(code, 400);
+    }
+
+    #[test]
+    fn test_handle_events_summary_limit_zero() {
+        let db = create_summary_test_db();
+        let db_path = db.path().to_str().unwrap();
+        let mut params = HashMap::new();
+        params.insert("limit".to_string(), "0".to_string());
+
+        let result = ApiServer::handle_events_summary(db_path, "/modules", &params);
+        assert!(result.is_err());
+        let (code, _msg) = result.unwrap_err();
+        assert_eq!(code, 400);
+    }
+
+    #[test]
+    fn test_handle_events_summary_unknown_sub_path() {
+        let db = create_summary_test_db();
+        let db_path = db.path().to_str().unwrap();
+        let params = HashMap::new();
+
+        let result = ApiServer::handle_events_summary(db_path, "/unknown", &params);
+        assert!(result.is_err());
+        let (code, _msg) = result.unwrap_err();
+        assert_eq!(code, 404);
+    }
+
+    #[test]
+    fn test_handle_events_summary_timeline_ok() {
+        let db = create_summary_test_db();
+        let db_path = db.path().to_str().unwrap();
+        let mut params = HashMap::new();
+        params.insert("since".to_string(), "2026-04-10".to_string());
+        params.insert("until".to_string(), "2026-04-11".to_string());
+        params.insert("interval".to_string(), "hour".to_string());
+
+        let result = ApiServer::handle_events_summary(db_path, "/timeline", &params);
+        assert!(result.is_ok());
+        let body = result.unwrap();
+        assert!(body.contains("\"buckets\""));
+        assert!(body.contains("\"interval\":\"hour\""));
+    }
+
+    #[test]
+    fn test_handle_events_summary_modules_ok() {
+        let db = create_summary_test_db();
+        let db_path = db.path().to_str().unwrap();
+        let mut params = HashMap::new();
+        params.insert("since".to_string(), "2026-04-10".to_string());
+        params.insert("until".to_string(), "2026-04-11".to_string());
+
+        let result = ApiServer::handle_events_summary(db_path, "/modules", &params);
+        assert!(result.is_ok());
+        let body = result.unwrap();
+        assert!(body.contains("\"modules\""));
+    }
+
+    #[test]
+    fn test_handle_events_summary_severity_ok() {
+        let db = create_summary_test_db();
+        let db_path = db.path().to_str().unwrap();
+        let mut params = HashMap::new();
+        params.insert("since".to_string(), "2026-04-10".to_string());
+        params.insert("until".to_string(), "2026-04-11".to_string());
+
+        let result = ApiServer::handle_events_summary(db_path, "/severity", &params);
+        assert!(result.is_ok());
+        let body = result.unwrap();
+        assert!(body.contains("\"severities\""));
+        assert!(body.contains("\"total\""));
+    }
 }
