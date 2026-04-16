@@ -782,6 +782,21 @@ cleanup_interval_hours = 24
 # retention_days より長い期間を設定することで、重要イベントをより長く保持する
 # 0 の場合は retention_days と同じ（Severity 別保持なし）
 retention_days_critical = 365
+# WARNING イベントの保持期間（日数）
+# retention_days と retention_days_critical の中間的な保持期間を設定可能
+# 0 の場合は retention_days と同じ
+# retention_days_warning = 180
+
+# モジュール別イベント保持ポリシー
+# モジュールごとに Severity 別の保持期間をカスタマイズ可能
+# 各値が 0 の場合はグローバル設定にフォールバック
+# [event_store.retention_policies.file_integrity]
+# retention_days = 120          # INFO の保持期間（日数）
+# retention_days_warning = 240  # WARNING の保持期間（日数）
+# retention_days_critical = 365 # CRITICAL の保持期間（日数）
+#
+# [event_store.retention_policies.ssh_brute_force]
+# retention_days = 30
 # ストレージ上限（MB）
 # DB ファイルサイズがこの値を超えた場合、古い INFO → WARNING → CRITICAL の順で削除する
 # 0 の場合は上限なし（無制限）
