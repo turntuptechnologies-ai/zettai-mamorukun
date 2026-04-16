@@ -35,6 +35,10 @@ pub struct AppConfig {
     #[serde(default)]
     pub metrics: MetricsConfig,
 
+    /// モジュール実行統計設定
+    #[serde(default)]
+    pub module_stats: ModuleStatsConfig,
+
     /// ステータスサーバー設定
     #[serde(default)]
     pub status: StatusConfig,
@@ -3317,6 +3321,33 @@ impl Default for MetricsConfig {
         Self {
             enabled: false,
             interval_secs: Self::default_interval_secs(),
+        }
+    }
+}
+
+/// モジュール実行統計の設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct ModuleStatsConfig {
+    /// モジュール統計収集の有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// サマリーログ出力インターバル（秒）。0 の場合は定期ログを出力しない
+    #[serde(default = "ModuleStatsConfig::default_log_interval_secs")]
+    pub log_interval_secs: u64,
+}
+
+impl ModuleStatsConfig {
+    fn default_log_interval_secs() -> u64 {
+        300
+    }
+}
+
+impl Default for ModuleStatsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            log_interval_secs: Self::default_log_interval_secs(),
         }
     }
 }

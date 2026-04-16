@@ -259,6 +259,7 @@ pub struct ApiServer {
     archive_dir: Option<String>,
     archive_config: ArchiveApiConfig,
     shared_action_config: Arc<StdMutex<ActionConfig>>,
+    module_stats_handle: Option<crate::core::module_stats::ModuleStatsHandle>,
 }
 
 /// アーカイブ API 用の設定
@@ -460,6 +461,7 @@ impl ApiServer {
         shared_scoring: Option<Arc<StdMutex<SharedSecurityScore>>>,
         event_store_config: Option<&crate::config::EventStoreConfig>,
         action_config: &ActionConfig,
+        module_stats_handle: Option<crate::core::module_stats::ModuleStatsHandle>,
     ) -> Self {
         let rate_limiter = if config.rate_limit.enabled {
             Some(RateLimiter::new(&config.rate_limit))
@@ -543,6 +545,7 @@ impl ApiServer {
                     max_files: 0,
                 }),
             shared_action_config: Arc::new(StdMutex::new(action_config.clone())),
+            module_stats_handle,
         }
     }
 
@@ -595,6 +598,7 @@ impl ApiServer {
         let archive_dir = self.archive_dir;
         let archive_config = self.archive_config;
         let shared_action_config = self.shared_action_config;
+        let module_stats_handle = self.module_stats_handle;
 
         // クリーンアップタスク
         if self.rate_limit_config.enabled {
@@ -654,6 +658,7 @@ impl ApiServer {
                                 let arch_dir = archive_dir.clone();
                                 let arch_cfg = archive_config.clone();
                                 let act_cfg = Arc::clone(&shared_action_config);
+                                let ms_handle = module_stats_handle.clone();
                                 let tls_acc = tls_acceptor.clone();
                                 tokio::spawn(async move {
                                     let maybe_stream = if let Some(ref acceptor) = tls_acc {
@@ -672,7 +677,7 @@ impl ApiServer {
                                         started, &db_path, &cfg_path, &sender, &mc_sender, &toks,
                                         client_ip, &rl, &eb, &wsc, &wsc_count, &cors,
                                         oa_enabled, dps, mps, bms, mrbs, &scoring, &al,
-                                        &arch_dir, &arch_cfg, &act_cfg,
+                                        &arch_dir, &arch_cfg, &act_cfg, &ms_handle,
                                     ).await {
                                         tracing::debug!(error = %e, "API 接続の処理に失敗");
                                     }
@@ -757,7 +762,11 @@ impl ApiServer {
             | (HttpMethod::Get, "/api/v1/events/stream")
             | (HttpMethod::Get, "/api/v1/score")
             | (HttpMethod::Get, "/api/v1/archives")
+            | (HttpMethod::Get, "/api/v1/stats/modules")
             | (HttpMethod::Get, "/api/v1/webhooks") => Some(ApiRole::ReadOnly),
+            (HttpMethod::Get, p) if p.starts_with("/api/v1/stats/modules/") => {
+                Some(ApiRole::ReadOnly)
+            }
             (HttpMethod::Post, "/api/v1/reload") => Some(ApiRole::Admin),
             (HttpMethod::Post, "/api/v1/events/batch/delete") => Some(ApiRole::Admin),
             (HttpMethod::Post, "/api/v1/events/batch/export") => Some(ApiRole::ReadOnly),
@@ -868,6 +877,7 @@ impl ApiServer {
         archive_dir: &Option<String>,
         archive_config: &ArchiveApiConfig,
         shared_action_config: &Arc<StdMutex<ActionConfig>>,
+        module_stats_handle: &Option<crate::core::module_stats::ModuleStatsHandle>,
     ) -> Result<(), io::Error> {
         let request_start = Instant::now();
 
@@ -1217,6 +1227,107 @@ impl ApiServer {
                     .await?;
                 }
             },
+            (HttpMethod::Get, "/api/v1/stats/modules") => match module_stats_handle {
+                Some(handle) => {
+                    let stats = handle.snapshot();
+                    let body = serde_json::json!({
+                        "total": stats.len(),
+                        "modules": stats,
+                    })
+                    .to_string();
+                    resp_status = 200;
+                    resp_size = body.len() as u64;
+                    Self::send_json_response_with_headers(&mut stream, 200, "OK", &body, extra)
+                        .await?;
+                }
+                None => {
+                    let err_body = format!(
+                        r#"{{"error":"{}"}}"#,
+                        Self::escape_json_string("モジュール実行統計が無効です")
+                    );
+                    resp_status = 503;
+                    resp_size = err_body.len() as u64;
+                    Self::send_error_with_headers(
+                        &mut stream,
+                        503,
+                        "Service Unavailable",
+                        &err_body,
+                        extra,
+                    )
+                    .await?;
+                }
+            },
+            (HttpMethod::Get, p) if p.starts_with("/api/v1/stats/modules/") => {
+                let module_name = &p["/api/v1/stats/modules/".len()..];
+                if module_name.is_empty() || module_name.contains('/') {
+                    let err_body = format!(
+                        r#"{{"error":"{}"}}"#,
+                        Self::escape_json_string("モジュール名が不正です")
+                    );
+                    resp_status = 400;
+                    resp_size = err_body.len() as u64;
+                    Self::send_error_with_headers(
+                        &mut stream,
+                        400,
+                        "Bad Request",
+                        &err_body,
+                        extra,
+                    )
+                    .await?;
+                } else {
+                    match module_stats_handle {
+                        Some(handle) => match handle.get(module_name) {
+                            Some(stats) => {
+                                let body = serde_json::to_string(&stats).unwrap_or_else(|_| {
+                                    r#"{"error":"serialize failed"}"#.to_string()
+                                });
+                                resp_status = 200;
+                                resp_size = body.len() as u64;
+                                Self::send_json_response_with_headers(
+                                    &mut stream,
+                                    200,
+                                    "OK",
+                                    &body,
+                                    extra,
+                                )
+                                .await?;
+                            }
+                            None => {
+                                let err_body = format!(
+                                    r#"{{"error":"モジュール '{}' が見つかりません"}}"#,
+                                    Self::escape_json_string(module_name)
+                                );
+                                resp_status = 404;
+                                resp_size = err_body.len() as u64;
+                                Self::send_error_with_headers(
+                                    &mut stream,
+                                    404,
+                                    "Not Found",
+                                    &err_body,
+                                    extra,
+                                )
+                                .await?;
+                            }
+                        },
+                        None => {
+                            let err_body = format!(
+                                r#"{{"error":"{}"}}"#,
+                                Self::escape_json_string("モジュール実行統計が無効です")
+                            );
+                            resp_status = 503;
+                            resp_size = err_body.len() as u64;
+                            Self::send_error_with_headers(
+                                &mut stream,
+                                503,
+                                "Service Unavailable",
+                                &err_body,
+                                extra,
+                            )
+                            .await?;
+                        }
+                    }
+                }
+            }
             (HttpMethod::Get, "/api/v1/score") => match shared_scoring {
                 Some(scoring) => {
                     let body = if let Ok(s) = scoring.lock() {
@@ -4292,6 +4403,7 @@ mod tests {
             None,
             None,
             &ActionConfig::default(),
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -4362,6 +4474,7 @@ mod tests {
             None,
             None,
             &ActionConfig::default(),
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -4432,6 +4545,7 @@ mod tests {
             None,
             None,
             &ActionConfig::default(),
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -4497,6 +4611,7 @@ mod tests {
             None,
             None,
             &ActionConfig::default(),
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -4563,6 +4678,7 @@ mod tests {
             None,
             None,
             &ActionConfig::default(),
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -4625,6 +4741,7 @@ mod tests {
             None,
             None,
             &ActionConfig::default(),
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -4687,6 +4804,7 @@ mod tests {
             None,
             None,
             &ActionConfig::default(),
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -4837,6 +4955,7 @@ mod tests {
             None,
             None,
             &ActionConfig::default(),
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -5023,6 +5142,7 @@ mod tests {
             None,
             None,
             &ActionConfig::default(),
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -5490,6 +5610,7 @@ mod tests {
             None,
             None,
             &ActionConfig::default(),
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -5725,6 +5846,7 @@ mod tests {
             None,
             None,
             &ActionConfig::default(),
+            None,
         );
         let server_cancel = server.cancel_token();
         let cancel_clone = cancel.clone();
@@ -5796,6 +5918,7 @@ mod tests {
             None,
             None,
             &ActionConfig::default(),
+            None,
         );
         let server_cancel = server.cancel_token();
         let cancel_clone = cancel.clone();
@@ -5866,6 +5989,7 @@ mod tests {
             None,
             None,
             &ActionConfig::default(),
+            None,
         );
         let server_cancel = server.cancel_token();
         let cancel_clone = cancel.clone();
@@ -5932,6 +6056,7 @@ mod tests {
             None,
             None,
             &ActionConfig::default(),
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -5995,6 +6120,7 @@ mod tests {
             None,
             None,
             &ActionConfig::default(),
+            None,
         );
         let cancel = server.cancel_token();
         server.spawn().unwrap();
@@ -6165,6 +6291,7 @@ mod tests {
             None,
             None,
             &ActionConfig::default(),
+            None,
         );
         let flag = server.access_log_flag();
         assert!(!flag.load(Ordering::Relaxed));
@@ -6947,5 +7074,183 @@ mod tests {
         let body = result.unwrap();
         assert!(body.contains("\"severities\""));
         assert!(body.contains("\"total\""));
+    }
+
+    #[tokio::test]
+    async fn test_api_server_stats_modules_endpoint() {
+        use crate::core::event::{SecurityEvent, Severity};
+        use crate::core::module_stats::ModuleStatsHandle;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let (reload_tx, _reload_rx) = mpsc::channel::<()>(1);
+        let config = ApiConfig {
+            enabled: true,
+            bind_address: "127.0.0.1".to_string(),
+            port,
+            tokens: Vec::new(),
+            rate_limit: ApiRateLimitConfig::default(),
+            websocket: WebSocketConfig::default(),
+            cors: CorsConfig::default(),
+            openapi_enabled: true,
+            default_page_size: 50,
+            max_page_size: 200,
+            batch_max_size: 1000,
+            max_request_body_size: 1_048_576,
+            access_log: false,
+            tls: crate::config::ApiTlsConfig::default(),
+        };
+
+        let stats = ModuleStatsHandle::new();
+        stats.ensure("file_integrity");
+        stats.record_event(&SecurityEvent::new(
+            "t",
+            Severity::Warning,
+            "file_integrity",
+            "msg",
+        ));
+        stats.record_initial_scan(
+            "file_integrity",
+            std::time::Duration::from_millis(42),
+            10,
+            1,
+            "10件中1件問題",
+        );
+
+        let server = ApiServer::new(
+            &config,
+            Arc::new(StdMutex::new(Vec::new())),
+            None,
+            Arc::new(StdMutex::new(HashMap::new())),
+            Instant::now(),
+            None,
+            None,
+            reload_tx,
+            mpsc::channel(8).0,
+            None,
+            None,
+            None,
+            &ActionConfig::default(),
+            Some(stats),
+        );
+        let cancel = server.cancel_token();
+        server.spawn().unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // /api/v1/stats/modules を取得
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET /api/v1/stats/modules HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf);
+        assert!(response.contains("HTTP/1.1 200 OK"));
+        assert!(response.contains("\"total\":1"));
+        assert!(response.contains("\"module\":\"file_integrity\""));
+        assert!(response.contains("\"events_total\":1"));
+        assert!(response.contains("\"events_warning\":1"));
+        assert!(response.contains("\"initial_scan_duration_ms\":42"));
+
+        // 個別モジュール
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(
+                b"GET /api/v1/stats/modules/file_integrity HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf);
+        assert!(response.contains("HTTP/1.1 200 OK"));
+        assert!(response.contains("\"module\":\"file_integrity\""));
+        assert!(response.contains("\"initial_scan_items_scanned\":10"));
+
+        // 存在しないモジュール
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET /api/v1/stats/modules/missing_mod HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf);
+        assert!(response.contains("HTTP/1.1 404 Not Found"));
+
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn test_api_server_stats_modules_disabled_returns_503() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let (reload_tx, _reload_rx) = mpsc::channel::<()>(1);
+        let config = ApiConfig {
+            enabled: true,
+            bind_address: "127.0.0.1".to_string(),
+            port,
+            tokens: Vec::new(),
+            rate_limit: ApiRateLimitConfig::default(),
+            websocket: WebSocketConfig::default(),
+            cors: CorsConfig::default(),
+            openapi_enabled: true,
+            default_page_size: 50,
+            max_page_size: 200,
+            batch_max_size: 1000,
+            max_request_body_size: 1_048_576,
+            access_log: false,
+            tls: crate::config::ApiTlsConfig::default(),
+        };
+
+        let server = ApiServer::new(
+            &config,
+            Arc::new(StdMutex::new(Vec::new())),
+            None,
+            Arc::new(StdMutex::new(HashMap::new())),
+            Instant::now(),
+            None,
+            None,
+            reload_tx,
+            mpsc::channel(8).0,
+            None,
+            None,
+            None,
+            &ActionConfig::default(),
+            None,
+        );
+        let cancel = server.cancel_token();
+        server.spawn().unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET /api/v1/stats/modules HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf);
+        assert!(response.contains("HTTP/1.1 503 Service Unavailable"));
+        assert!(response.contains("モジュール実行統計が無効です"));
+
+        cancel.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }

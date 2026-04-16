@@ -64,8 +64,9 @@ Linux サーバ上でデーモンとして動作し（systemd で管理）、あ
 - **Event Bus**: `SecurityEvent` を `tokio::sync::broadcast` で各モジュールからサブスクライバーへ伝達。ログサブスクライバーが全イベントを構造化ログに記録
 - **Action Engine**: 検知イベントに対するアクション（ログ・コマンド実行・Webhook 送信）を設定ベースで実行。イベントバスのサブスクライバーとして動作し、Severity やモジュール名に基づくルールマッチングでアクションを選択する
 - **Metrics Collector**: SecurityEvent の発生件数・種別・Severity を集計し、定期的にサマリーをログ出力する。イベントバスのサブスクライバーとして動作。`tokio::sync::watch` チャネルによるインターバルのホットリロードに対応
+- **Module Stats Collector**: モジュール単位で検知イベント数（Severity 別）と起動時スキャン結果（実行時間・スキャンアイテム数・検知問題数・サマリー）を集計する。MetricsCollector が全体統計を扱うのに対し、こちらはモジュール粒度でパフォーマンスボトルネックや不調モジュールの可視化を支援する。REST API（`/api/v1/stats/modules`、`/api/v1/stats/modules/{name}`）で取得可能。定期サマリーログ出力にも対応
 - **Prometheus Exporter**: MetricsCollector の集計データを Prometheus テキスト形式で HTTP エンドポイント（`/metrics`）から公開する。Grafana・Alertmanager 等の外部監視基盤と連携可能。`/health` エンドポイントでヘルスチェックも提供。TLS（HTTPS）対応により暗号化通信をサポート。mTLS（相互TLS認証）によるクライアント証明書認証に対応（required/optional モード選択可能）
-- **REST API Server**: HTTP REST API でデーモンのステータス確認、イベント検索、モジュール一覧・制御、設定リロード、アーカイブ操作をリモートから操作可能にする。JSON レスポンス形式で `/api/v1/` プレフィックスのエンドポイントを提供。モジュール制御エンドポイント（`/api/v1/modules/{name}/start|stop|restart`）で個別モジュールの起動・停止・再起動が可能（admin ロール必須、dry_run 対応）。アーカイブエンドポイント（`/api/v1/archives`）でアーカイブ一覧取得・手動アーカイブ実行・復元・ローテーション・個別削除が可能（dry_run 対応、パストラバーサル防止）。イベント集約・サマリーエンドポイント（`/api/v1/events/summary/*`）で時間帯別・モジュール別・Severity別の集計データを提供。WebSocket によるリアルタイムイベントストリーミング（`/api/v1/events/stream`）に対応し、モジュール名・Severity でのフィルタリングが可能。OpenAPI 3.0.3 スキーマ（`/api/v1/openapi.json`）による API ドキュメント提供。TLS（HTTPS）対応により暗号化通信をサポート（rustls ベース、TLS 1.2 以上）。mTLS（相互TLS認証）によるクライアント証明書認証に対応（required/optional モード選択可能）。ホットリロード対応
+- **REST API Server**: HTTP REST API でデーモンのステータス確認、イベント検索、モジュール一覧・制御、設定リロード、アーカイブ操作をリモートから操作可能にする。JSON レスポンス形式で `/api/v1/` プレフィックスのエンドポイントを提供。モジュール制御エンドポイント（`/api/v1/modules/{name}/start|stop|restart`）で個別モジュールの起動・停止・再起動が可能（admin ロール必須、dry_run 対応）。アーカイブエンドポイント（`/api/v1/archives`）でアーカイブ一覧取得・手動アーカイブ実行・復元・ローテーション・個別削除が可能（dry_run 対応、パストラバーサル防止）。イベント集約・サマリーエンドポイント（`/api/v1/events/summary/*`）で時間帯別・モジュール別・Severity別の集計データを提供。モジュール統計エンドポイント（`/api/v1/stats/modules`、`/api/v1/stats/modules/{name}`）でモジュール単位の検知数・起動時スキャン結果を取得可能。WebSocket によるリアルタイムイベントストリーミング（`/api/v1/events/stream`）に対応し、モジュール名・Severity でのフィルタリングが可能。OpenAPI 3.0.3 スキーマ（`/api/v1/openapi.json`）による API ドキュメント提供。TLS（HTTPS）対応により暗号化通信をサポート（rustls ベース、TLS 1.2 以上）。mTLS（相互TLS認証）によるクライアント証明書認証に対応（required/optional モード選択可能）。ホットリロード対応
 - **Syslog Forwarder**: SecurityEvent を RFC 5424 形式で外部 Syslog サーバ（SIEM 等）に転送する。UDP/TCP/TLS（RFC 5425）プロトコル対応。TLS 接続時はカスタム CA 証明書またはシステムルート証明書を使用。mTLS（相互TLS認証）によるクライアント証明書認証に対応。イベントバスのサブスクライバーとして動作し、設定ホットリロードに対応
 - **Event Store**: SecurityEvent を SQLite データベースに永続保存する。イベントバスのサブスクライバーとして動作し、バッチ挿入・自動クリーンアップ・設定ホットリロードに対応
 - **Encryption**: 設定ファイル内の機密値（Webhook URL、認証トークン等）を AES-256-GCM で暗号化・復号する。`ENC[...]` 形式で暗号化された値を設定読み込み時に自動復号。環境変数または鍵ファイルによる鍵管理。CLI コマンド（`encrypt-value`, `decrypt-value`, `generate-key`, `rotate-key`）を提供
@@ -91,6 +92,7 @@ src/
     health.rs          # ヘルスチェック（ハートビート・メモリ監視）
     metrics.rs         # イベント統計・メトリクス収集
     module_manager.rs  # モジュールマネージャー（モジュール一括管理・設定ホットリロード）
+    module_stats.rs    # モジュール実行統計（モジュール単位の検知数・起動時スキャン結果集計）
     openapi.rs         # OpenAPI 3.0.3 スキーマ生成
     prometheus.rs      # Prometheus メトリクスエクスポーター（HTTP エンドポイント）
     scan_diff.rs       # スキャン状態差分レポート（CLI scan-diff コマンド）

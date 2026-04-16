@@ -655,6 +655,14 @@ enabled = false
 # サマリーログ出力インターバル（秒）
 interval_secs = 60
 
+[module_stats]
+# モジュール実行統計の有効/無効
+# モジュール単位で検知イベント数（Severity 別）と起動時スキャン結果を収集する。
+# 有効化すると REST API `/api/v1/stats/modules` で統計を取得できる。
+enabled = false
+# サマリーログ出力インターバル（秒）。0 で定期ログを無効化
+log_interval_secs = 300
+
 [event_bus]
 # イベントバスの有効/無効
 enabled = false

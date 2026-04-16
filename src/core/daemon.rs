@@ -10,6 +10,7 @@ use crate::core::event_stream::{EventStreamRuntimeConfig, EventStreamServer};
 use crate::core::health::HealthChecker;
 use crate::core::metrics::{MetricsCollector, SharedMetrics};
 use crate::core::module_manager::ModuleManager;
+use crate::core::module_stats::{self, ModuleStatsHandle};
 use crate::core::prometheus::PrometheusExporter;
 use crate::core::scan_state::{self, DiffKind};
 use crate::core::scoring::{ScoringRuntimeConfig, SecurityScorer, SharedSecurityScore};
@@ -53,6 +54,13 @@ impl Daemon {
         // ステータスサーバー用の共有状態
         let shared_module_names: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
         let mut shared_metrics: Option<Arc<StdMutex<SharedMetrics>>> = None;
+        let module_stats_handle: Option<ModuleStatsHandle> = if self.config.module_stats.enabled {
+            let handle = ModuleStatsHandle::new();
+            handle.ensure_all(ModuleManager::known_module_names());
+            Some(handle)
+        } else {
+            None
+        };
         let mut shared_scoring: Option<Arc<StdMutex<SharedSecurityScore>>> = None;
         let mut scoring_config_sender: Option<watch::Sender<ScoringRuntimeConfig>> = None;
         let mut status_cancel_token: Option<CancellationToken> = None;
@@ -114,6 +122,16 @@ impl Daemon {
                 tracing::info!(
                     interval_secs = self.config.metrics.interval_secs,
                     "メトリクスコレクターを起動しました"
+                );
+            }
+
+            // モジュール実行統計コレクターの起動
+            if let Some(ref handle) = module_stats_handle {
+                module_stats::spawn_event_subscriber(handle.clone(), &bus);
+                module_stats::spawn_summary_logger(handle.clone(), &self.config.module_stats);
+                tracing::info!(
+                    log_interval_secs = self.config.module_stats.log_interval_secs,
+                    "モジュール実行統計コレクターを起動しました"
                 );
             }
 
@@ -279,6 +297,19 @@ impl Daemon {
             self.config.startup_scan.enabled,
         )
         .await;
+
+        // モジュール実行統計に起動時スキャン結果を記録
+        if let Some(ref handle) = module_stats_handle {
+            for (name, result) in &scan_report.results {
+                handle.record_initial_scan(
+                    name,
+                    result.duration,
+                    result.items_scanned,
+                    result.issues_found,
+                    &result.summary,
+                );
+            }
+        }
 
         // 起動時スキャンのサマリーイベントを発行
         if self.config.startup_scan.enabled
@@ -450,6 +481,7 @@ impl Daemon {
                 shared_scoring.clone(),
                 event_store_cfg,
                 &self.config.actions,
+                module_stats_handle.clone(),
             );
             api_cancel_token = Some(api_server.cancel_token());
             api_shared_action_config = Some(api_server.shared_action_config());
@@ -856,6 +888,7 @@ impl Daemon {
                                         shared_scoring.clone(),
                                         es_cfg_b,
                                         &new_config.actions,
+                                        module_stats_handle.clone(),
                                     );
                                     api_cancel_token = Some(api_server.cancel_token());
                                     api_shared_action_config =
@@ -899,6 +932,7 @@ impl Daemon {
                                         shared_scoring.clone(),
                                         es_cfg_c,
                                         &new_config.actions,
+                                        module_stats_handle.clone(),
                                     );
                                     api_cancel_token = Some(api_server.cancel_token());
                                     api_shared_action_config =
@@ -938,6 +972,7 @@ impl Daemon {
                                                 shared_scoring.clone(),
                                                 es_cfg_fb,
                                                 &self.config.actions,
+                                                module_stats_handle.clone(),
                                             );
                                             api_cancel_token =
                                                 Some(fallback.cancel_token());

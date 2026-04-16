@@ -699,6 +699,18 @@ impl ModuleManager {
         false
     }
 
+    /// 既知の全モジュール名を返す
+    pub fn known_module_names() -> Vec<&'static str> {
+        let mut names = Vec::new();
+        macro_rules! collect_names {
+            ($names:expr, $field:ident, $ModuleType:ty, $label:expr) => {
+                $names.push($label);
+            };
+        }
+        for_each_module!(collect_names!(names,));
+        names
+    }
+
     /// 指定モジュールが実行中かどうかを確認する
     pub fn is_module_running(&self, name: &str) -> bool {
         self.running_modules.iter().any(|m| m.name == name)
