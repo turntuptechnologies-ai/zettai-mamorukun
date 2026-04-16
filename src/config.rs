@@ -3321,6 +3321,20 @@ impl Default for MetricsConfig {
     }
 }
 
+/// モジュール別イベント保持ポリシー
+#[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
+pub struct RetentionPolicy {
+    /// INFO イベントの保持期間（日数）。0 でグローバル設定を使用
+    #[serde(default)]
+    pub retention_days: u64,
+    /// WARNING イベントの保持期間（日数）。0 でグローバル設定を使用
+    #[serde(default)]
+    pub retention_days_warning: u64,
+    /// CRITICAL イベントの保持期間（日数）。0 でグローバル設定を使用
+    #[serde(default)]
+    pub retention_days_critical: u64,
+}
+
 /// イベントストア（SQLite 永続化）設定
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct EventStoreConfig {
@@ -3352,6 +3366,15 @@ pub struct EventStoreConfig {
     /// 0 の場合は retention_days と同じ値を使用する
     #[serde(default = "EventStoreConfig::default_retention_days_critical")]
     pub retention_days_critical: u64,
+
+    /// WARNING イベントの保持期間（日数）
+    /// 0 の場合は retention_days と同じ値を使用する
+    #[serde(default)]
+    pub retention_days_warning: u64,
+
+    /// モジュール別イベント保持ポリシー
+    #[serde(default)]
+    pub retention_policies: HashMap<String, RetentionPolicy>,
 
     /// ストレージ上限（MB）
     /// DB ファイルサイズがこの値を超えた場合、古い INFO → WARNING → CRITICAL の順で削除する
@@ -3442,6 +3465,8 @@ impl Default for EventStoreConfig {
             batch_interval_secs: Self::default_batch_interval_secs(),
             cleanup_interval_hours: Self::default_cleanup_interval_hours(),
             retention_days_critical: Self::default_retention_days_critical(),
+            retention_days_warning: 0,
+            retention_policies: HashMap::new(),
             max_storage_mb: 0,
             archive_enabled: false,
             archive_after_days: Self::default_archive_after_days(),
@@ -3712,6 +3737,41 @@ impl AppConfig {
                 errors.push(
                     "event_store.retention_days_critical: retention_days 以上の値を指定してください（0 で無効化）".to_string(),
                 );
+            }
+            if self.event_store.retention_days_warning != 0
+                && self.event_store.retention_days_warning < self.event_store.retention_days
+            {
+                tracing::warn!(
+                    retention_days_warning = self.event_store.retention_days_warning,
+                    retention_days = self.event_store.retention_days,
+                    "event_store.retention_days_warning が retention_days より小さい値です"
+                );
+            }
+            for (module_name, policy) in &self.event_store.retention_policies {
+                if policy.retention_days_warning != 0
+                    && policy.retention_days != 0
+                    && policy.retention_days_warning < policy.retention_days
+                {
+                    tracing::warn!(
+                        module = %module_name,
+                        retention_days_warning = policy.retention_days_warning,
+                        retention_days = policy.retention_days,
+                        "event_store.retention_policies.{}: retention_days_warning が retention_days より小さい値です",
+                        module_name
+                    );
+                }
+                if policy.retention_days_critical != 0
+                    && policy.retention_days != 0
+                    && policy.retention_days_critical < policy.retention_days
+                {
+                    tracing::warn!(
+                        module = %module_name,
+                        retention_days_critical = policy.retention_days_critical,
+                        retention_days = policy.retention_days,
+                        "event_store.retention_policies.{}: retention_days_critical が retention_days より小さい値です",
+                        module_name
+                    );
+                }
             }
         }
 
@@ -7602,6 +7662,48 @@ client_auth_mode = "optional"
             "/etc/certs/client-ca.crt"
         );
         assert_eq!(config.prometheus.tls.mtls.client_auth_mode, "optional");
+    }
+
+    #[test]
+    fn test_retention_policy_deserialization() {
+        let toml_str = r#"
+[event_store]
+enabled = true
+retention_days = 90
+retention_days_warning = 180
+retention_days_critical = 365
+
+[event_store.retention_policies.file_integrity]
+retention_days = 120
+retention_days_warning = 240
+retention_days_critical = 365
+
+[event_store.retention_policies.ssh_brute_force]
+retention_days = 30
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.event_store.retention_days, 90);
+        assert_eq!(config.event_store.retention_days_warning, 180);
+        assert_eq!(config.event_store.retention_days_critical, 365);
+        assert_eq!(config.event_store.retention_policies.len(), 2);
+
+        let fi_policy = config
+            .event_store
+            .retention_policies
+            .get("file_integrity")
+            .unwrap();
+        assert_eq!(fi_policy.retention_days, 120);
+        assert_eq!(fi_policy.retention_days_warning, 240);
+        assert_eq!(fi_policy.retention_days_critical, 365);
+
+        let ssh_policy = config
+            .event_store
+            .retention_policies
+            .get("ssh_brute_force")
+            .unwrap();
+        assert_eq!(ssh_policy.retention_days, 30);
+        assert_eq!(ssh_policy.retention_days_warning, 0);
+        assert_eq!(ssh_policy.retention_days_critical, 0);
     }
 
     #[test]

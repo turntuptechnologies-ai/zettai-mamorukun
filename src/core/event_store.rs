@@ -1,6 +1,6 @@
 //! イベントストア — SecurityEvent の SQLite 永続化
 
-use crate::config::EventStoreConfig;
+use crate::config::{EventStoreConfig, RetentionPolicy};
 use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::error::AppError;
 use flate2::Compression;
@@ -9,6 +9,7 @@ use flate2::write::GzEncoder;
 use rusqlite::{Connection, OpenFlags, params};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -21,6 +22,10 @@ pub struct EventStoreRuntimeConfig {
     pub retention_days: u64,
     /// CRITICAL イベントの保持期間（日数）。0 の場合は retention_days と同じ
     pub retention_days_critical: u64,
+    /// WARNING イベントの保持期間（日数）。0 の場合は retention_days と同じ
+    pub retention_days_warning: u64,
+    /// モジュール別イベント保持ポリシー
+    pub retention_policies: HashMap<String, RetentionPolicy>,
     /// ストレージ上限（MB）。0 で無制限
     pub max_storage_mb: u64,
     /// バッチ挿入サイズ
@@ -54,6 +59,8 @@ impl From<&EventStoreConfig> for EventStoreRuntimeConfig {
         Self {
             retention_days: config.retention_days,
             retention_days_critical: config.retention_days_critical,
+            retention_days_warning: config.retention_days_warning,
+            retention_policies: config.retention_policies.clone(),
             max_storage_mb: config.max_storage_mb,
             batch_size: config.batch_size,
             batch_interval_secs: config.batch_interval_secs,
@@ -299,6 +306,8 @@ impl EventStore {
         let (
             mut retention_days,
             mut retention_days_critical,
+            mut retention_days_warning,
+            mut retention_policies,
             mut max_storage_mb,
             mut archive_enabled,
             mut archive_after_days,
@@ -313,6 +322,8 @@ impl EventStore {
             (
                 cfg.retention_days,
                 cfg.retention_days_critical,
+                cfg.retention_days_warning,
+                cfg.retention_policies.clone(),
                 cfg.max_storage_mb,
                 cfg.archive_enabled,
                 cfg.archive_after_days,
@@ -367,7 +378,7 @@ impl EventStore {
                     }
                 }
                 _ = cleanup_ticker.tick() => {
-                    Self::cleanup_old_events(&conn, retention_days, retention_days_critical, max_storage_mb).await;
+                    Self::cleanup_old_events(&conn, retention_days, retention_days_warning, retention_days_critical, &retention_policies, max_storage_mb).await;
                 }
                 _ = archive_ticker.tick(), if archive_enabled => {
                     Self::run_archive(&conn, archive_after_days, &archive_dir, archive_compress).await;
@@ -382,6 +393,7 @@ impl EventStore {
                             tracing::info!(
                                 retention_days = new_config.retention_days,
                                 retention_days_critical = new_config.retention_days_critical,
+                                retention_days_warning = new_config.retention_days_warning,
                                 max_storage_mb = new_config.max_storage_mb,
                                 batch_size = new_config.batch_size,
                                 batch_interval_secs = new_config.batch_interval_secs,
@@ -399,6 +411,8 @@ impl EventStore {
                             batch_size = new_config.batch_size;
                             retention_days = new_config.retention_days;
                             retention_days_critical = new_config.retention_days_critical;
+                            retention_days_warning = new_config.retention_days_warning;
+                            retention_policies = new_config.retention_policies;
                             max_storage_mb = new_config.max_storage_mb;
                             archive_enabled = new_config.archive_enabled;
                             archive_after_days = new_config.archive_after_days;
@@ -509,50 +523,183 @@ impl EventStore {
     async fn cleanup_old_events(
         conn: &Arc<StdMutex<Connection>>,
         retention_days: u64,
+        retention_days_warning: u64,
         retention_days_critical: u64,
+        retention_policies: &HashMap<String, RetentionPolicy>,
         max_storage_mb: u64,
     ) {
         let conn = Arc::clone(conn);
+        let retention_policies = retention_policies.clone();
         let result = tokio::task::spawn_blocking(move || {
             let now_secs = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
 
-            let cutoff_default = now_secs.saturating_sub(retention_days * 86400) as i64;
+            // グローバル effective 値を計算（0 ならフォールバック）
+            let effective_warning_days = if retention_days_warning == 0 {
+                retention_days
+            } else {
+                retention_days_warning
+            };
             let effective_critical_days = if retention_days_critical == 0 {
                 retention_days
             } else {
                 retention_days_critical
             };
-            let cutoff_critical = now_secs.saturating_sub(effective_critical_days * 86400) as i64;
+
+            let cutoff_info = now_secs.saturating_sub(retention_days * 86400) as i64;
+            let cutoff_warning =
+                now_secs.saturating_sub(effective_warning_days * 86400) as i64;
+            let cutoff_critical =
+                now_secs.saturating_sub(effective_critical_days * 86400) as i64;
 
             // unwrap safety: Mutex が poisoned になるのはパニック時のみ
             let conn = conn.lock().unwrap();
 
-            // Severity ベース保持: INFO/WARNING は retention_days、CRITICAL は retention_days_critical
-            let deleted_info: usize = conn
-                .execute(
-                    "DELETE FROM security_events WHERE severity = 'INFO' AND timestamp < ?1",
-                    params![cutoff_default],
-                )
-                .unwrap_or(0);
+            let deleted_info: usize;
+            let deleted_warning: usize;
+            let deleted_critical: usize;
+            let module_deleted: usize;
 
-            let deleted_warning: usize = conn
-                .execute(
-                    "DELETE FROM security_events WHERE severity = 'WARNING' AND timestamp < ?1",
-                    params![cutoff_default],
-                )
-                .unwrap_or(0);
+            if retention_policies.is_empty() {
+                // ポリシー未設定: 現行と同じ 3 DELETE 文（パフォーマンス維持）
+                deleted_info = conn
+                    .execute(
+                        "DELETE FROM security_events WHERE severity = 'INFO' AND timestamp < ?1",
+                        params![cutoff_info],
+                    )
+                    .unwrap_or(0);
 
-            let deleted_critical: usize = conn
-                .execute(
-                    "DELETE FROM security_events WHERE severity = 'CRITICAL' AND timestamp < ?1",
-                    params![cutoff_critical],
-                )
-                .unwrap_or(0);
+                deleted_warning = conn
+                    .execute(
+                        "DELETE FROM security_events WHERE severity = 'WARNING' AND timestamp < ?1",
+                        params![cutoff_warning],
+                    )
+                    .unwrap_or(0);
 
-            let total_deleted = deleted_info + deleted_warning + deleted_critical;
+                deleted_critical = conn
+                    .execute(
+                        "DELETE FROM security_events WHERE severity = 'CRITICAL' AND timestamp < ?1",
+                        params![cutoff_critical],
+                    )
+                    .unwrap_or(0);
+
+                module_deleted = 0;
+            } else {
+                // モジュール別ポリシーがあるモジュールを個別 DELETE
+                let policy_modules: Vec<&String> = retention_policies.keys().collect();
+                let mut mod_deleted_acc: usize = 0;
+
+                for (module_name, policy) in &retention_policies {
+                    // INFO: ポリシーの retention_days、0 ならグローバル
+                    let mod_info_days = if policy.retention_days == 0 {
+                        retention_days
+                    } else {
+                        policy.retention_days
+                    };
+                    let mod_cutoff_info =
+                        now_secs.saturating_sub(mod_info_days * 86400) as i64;
+                    let d = conn
+                        .execute(
+                            "DELETE FROM security_events WHERE source_module = ?1 AND severity = 'INFO' AND timestamp < ?2",
+                            params![module_name, mod_cutoff_info],
+                        )
+                        .unwrap_or(0);
+                    mod_deleted_acc += d;
+
+                    // WARNING
+                    let mod_warning_days = if policy.retention_days_warning == 0 {
+                        effective_warning_days
+                    } else {
+                        policy.retention_days_warning
+                    };
+                    let mod_cutoff_warning =
+                        now_secs.saturating_sub(mod_warning_days * 86400) as i64;
+                    let d = conn
+                        .execute(
+                            "DELETE FROM security_events WHERE source_module = ?1 AND severity = 'WARNING' AND timestamp < ?2",
+                            params![module_name, mod_cutoff_warning],
+                        )
+                        .unwrap_or(0);
+                    mod_deleted_acc += d;
+
+                    // CRITICAL
+                    let mod_critical_days = if policy.retention_days_critical == 0 {
+                        effective_critical_days
+                    } else {
+                        policy.retention_days_critical
+                    };
+                    let mod_cutoff_critical =
+                        now_secs.saturating_sub(mod_critical_days * 86400) as i64;
+                    let d = conn
+                        .execute(
+                            "DELETE FROM security_events WHERE source_module = ?1 AND severity = 'CRITICAL' AND timestamp < ?2",
+                            params![module_name, mod_cutoff_critical],
+                        )
+                        .unwrap_or(0);
+                    mod_deleted_acc += d;
+                }
+
+                // ポリシー未設定モジュールはグローバル設定で一括 DELETE（NOT IN で除外）
+                // プレースホルダを使用して SQL インジェクションを防止
+                let placeholders: Vec<String> = (0..policy_modules.len())
+                    .map(|i| format!("?{}", i + 2))
+                    .collect();
+                let not_in_clause = placeholders.join(", ");
+
+                // INFO
+                let sql_info = format!(
+                    "DELETE FROM security_events WHERE severity = 'INFO' AND timestamp < ?1 AND source_module NOT IN ({})",
+                    not_in_clause
+                );
+                let mut info_params: Vec<Box<dyn rusqlite::types::ToSql>> =
+                    vec![Box::new(cutoff_info)];
+                for m in &policy_modules {
+                    info_params.push(Box::new(m.as_str().to_string()));
+                }
+                let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                    info_params.iter().map(|p| p.as_ref()).collect();
+                deleted_info = conn
+                    .execute(&sql_info, param_refs.as_slice())
+                    .unwrap_or(0);
+
+                // WARNING
+                let sql_warning = format!(
+                    "DELETE FROM security_events WHERE severity = 'WARNING' AND timestamp < ?1 AND source_module NOT IN ({})",
+                    not_in_clause
+                );
+                let mut warning_params: Vec<Box<dyn rusqlite::types::ToSql>> =
+                    vec![Box::new(cutoff_warning)];
+                for m in &policy_modules {
+                    warning_params.push(Box::new(m.as_str().to_string()));
+                }
+                let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                    warning_params.iter().map(|p| p.as_ref()).collect();
+                deleted_warning = conn
+                    .execute(&sql_warning, param_refs.as_slice())
+                    .unwrap_or(0);
+
+                // CRITICAL
+                let sql_critical = format!(
+                    "DELETE FROM security_events WHERE severity = 'CRITICAL' AND timestamp < ?1 AND source_module NOT IN ({})",
+                    not_in_clause
+                );
+                let mut critical_params: Vec<Box<dyn rusqlite::types::ToSql>> =
+                    vec![Box::new(cutoff_critical)];
+                for m in &policy_modules {
+                    critical_params.push(Box::new(m.as_str().to_string()));
+                }
+                let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                    critical_params.iter().map(|p| p.as_ref()).collect();
+                deleted_critical = conn
+                    .execute(&sql_critical, param_refs.as_slice())
+                    .unwrap_or(0);
+
+                module_deleted = mod_deleted_acc;
+            }
+
+            let total_deleted = deleted_info + deleted_warning + deleted_critical + module_deleted;
 
             // ストレージ上限チェック
             let mut storage_deleted: usize = 0;
@@ -565,26 +712,30 @@ impl EventStore {
                 deleted_info,
                 deleted_warning,
                 deleted_critical,
+                module_deleted,
                 storage_deleted,
             )
         })
         .await;
 
         match result {
-            Ok((total, info, warning, critical, storage)) => {
+            Ok((total, info, warning, critical, module, storage)) => {
                 if total > 0 {
                     tracing::info!(
                         total = total,
                         info = info,
                         warning = warning,
                         critical = critical,
+                        module_policy = module,
                         retention_days = retention_days,
+                        retention_days_warning = retention_days_warning,
                         retention_days_critical = retention_days_critical,
-                        "イベントストア: 保持期間超過により {} 件削除（INFO: {}, WARNING: {}, CRITICAL: {}）",
+                        "イベントストア: 保持期間超過により {} 件削除（INFO: {}, WARNING: {}, CRITICAL: {}, モジュール別: {}）",
                         total,
                         info,
                         warning,
-                        critical
+                        critical,
+                        module
                     );
                 }
                 if storage > 0 {
@@ -2104,6 +2255,8 @@ mod tests {
             batch_interval_secs: 1,
             cleanup_interval_hours: 24,
             retention_days_critical: 365,
+            retention_days_warning: 0,
+            retention_policies: HashMap::new(),
             max_storage_mb: 0,
             archive_enabled: false,
             archive_after_days: 30,
@@ -2224,6 +2377,8 @@ mod tests {
             batch_interval_secs: 10,
             cleanup_interval_hours: 12,
             retention_days_critical: 180,
+            retention_days_warning: 60,
+            retention_policies: HashMap::new(),
             max_storage_mb: 500,
             archive_enabled: true,
             archive_after_days: 7,
@@ -2238,6 +2393,8 @@ mod tests {
         let runtime = EventStoreRuntimeConfig::from(&config);
         assert_eq!(runtime.retention_days, 30);
         assert_eq!(runtime.retention_days_critical, 180);
+        assert_eq!(runtime.retention_days_warning, 60);
+        assert!(runtime.retention_policies.is_empty());
         assert_eq!(runtime.max_storage_mb, 500);
         assert_eq!(runtime.batch_size, 50);
         assert_eq!(runtime.batch_interval_secs, 10);
@@ -2344,6 +2501,8 @@ mod tests {
         let new_config = EventStoreRuntimeConfig {
             retention_days: 30,
             retention_days_critical: 180,
+            retention_days_warning: 60,
+            retention_policies: HashMap::new(),
             max_storage_mb: 500,
             batch_size: 50,
             batch_interval_secs: 10,
@@ -2902,8 +3061,8 @@ mod tests {
 
         let conn_arc = Arc::new(StdMutex::new(conn));
 
-        // retention_days=30, retention_days_critical=90
-        EventStore::cleanup_old_events(&conn_arc, 30, 90, 0).await;
+        // retention_days=30, retention_days_warning=0 (fallback), retention_days_critical=90
+        EventStore::cleanup_old_events(&conn_arc, 30, 0, 90, &HashMap::new(), 0).await;
 
         let conn = conn_arc.lock().unwrap();
         // INFO と WARNING の60日前イベントは削除、CRITICAL は保持
@@ -2942,7 +3101,7 @@ mod tests {
         let conn_arc = Arc::new(StdMutex::new(conn));
 
         // retention_days_critical=0 → retention_days(30) を使用
-        EventStore::cleanup_old_events(&conn_arc, 30, 0, 0).await;
+        EventStore::cleanup_old_events(&conn_arc, 30, 0, 0, &HashMap::new(), 0).await;
 
         let conn = conn_arc.lock().unwrap();
         let count: i64 = conn
@@ -3659,5 +3818,152 @@ mod tests {
         assert_eq!(archives.len(), 1);
         assert!(archives[0].created_at.is_some());
         assert!(archives[0].created_at.unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_with_warning_retention() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // 60日前のイベント
+        let sixty_days_ago = now - 60 * 86400;
+        insert_event_at(&conn, sixty_days_ago, "INFO", "mod_a");
+        insert_event_at(&conn, sixty_days_ago, "WARNING", "mod_b");
+        insert_event_at(&conn, sixty_days_ago, "CRITICAL", "mod_c");
+
+        // 最近のイベント
+        insert_event_at(&conn, now - 100, "INFO", "mod_a");
+        insert_event_at(&conn, now - 100, "WARNING", "mod_b");
+        insert_event_at(&conn, now - 100, "CRITICAL", "mod_c");
+
+        let conn_arc = Arc::new(StdMutex::new(conn));
+
+        // retention_days=30, retention_days_warning=90 (WARNING は保持), retention_days_critical=90
+        EventStore::cleanup_old_events(&conn_arc, 30, 90, 90, &HashMap::new(), 0).await;
+
+        let conn = conn_arc.lock().unwrap();
+        // INFO(60日前)は削除、WARNING(60日前)は保持(90日)、CRITICAL(60日前)は保持(90日)
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM security_events", [], |row| row.get(0))
+            .unwrap();
+        // 残り: WARNING(60日前) + CRITICAL(60日前) + INFO(最近) + WARNING(最近) + CRITICAL(最近) = 5
+        assert_eq!(count, 5);
+
+        // INFO は最近の1件のみ
+        let info_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM security_events WHERE severity = 'INFO'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(info_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_with_module_policy() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // 60日前のイベント
+        let sixty_days_ago = now - 60 * 86400;
+        insert_event_at(&conn, sixty_days_ago, "INFO", "file_integrity");
+        insert_event_at(&conn, sixty_days_ago, "WARNING", "file_integrity");
+        insert_event_at(&conn, sixty_days_ago, "INFO", "ssh_brute_force");
+        insert_event_at(&conn, sixty_days_ago, "WARNING", "ssh_brute_force");
+
+        // 最近のイベント
+        insert_event_at(&conn, now - 100, "INFO", "file_integrity");
+        insert_event_at(&conn, now - 100, "INFO", "ssh_brute_force");
+
+        let conn_arc = Arc::new(StdMutex::new(conn));
+
+        // file_integrity モジュールは 90 日保持（60日前イベントは保持される）
+        let mut policies = HashMap::new();
+        policies.insert(
+            "file_integrity".to_string(),
+            RetentionPolicy {
+                retention_days: 90,
+                retention_days_warning: 90,
+                retention_days_critical: 0,
+            },
+        );
+
+        // グローバル retention_days=30 → ssh_brute_force の60日前イベントは削除
+        EventStore::cleanup_old_events(&conn_arc, 30, 0, 0, &policies, 0).await;
+
+        let conn = conn_arc.lock().unwrap();
+
+        // file_integrity: INFO(60日前)保持, WARNING(60日前)保持, INFO(最近)保持 = 3
+        let fi_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM security_events WHERE source_module = 'file_integrity'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fi_count, 3);
+
+        // ssh_brute_force: INFO(60日前)削除, WARNING(60日前)削除, INFO(最近)保持 = 1
+        let ssh_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM security_events WHERE source_module = 'ssh_brute_force'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(ssh_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_module_policy_fallback() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_database(&conn).unwrap();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // 60日前のイベント
+        let sixty_days_ago = now - 60 * 86400;
+        insert_event_at(&conn, sixty_days_ago, "INFO", "module_with_policy");
+        insert_event_at(&conn, sixty_days_ago, "WARNING", "module_with_policy");
+        insert_event_at(&conn, sixty_days_ago, "INFO", "module_no_policy");
+        insert_event_at(&conn, sixty_days_ago, "WARNING", "module_no_policy");
+
+        let conn_arc = Arc::new(StdMutex::new(conn));
+
+        // module_with_policy の retention_days=0 → グローバル30日にフォールバック
+        let mut policies = HashMap::new();
+        policies.insert(
+            "module_with_policy".to_string(),
+            RetentionPolicy {
+                retention_days: 0,
+                retention_days_warning: 0,
+                retention_days_critical: 0,
+            },
+        );
+
+        // グローバル retention_days=30 → 60日前は全て削除対象
+        EventStore::cleanup_old_events(&conn_arc, 30, 0, 0, &policies, 0).await;
+
+        let conn = conn_arc.lock().unwrap();
+
+        // 両モジュールとも60日前イベントは全削除
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM security_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }
