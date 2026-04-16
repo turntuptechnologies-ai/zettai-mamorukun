@@ -876,7 +876,9 @@ port = 9100
 # 有効にすると HTTP REST API でデーモンのステータス確認、イベント検索、
 # モジュール一覧、設定リロードをリモートから操作可能にする
 # エンドポイント: /api/v1/health, /api/v1/status, /api/v1/modules, /api/v1/events, /api/v1/reload,
-#   /api/v1/archives, /api/v1/archives/restore, /api/v1/archives/rotate, /api/v1/openapi.json
+#   /api/v1/archives, /api/v1/archives/restore, /api/v1/archives/rotate, /api/v1/openapi.json,
+#   /api/v1/events/summary, /api/v1/events/summary/timeline, /api/v1/events/summary/modules,
+#   /api/v1/events/summary/severity
 # SIGHUP でホットリロード可能（enabled, bind_address, port, tokens の変更が即時反映される）
 enabled = false
 # バインドアドレス
