@@ -155,10 +155,11 @@
 - [x] **モジュール実行統計の CLI コマンド** — v1.49.0 (#302, PR #303)
 - [x] **モジュール実行時間ヒストグラム（P50/P95/P99）** — v1.50.0 (#304, PR #305)
 - [x] **カーネル taint フラグ監視モジュール** — v1.51.0 (#306, PR #307)
+- [x] **定期スキャン実行時間の計測展開（file_integrity / process_monitor / package_verify）** — v1.52.0 (#308, PR #309)
 
 ## 候補
 
-1. **定期スキャン実行時間の計測展開** — モジュールの定期スキャンループに `record_scan_duration` フックを追加し、v1.50.0 のヒストグラム基盤を起動時以外にも活用する（file_integrity、process_monitor、package_verify から段階的に展開）
+1. **定期スキャン計測の追加展開** — v1.52.0 の `set_module_stats` フックを他の重量スキャン系モジュール（suid_sgid_monitor、kernel_module、container_namespace、tls_cert_monitor 等）にも順次展開する
 2. **モジュール統計 Prometheus 公開の Grafana ダッシュボード例** — `grafana/` ディレクトリに `zettai_module_*` メトリクス（イベント件数、P50/P95/P99 ヒストグラムを含む）を使った Grafana ダッシュボード JSON を追加する
 3. **module-stats CLI の統計比較モード** — `--diff` オプションで 2 時点の統計差分を表示し、期間内に増加した検知件数・百分位点の変化を可視化する
 4. **Webhook 統合テスト強化** — wiremock を使った Webhook 送信の統合テスト（リトライ動作、4xx/5xx エラー処理、タイムアウト等）を追加する
