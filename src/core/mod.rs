@@ -11,6 +11,7 @@ pub mod event_stream;
 pub mod health;
 pub mod metrics;
 pub mod module_manager;
+pub mod module_stats;
 pub mod openapi;
 pub mod prometheus;
 pub mod scan_diff;

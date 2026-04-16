@@ -47,6 +47,8 @@ pub fn generate_openapi_schema() -> Value {
             "/api/v1/modules/{name}/start": module_start_path(),
             "/api/v1/modules/{name}/stop": module_stop_path(),
             "/api/v1/modules/{name}/restart": module_restart_path(),
+            "/api/v1/stats/modules": stats_modules_path(),
+            "/api/v1/stats/modules/{name}": stats_module_path(),
         },
         "components": {
             "securitySchemes": {
@@ -974,6 +976,93 @@ fn module_restart_path() -> Value {
     })
 }
 
+fn stats_modules_path() -> Value {
+    json!({
+        "get": {
+            "summary": "モジュール実行統計一覧",
+            "description": "全モジュールの実行統計（検知イベント数、起動時スキャン結果等）を返す。",
+            "operationId": "listModuleStats",
+            "tags": ["stats"],
+            "security": [{ "BearerAuth": [] }],
+            "responses": {
+                "200": {
+                    "description": "モジュール統計一覧",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "total": { "type": "integer", "example": 70 },
+                                    "modules": {
+                                        "type": "array",
+                                        "items": { "$ref": "#/components/schemas/ModuleStats" }
+                                    }
+                                },
+                                "required": ["total", "modules"]
+                            }
+                        }
+                    }
+                },
+                "503": {
+                    "description": "モジュール実行統計が無効です",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn stats_module_path() -> Value {
+    json!({
+        "get": {
+            "summary": "モジュール実行統計（個別）",
+            "description": "指定したモジュールの実行統計を返す。",
+            "operationId": "getModuleStats",
+            "tags": ["stats"],
+            "security": [{ "BearerAuth": [] }],
+            "parameters": [
+                {
+                    "name": "name",
+                    "in": "path",
+                    "description": "モジュール名",
+                    "required": true,
+                    "schema": { "type": "string" }
+                }
+            ],
+            "responses": {
+                "200": {
+                    "description": "モジュール統計",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/ModuleStats" }
+                        }
+                    }
+                },
+                "404": {
+                    "description": "モジュールが見つかりません",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+                        }
+                    }
+                },
+                "503": {
+                    "description": "モジュール実行統計が無効です",
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
 fn summary_common_params() -> Value {
     json!([
         {
@@ -1326,6 +1415,49 @@ fn component_schemas() -> Value {
                 }
             },
             "required": ["total_events", "info_count", "warning_count", "critical_count", "module_counts"]
+        },
+        "ModuleStats": {
+            "type": "object",
+            "properties": {
+                "module": { "type": "string", "description": "モジュール名" },
+                "events_total": { "type": "integer", "description": "検知イベント総数" },
+                "events_info": { "type": "integer", "description": "INFO レベル検知数" },
+                "events_warning": { "type": "integer", "description": "WARNING レベル検知数" },
+                "events_critical": { "type": "integer", "description": "CRITICAL レベル検知数" },
+                "last_event_at": {
+                    "type": "string",
+                    "nullable": true,
+                    "format": "date-time",
+                    "description": "直近の検知イベントタイムスタンプ（RFC3339 UTC）"
+                },
+                "initial_scan_duration_ms": {
+                    "type": "integer",
+                    "nullable": true,
+                    "description": "起動時スキャンの実行時間（ミリ秒）"
+                },
+                "initial_scan_items_scanned": {
+                    "type": "integer",
+                    "nullable": true,
+                    "description": "起動時スキャンでスキャンしたアイテム数"
+                },
+                "initial_scan_issues_found": {
+                    "type": "integer",
+                    "nullable": true,
+                    "description": "起動時スキャンで検知された問題数"
+                },
+                "initial_scan_summary": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "起動時スキャンのサマリーメッセージ"
+                },
+                "initial_scan_at": {
+                    "type": "string",
+                    "nullable": true,
+                    "format": "date-time",
+                    "description": "起動時スキャン実行時刻（RFC3339 UTC）"
+                }
+            },
+            "required": ["module", "events_total", "events_info", "events_warning", "events_critical"]
         },
         "ModulesResponse": {
             "type": "object",
