@@ -75,6 +75,7 @@ pub mod usb_monitor;
 pub mod user_account;
 pub mod xattr_monitor;
 
+use crate::core::module_stats::ModuleStatsHandle;
 use crate::error::AppError;
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -127,6 +128,13 @@ pub trait Module: Send + Sync {
     ) -> impl std::future::Future<Output = Result<InitialScanResult, AppError>> + Send {
         async { Ok(InitialScanResult::default()) }
     }
+
+    /// モジュール統計ハンドルを受け取る
+    ///
+    /// `ModuleManager` がモジュール起動前に呼び出す。モジュールがこのハンドルを保持すると、
+    /// 定期スキャンの実行時間などを `ModuleStats` に記録できる。
+    /// デフォルト実装は no-op で、opt-in したモジュールのみハンドルを保存する。
+    fn set_module_stats(&mut self, _handle: ModuleStatsHandle) {}
 }
 
 #[cfg(test)]
@@ -170,5 +178,14 @@ mod tests {
         assert_eq!(result.items_scanned, 0);
         assert_eq!(result.issues_found, 0);
         assert!(result.summary.is_empty());
+    }
+
+    #[test]
+    fn test_set_module_stats_default_no_op() {
+        // デフォルト実装は何もしない。ハンドル注入してもパニックせず、モジュールの状態も変化しない。
+        let mut module = DummyModule;
+        let handle = ModuleStatsHandle::new();
+        module.set_module_stats(handle);
+        assert_eq!(module.name(), "dummy");
     }
 }

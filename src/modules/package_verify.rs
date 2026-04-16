@@ -9,10 +9,14 @@
 
 use crate::config::PackageVerifyConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
+use crate::core::module_stats::ModuleStatsHandle;
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
 use std::collections::BTreeMap;
 use tokio_util::sync::CancellationToken;
+
+/// モジュール識別子（`ModuleStats` に登録する統計上のモジュール名）
+pub(crate) const MODULE_STATS_NAME: &str = "パッケージ整合性検証モジュール";
 
 /// パッケージマネージャーの種類
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -294,6 +298,7 @@ pub struct PackageVerifyModule {
     cancel_token: CancellationToken,
     event_bus: Option<EventBus>,
     package_manager: Option<PackageManager>,
+    stats_handle: Option<ModuleStatsHandle>,
 }
 
 impl PackageVerifyModule {
@@ -304,6 +309,7 @@ impl PackageVerifyModule {
             cancel_token: CancellationToken::new(),
             event_bus,
             package_manager: None,
+            stats_handle: None,
         }
     }
 
@@ -392,6 +398,10 @@ impl Module for PackageVerifyModule {
         "package_verify"
     }
 
+    fn set_module_stats(&mut self, handle: ModuleStatsHandle) {
+        self.stats_handle = Some(handle);
+    }
+
     fn init(&mut self) -> Result<(), AppError> {
         if self.config.interval_secs == 0 {
             return Err(AppError::ModuleConfig {
@@ -436,6 +446,7 @@ impl Module for PackageVerifyModule {
         let config = self.config.clone();
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
+        let stats_handle = self.stats_handle.clone();
 
         let handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
@@ -449,7 +460,13 @@ impl Module for PackageVerifyModule {
                         break;
                     }
                     _ = interval.tick() => {
-                        match Self::run_scan(manager, &config) {
+                        let scan_start = std::time::Instant::now();
+                        let scan_result = Self::run_scan(manager, &config);
+                        let scan_elapsed = scan_start.elapsed();
+                        if let Some(ref handle) = stats_handle {
+                            handle.record_scan_duration(MODULE_STATS_NAME, scan_elapsed);
+                        }
+                        match scan_result {
                             Ok(failures) => {
                                 if failures.is_empty() {
                                     tracing::debug!("パッケージ検証: 問題なし");
@@ -774,5 +791,48 @@ mod tests {
 
         let failures = parse_rpm_va_output("\n\n");
         assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn test_set_module_stats_stores_handle() {
+        let config = PackageVerifyConfig::default();
+        let mut module = PackageVerifyModule::new(config, None);
+        assert!(module.stats_handle.is_none());
+        module.set_module_stats(ModuleStatsHandle::new());
+        assert!(module.stats_handle.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_periodic_scan_records_scan_duration_when_pm_present() {
+        // パッケージマネージャーが存在しない環境ではスキャンループに入らないため、
+        // この検証はテスト環境に dpkg / rpm がある場合のみ有効。
+        if detect_package_manager().is_none() {
+            return;
+        }
+
+        let config = PackageVerifyConfig {
+            enabled: true,
+            interval_secs: 1,
+            exclude_packages: Vec::new(),
+            exclude_paths: Vec::new(),
+        };
+        let mut module = PackageVerifyModule::new(config, None);
+        module.init().unwrap();
+
+        let stats = ModuleStatsHandle::new();
+        module.set_module_stats(stats.clone());
+
+        let handle = module.start().await.unwrap();
+        // interval 1 秒でスキャンを 1 回以上走らせる
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        module.stop().await.unwrap();
+        let _ = handle.await;
+
+        let s = stats.get(MODULE_STATS_NAME).expect("stats must exist");
+        assert!(
+            s.scan_count >= 1,
+            "scan_count={} expected >= 1",
+            s.scan_count
+        );
     }
 }
