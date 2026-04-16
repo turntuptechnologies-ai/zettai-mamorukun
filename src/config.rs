@@ -307,6 +307,10 @@ pub struct ModulesConfig {
     #[serde(default)]
     pub kernel_params: KernelParamsConfig,
 
+    /// カーネル taint フラグ監視モジュールの設定
+    #[serde(default)]
+    pub kernel_taint_monitor: KernelTaintMonitorConfig,
+
     /// /proc/net/ 監視モジュールの設定
     #[serde(default)]
     pub proc_net_monitor: ProcNetMonitorConfig,
@@ -2145,6 +2149,56 @@ impl Default for KernelParamsConfig {
             scan_interval_secs: Self::default_scan_interval_secs(),
             proc_sys_path: Self::default_proc_sys_path(),
             watch_params: Self::default_watch_params(),
+        }
+    }
+}
+
+/// カーネル taint フラグ監視モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct KernelTaintMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "KernelTaintMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// taint ファイルのパス
+    #[serde(default = "KernelTaintMonitorConfig::default_tainted_path")]
+    pub tainted_path: String,
+
+    /// 起動時スキャンで issues_found に計上しないビット番号
+    #[serde(default = "KernelTaintMonitorConfig::default_ignore_initial_bits")]
+    pub ignore_initial_bits: Vec<u8>,
+
+    /// ビット番号ごとの Severity 上書き（"Info"/"Warning"/"High"/"Critical"）
+    #[serde(default)]
+    pub severity_overrides: std::collections::BTreeMap<u8, String>,
+}
+
+impl KernelTaintMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        60
+    }
+
+    fn default_tainted_path() -> String {
+        "/proc/sys/kernel/tainted".to_string()
+    }
+
+    fn default_ignore_initial_bits() -> Vec<u8> {
+        vec![15, 17]
+    }
+}
+
+impl Default for KernelTaintMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            tainted_path: Self::default_tainted_path(),
+            ignore_initial_bits: Self::default_ignore_initial_bits(),
+            severity_overrides: std::collections::BTreeMap::new(),
         }
     }
 }

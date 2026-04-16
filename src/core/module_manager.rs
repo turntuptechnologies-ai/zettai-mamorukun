@@ -36,6 +36,7 @@ use crate::modules::kallsyms_monitor::KallsymsMonitorModule;
 use crate::modules::kernel_cmdline_monitor::KernelCmdlineMonitorModule;
 use crate::modules::kernel_module::KernelModuleMonitor;
 use crate::modules::kernel_params::KernelParamsModule;
+use crate::modules::kernel_taint_monitor::KernelTaintMonitorModule;
 use crate::modules::keylogger_detector::KeyloggerDetectorModule;
 use crate::modules::ld_preload_monitor::LdPreloadMonitorModule;
 use crate::modules::listening_port_monitor::ListeningPortMonitorModule;
@@ -123,6 +124,7 @@ macro_rules! for_each_module {
         $callback!($($prefix)* dbus_monitor, DbusMonitorModule, "D-Bus シグナル監視モジュール");
         $callback!($($prefix)* cgroup_monitor, CgroupMonitorModule, "cgroup 監視モジュール");
         $callback!($($prefix)* kernel_params, KernelParamsModule, "カーネルパラメータ監視モジュール");
+        $callback!($($prefix)* kernel_taint_monitor, KernelTaintMonitorModule, "カーネル taint フラグ監視モジュール");
         $callback!($($prefix)* proc_net_monitor, ProcNetMonitorModule, "/proc/net/ 監視モジュール");
         $callback!($($prefix)* seccomp_monitor, SeccompMonitorModule, "seccomp 監視モジュール");
         $callback!($($prefix)* usb_monitor, UsbMonitorModule, "USB デバイス監視モジュール");

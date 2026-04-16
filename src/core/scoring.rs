@@ -334,6 +334,7 @@ fn categorize_module(module_name: &str) -> &'static str {
 
         "kernel_module"
         | "kernel_params"
+        | "kernel_taint_monitor"
         | "kernel_cmdline_monitor"
         | "kallsyms_monitor"
         | "ebpf_monitor"

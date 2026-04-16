@@ -372,6 +372,19 @@ min_value = 2
 [[modules.kernel_params.watch_params]]
 path = "kernel/core_pattern"
 
+# カーネル taint フラグ監視モジュール
+# Linux カーネルの taint（汚染）フラグを監視し、新しいビットが立ったら検知する。
+# 未署名モジュール・プロプライエタリモジュール・カーネル die 等のセキュリティ指標を追跡。
+[modules.kernel_taint_monitor]
+enabled = true
+scan_interval_secs = 60
+tainted_path = "/proc/sys/kernel/tainted"
+# 起動時スキャンで issues_found に計上しないビット番号（デフォルト: TAINT_LIVEPATCH=15, TAINT_RANDSTRUCT=17）
+ignore_initial_bits = [15, 17]
+# ビット番号ごとの Severity 上書き（省略可）
+[modules.kernel_taint_monitor.severity_overrides]
+# 10 = "Warning"  # TAINT_CRAP を Warning に引き上げる例
+
 [modules.proc_net_monitor]
 # /proc/net/ 監視モジュールの有効/無効
 # ルーティングテーブル（/proc/net/route）と ARP テーブル（/proc/net/arp）を
