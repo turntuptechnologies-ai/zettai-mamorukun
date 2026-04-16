@@ -1455,6 +1455,45 @@ fn component_schemas() -> Value {
                     "nullable": true,
                     "format": "date-time",
                     "description": "起動時スキャン実行時刻（RFC3339 UTC）"
+                },
+                "scan_count": {
+                    "type": "integer",
+                    "description": "スキャン実行回数（ヒストグラムの累積サンプル数）"
+                },
+                "scan_total_ms": {
+                    "type": "integer",
+                    "nullable": true,
+                    "description": "スキャン実行時間の累積（ミリ秒）"
+                },
+                "scan_min_ms": {
+                    "type": "integer",
+                    "nullable": true,
+                    "description": "スキャン実行時間の最小値（ミリ秒、直近 1024 サンプル内）"
+                },
+                "scan_max_ms": {
+                    "type": "integer",
+                    "nullable": true,
+                    "description": "スキャン実行時間の最大値（ミリ秒、直近 1024 サンプル内）"
+                },
+                "scan_avg_ms": {
+                    "type": "integer",
+                    "nullable": true,
+                    "description": "スキャン実行時間の平均値（ミリ秒、直近 1024 サンプル内）"
+                },
+                "scan_p50_ms": {
+                    "type": "integer",
+                    "nullable": true,
+                    "description": "スキャン実行時間の P50 中央値（ミリ秒）"
+                },
+                "scan_p95_ms": {
+                    "type": "integer",
+                    "nullable": true,
+                    "description": "スキャン実行時間の P95 パーセンタイル（ミリ秒）"
+                },
+                "scan_p99_ms": {
+                    "type": "integer",
+                    "nullable": true,
+                    "description": "スキャン実行時間の P99 パーセンタイル（ミリ秒）"
                 }
             },
             "required": ["module", "events_total", "events_info", "events_warning", "events_critical"]

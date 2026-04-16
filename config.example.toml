@@ -658,6 +658,8 @@ interval_secs = 60
 [module_stats]
 # モジュール実行統計の有効/無効
 # モジュール単位で検知イベント数（Severity 別）と起動時スキャン結果を収集する。
+# スキャン実行時間は最新 1024 サンプルのリングバッファに蓄積され、
+# P50/P95/P99 百分位点がレスポンスに含まれる（ModuleStats.scan_p50_ms など）。
 # 有効化すると REST API `/api/v1/stats/modules` で統計を取得できる。
 enabled = false
 # サマリーログ出力インターバル（秒）。0 で定期ログを無効化
@@ -871,6 +873,11 @@ socket_path = "/var/run/zettai-mamorukun/status.sock"
 #     / zettai_module_initial_scan_items_scanned{module}
 #     / zettai_module_initial_scan_issues_found{module}
 #     （module_stats.enabled かつ 起動時スキャンを行ったモジュールのみ）
+#   - zettai_module_scan_duration_seconds{module,quantile="0.5|0.95|0.99"}
+#     / zettai_module_scan_duration_seconds_count{module}
+#     / zettai_module_scan_duration_seconds_sum{module}
+#     （module_stats.enabled かつ スキャン時間サンプルを 1 件以上記録したモジュールのみ。
+#      百分位点は直近 1024 サンプルから nearest-rank 法で算出）
 enabled = false
 # バインドアドレス
 bind_address = "127.0.0.1"
