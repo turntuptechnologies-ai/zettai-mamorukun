@@ -294,6 +294,7 @@ impl Daemon {
         let (mut module_manager, scan_report) = ModuleManager::start_modules(
             &self.config.modules,
             &event_bus,
+            &module_stats_handle,
             self.config.startup_scan.enabled,
         )
         .await;
@@ -538,6 +539,7 @@ impl Daemon {
                                 &self.config.modules,
                                 &new_config.modules,
                                 &event_bus,
+                                &module_stats_handle,
                             ).await;
 
                             let summary = format!(

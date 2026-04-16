@@ -4,6 +4,7 @@ use crate::config::ModuleWatchdogConfig;
 use crate::config::ModulesConfig;
 use crate::core::event::EventBus;
 use crate::core::event::{SecurityEvent, Severity};
+use crate::core::module_stats::ModuleStatsHandle;
 use crate::modules::abstract_socket_monitor::AbstractSocketMonitorModule;
 use crate::modules::at_job_monitor::AtJobMonitorModule;
 use crate::modules::auditd_monitor::AuditdMonitorModule;
@@ -225,9 +226,12 @@ pub struct ModuleManager {
 
 /// 個別モジュールの起動を統一的に扱うマクロ（initial_scan 対応）
 macro_rules! start_module {
-    ($modules:expr, $config:expr, $event_bus:expr, $scan_enabled:expr, $scan_report:expr, $field:ident, $ModuleType:ty, $label:expr) => {
+    ($modules:expr, $config:expr, $event_bus:expr, $stats_handle:expr, $scan_enabled:expr, $scan_report:expr, $field:ident, $ModuleType:ty, $label:expr) => {
         if $config.$field.enabled {
             let mut module = <$ModuleType>::new($config.$field.clone(), $event_bus.clone());
+            if let Some(handle) = $stats_handle.as_ref() {
+                module.set_module_stats(handle.clone());
+            }
             match module.init() {
                 Ok(()) => {
                     // 起動時スキャンの実行
@@ -287,7 +291,7 @@ macro_rules! start_module {
 
 /// リロード時のモジュール管理マクロ
 macro_rules! reload_module {
-    ($result:expr, $running:expr, $new_modules:expr, $old_config:expr, $new_config:expr, $event_bus:expr, $field:ident, $ModuleType:ty, $label:expr) => {{
+    ($result:expr, $running:expr, $new_modules:expr, $old_config:expr, $new_config:expr, $event_bus:expr, $stats_handle:expr, $field:ident, $ModuleType:ty, $label:expr) => {{
         let was_enabled = $old_config.$field.enabled;
         let is_enabled = $new_config.$field.enabled;
 
@@ -296,6 +300,9 @@ macro_rules! reload_module {
             (false, true) => {
                 let mut module =
                     <$ModuleType>::new($new_config.$field.clone(), $event_bus.clone());
+                if let Some(handle) = $stats_handle.as_ref() {
+                    module.set_module_stats(handle.clone());
+                }
                 match module.init() {
                     Ok(()) => match module.start().await {
                         Ok(handle) => {
@@ -343,6 +350,9 @@ macro_rules! reload_module {
                     // 再起動
                     let mut module =
                         <$ModuleType>::new($new_config.$field.clone(), $event_bus.clone());
+                    if let Some(handle) = $stats_handle.as_ref() {
+                        module.set_module_stats(handle.clone());
+                    }
                     match module.init() {
                         Ok(()) => match module.start().await {
                             Ok(handle) => {
@@ -423,6 +433,7 @@ impl ModuleManager {
     pub async fn start_modules(
         config: &ModulesConfig,
         event_bus: &Option<EventBus>,
+        module_stats_handle: &Option<ModuleStatsHandle>,
         startup_scan_enabled: bool,
     ) -> (Self, StartupScanReport) {
         let mut modules = Vec::new();
@@ -437,6 +448,7 @@ impl ModuleManager {
             modules,
             config,
             event_bus,
+            module_stats_handle,
             startup_scan_enabled,
             scan_report,
         ));
@@ -518,6 +530,7 @@ impl ModuleManager {
         old_config: &ModulesConfig,
         new_config: &ModulesConfig,
         event_bus: &Option<EventBus>,
+        module_stats_handle: &Option<ModuleStatsHandle>,
     ) -> ReloadResult {
         let mut result = ReloadResult {
             started: Vec::new(),
@@ -535,6 +548,7 @@ impl ModuleManager {
             old_config,
             new_config,
             event_bus,
+            module_stats_handle,
         ));
 
         self.running_modules = new_modules;
@@ -804,7 +818,7 @@ mod tests {
     async fn test_running_module_names_empty() {
         let config = ModulesConfig::default();
         let event_bus = None;
-        let (manager, _) = ModuleManager::start_modules(&config, &event_bus, false).await;
+        let (manager, _) = ModuleManager::start_modules(&config, &event_bus, &None, false).await;
         assert!(manager.running_module_names().is_empty());
     }
 
@@ -813,7 +827,7 @@ mod tests {
         let mut config = ModulesConfig::default();
         config.dns_monitor.enabled = true;
         let event_bus = None;
-        let (manager, _) = ModuleManager::start_modules(&config, &event_bus, false).await;
+        let (manager, _) = ModuleManager::start_modules(&config, &event_bus, &None, false).await;
         let names = manager.running_module_names();
         assert_eq!(names.len(), 1);
         assert!(names.contains(&"DNS設定改ざん検知モジュール".to_string()));
@@ -823,7 +837,7 @@ mod tests {
     async fn test_start_modules_with_all_disabled() {
         let config = ModulesConfig::default();
         let event_bus = None;
-        let (manager, _) = ModuleManager::start_modules(&config, &event_bus, false).await;
+        let (manager, _) = ModuleManager::start_modules(&config, &event_bus, &None, false).await;
         assert!(manager.running_modules.is_empty());
     }
 
@@ -831,7 +845,8 @@ mod tests {
     async fn test_stop_all_clears_modules() {
         let config = ModulesConfig::default();
         let event_bus = None;
-        let (mut manager, _) = ModuleManager::start_modules(&config, &event_bus, false).await;
+        let (mut manager, _) =
+            ModuleManager::start_modules(&config, &event_bus, &None, false).await;
         manager.stop_all();
         assert!(manager.running_modules.is_empty());
     }
@@ -840,8 +855,9 @@ mod tests {
     async fn test_reload_no_changes() {
         let config = ModulesConfig::default();
         let event_bus = None;
-        let (mut manager, _) = ModuleManager::start_modules(&config, &event_bus, false).await;
-        let result = manager.reload(&config, &config, &event_bus).await;
+        let (mut manager, _) =
+            ModuleManager::start_modules(&config, &event_bus, &None, false).await;
+        let result = manager.reload(&config, &config, &event_bus, &None).await;
         assert!(result.started.is_empty());
         assert!(result.stopped.is_empty());
         assert!(result.restarted.is_empty());
@@ -855,8 +871,11 @@ mod tests {
         new_config.dns_monitor.enabled = true;
 
         let event_bus = None;
-        let (mut manager, _) = ModuleManager::start_modules(&old_config, &event_bus, false).await;
-        let result = manager.reload(&old_config, &new_config, &event_bus).await;
+        let (mut manager, _) =
+            ModuleManager::start_modules(&old_config, &event_bus, &None, false).await;
+        let result = manager
+            .reload(&old_config, &new_config, &event_bus, &None)
+            .await;
         assert!(
             result
                 .started
@@ -872,10 +891,13 @@ mod tests {
         let new_config = ModulesConfig::default();
 
         let event_bus = None;
-        let (mut manager, _) = ModuleManager::start_modules(&old_config, &event_bus, false).await;
+        let (mut manager, _) =
+            ModuleManager::start_modules(&old_config, &event_bus, &None, false).await;
         assert_eq!(manager.running_modules.len(), 1);
 
-        let result = manager.reload(&old_config, &new_config, &event_bus).await;
+        let result = manager
+            .reload(&old_config, &new_config, &event_bus, &None)
+            .await;
         assert!(
             result
                 .stopped
@@ -894,8 +916,11 @@ mod tests {
         new_config.dns_monitor.scan_interval_secs = 60;
 
         let event_bus = None;
-        let (mut manager, _) = ModuleManager::start_modules(&old_config, &event_bus, false).await;
-        let result = manager.reload(&old_config, &new_config, &event_bus).await;
+        let (mut manager, _) =
+            ModuleManager::start_modules(&old_config, &event_bus, &None, false).await;
+        let result = manager
+            .reload(&old_config, &new_config, &event_bus, &None)
+            .await;
         assert!(
             result
                 .restarted
@@ -913,8 +938,11 @@ mod tests {
         new_config.cron_monitor.enabled = true;
 
         let event_bus = None;
-        let (mut manager, _) = ModuleManager::start_modules(&old_config, &event_bus, false).await;
-        let result = manager.reload(&old_config, &new_config, &event_bus).await;
+        let (mut manager, _) =
+            ModuleManager::start_modules(&old_config, &event_bus, &None, false).await;
+        let result = manager
+            .reload(&old_config, &new_config, &event_bus, &None)
+            .await;
         assert_eq!(result.started.len(), 3);
         assert!(result.stopped.is_empty());
         assert!(result.restarted.is_empty());
@@ -931,10 +959,13 @@ mod tests {
         let new_config = ModulesConfig::default();
 
         let event_bus = None;
-        let (mut manager, _) = ModuleManager::start_modules(&old_config, &event_bus, false).await;
+        let (mut manager, _) =
+            ModuleManager::start_modules(&old_config, &event_bus, &None, false).await;
         assert_eq!(manager.running_modules.len(), 3);
 
-        let result = manager.reload(&old_config, &new_config, &event_bus).await;
+        let result = manager
+            .reload(&old_config, &new_config, &event_bus, &None)
+            .await;
         assert_eq!(result.stopped.len(), 3);
         assert!(result.started.is_empty());
         assert!(result.restarted.is_empty());
@@ -956,8 +987,11 @@ mod tests {
         new_config.cron_monitor.scan_interval_secs = 120;
 
         let event_bus = None;
-        let (mut manager, _) = ModuleManager::start_modules(&old_config, &event_bus, false).await;
-        let result = manager.reload(&old_config, &new_config, &event_bus).await;
+        let (mut manager, _) =
+            ModuleManager::start_modules(&old_config, &event_bus, &None, false).await;
+        let result = manager
+            .reload(&old_config, &new_config, &event_bus, &None)
+            .await;
 
         assert_eq!(result.stopped.len(), 1);
         assert!(
@@ -987,8 +1021,9 @@ mod tests {
         // 全モジュール無効→全モジュール無効: 何も起きない
         let config = ModulesConfig::default();
         let event_bus = None;
-        let (mut manager, _) = ModuleManager::start_modules(&config, &event_bus, false).await;
-        let result = manager.reload(&config, &config, &event_bus).await;
+        let (mut manager, _) =
+            ModuleManager::start_modules(&config, &event_bus, &None, false).await;
+        let result = manager.reload(&config, &config, &event_bus, &None).await;
         assert!(result.started.is_empty());
         assert!(result.stopped.is_empty());
         assert!(result.restarted.is_empty());
@@ -1004,10 +1039,11 @@ mod tests {
         config.dns_monitor.scan_interval_secs = 30;
 
         let event_bus = None;
-        let (mut manager, _) = ModuleManager::start_modules(&config, &event_bus, false).await;
+        let (mut manager, _) =
+            ModuleManager::start_modules(&config, &event_bus, &None, false).await;
         assert_eq!(manager.running_modules.len(), 1);
 
-        let result = manager.reload(&config, &config, &event_bus).await;
+        let result = manager.reload(&config, &config, &event_bus, &None).await;
         assert!(result.started.is_empty());
         assert!(result.stopped.is_empty());
         assert!(result.restarted.is_empty());
@@ -1019,7 +1055,8 @@ mod tests {
     async fn test_start_modules_with_startup_scan_disabled() {
         let config = ModulesConfig::default();
         let event_bus = None;
-        let (manager, report) = ModuleManager::start_modules(&config, &event_bus, false).await;
+        let (manager, report) =
+            ModuleManager::start_modules(&config, &event_bus, &None, false).await;
         assert!(manager.running_modules.is_empty());
         assert!(report.results.is_empty());
         assert!(report.errors.is_empty());
@@ -1030,7 +1067,8 @@ mod tests {
         let mut config = ModulesConfig::default();
         config.dns_monitor.enabled = true;
         let event_bus = None;
-        let (manager, report) = ModuleManager::start_modules(&config, &event_bus, true).await;
+        let (manager, report) =
+            ModuleManager::start_modules(&config, &event_bus, &None, true).await;
         assert_eq!(manager.running_modules.len(), 1);
         // DNS モジュールの initial_scan が実行されていること
         assert_eq!(report.results.len(), 1);
@@ -1042,7 +1080,7 @@ mod tests {
     async fn test_startup_scan_report_total_duration() {
         let config = ModulesConfig::default();
         let event_bus = None;
-        let (_, report) = ModuleManager::start_modules(&config, &event_bus, true).await;
+        let (_, report) = ModuleManager::start_modules(&config, &event_bus, &None, true).await;
         // total_duration はゼロ以上
         assert!(report.total_duration.as_nanos() >= 0);
     }
@@ -1053,7 +1091,8 @@ mod tests {
         let mut config = ModulesConfig::default();
         config.dns_monitor.enabled = true;
         let event_bus = None;
-        let (mut manager, _) = ModuleManager::start_modules(&config, &event_bus, false).await;
+        let (mut manager, _) =
+            ModuleManager::start_modules(&config, &event_bus, &None, false).await;
         assert_eq!(manager.running_modules.len(), 1);
 
         let watchdog_config = crate::config::ModuleWatchdogConfig::default();
@@ -1088,7 +1127,7 @@ mod tests {
     async fn test_module_restart_counts_empty() {
         let config = ModulesConfig::default();
         let event_bus = None;
-        let (manager, _) = ModuleManager::start_modules(&config, &event_bus, false).await;
+        let (manager, _) = ModuleManager::start_modules(&config, &event_bus, &None, false).await;
         let counts = manager.module_restart_counts();
         assert!(counts.is_empty());
     }
@@ -1110,7 +1149,7 @@ mod tests {
         let mut config = ModulesConfig::default();
         config.dns_monitor.enabled = true;
         let event_bus = None;
-        let (manager, _) = ModuleManager::start_modules(&config, &event_bus, false).await;
+        let (manager, _) = ModuleManager::start_modules(&config, &event_bus, &None, false).await;
         assert!(manager.is_module_running("DNS設定改ざん検知モジュール"));
         assert!(!manager.is_module_running("ファイル整合性監視モジュール"));
     }
@@ -1120,7 +1159,8 @@ mod tests {
         let mut config = ModulesConfig::default();
         config.dns_monitor.enabled = true;
         let event_bus = None;
-        let (mut manager, _) = ModuleManager::start_modules(&config, &event_bus, false).await;
+        let (mut manager, _) =
+            ModuleManager::start_modules(&config, &event_bus, &None, false).await;
         assert_eq!(manager.running_modules.len(), 1);
 
         let stopped = manager.stop_module_by_name("DNS設定改ざん検知モジュール");
@@ -1136,7 +1176,8 @@ mod tests {
         let mut config = ModulesConfig::default();
         config.dns_monitor.enabled = true;
         let event_bus = None;
-        let (mut manager, _) = ModuleManager::start_modules(&config, &event_bus, false).await;
+        let (mut manager, _) =
+            ModuleManager::start_modules(&config, &event_bus, &None, false).await;
         manager.stop_module_by_name("DNS設定改ざん検知モジュール");
         assert!(manager.running_modules.is_empty());
 
@@ -1152,7 +1193,8 @@ mod tests {
     async fn test_start_module_by_name_unknown() {
         let config = ModulesConfig::default();
         let event_bus = None;
-        let (mut manager, _) = ModuleManager::start_modules(&config, &event_bus, false).await;
+        let (mut manager, _) =
+            ModuleManager::start_modules(&config, &event_bus, &None, false).await;
         let result = manager
             .start_module_by_name("存在しないモジュール", &config, &event_bus)
             .await;

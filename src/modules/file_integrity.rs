@@ -5,6 +5,7 @@
 
 use crate::config::FileIntegrityConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
+use crate::core::module_stats::ModuleStatsHandle;
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
 use hmac::{Hmac, Mac};
@@ -13,6 +14,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 use walkdir::WalkDir;
+
+/// モジュール識別子（`ModuleStats` に登録する統計上のモジュール名）
+pub(crate) const MODULE_STATS_NAME: &str = "ファイル整合性監視モジュール";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -38,6 +42,7 @@ pub struct FileIntegrityModule {
     baseline: Option<HashMap<PathBuf, String>>,
     cancel_token: CancellationToken,
     event_bus: Option<EventBus>,
+    stats_handle: Option<ModuleStatsHandle>,
 }
 
 impl FileIntegrityModule {
@@ -48,6 +53,7 @@ impl FileIntegrityModule {
             baseline: None,
             cancel_token: CancellationToken::new(),
             event_bus,
+            stats_handle: None,
         }
     }
 
@@ -161,6 +167,10 @@ impl Module for FileIntegrityModule {
         "file_integrity"
     }
 
+    fn set_module_stats(&mut self, handle: ModuleStatsHandle) {
+        self.stats_handle = Some(handle);
+    }
+
     fn init(&mut self) -> Result<(), AppError> {
         if self.config.scan_interval_secs == 0 {
             return Err(AppError::ModuleConfig {
@@ -225,6 +235,7 @@ impl Module for FileIntegrityModule {
         let scan_interval_secs = self.config.scan_interval_secs;
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
+        let stats_handle = self.stats_handle.clone();
 
         let handle = tokio::spawn(async move {
             let mut interval =
@@ -239,8 +250,13 @@ impl Module for FileIntegrityModule {
                         break;
                     }
                     _ = interval.tick() => {
+                        let scan_start = std::time::Instant::now();
                         let current = FileIntegrityModule::scan_files(&watch_paths, hmac_key_bytes.as_deref());
                         let report = FileIntegrityModule::detect_changes(&baseline, &current);
+                        let scan_elapsed = scan_start.elapsed();
+                        if let Some(ref handle) = stats_handle {
+                            handle.record_scan_duration(MODULE_STATS_NAME, scan_elapsed);
+                        }
 
                         if report.has_changes() {
                             for path in &report.modified {
@@ -789,5 +805,56 @@ mod tests {
         let mut module = FileIntegrityModule::new(config, None);
         // Should succeed but emit a warning (can't easily test the warning log)
         assert!(module.init().is_ok());
+    }
+
+    #[test]
+    fn test_set_module_stats_stores_handle() {
+        let config = FileIntegrityConfig {
+            enabled: true,
+            scan_interval_secs: 300,
+            watch_paths: vec![],
+            hmac_key: None,
+        };
+        let mut module = FileIntegrityModule::new(config, None);
+        assert!(module.stats_handle.is_none());
+        let handle = ModuleStatsHandle::new();
+        module.set_module_stats(handle);
+        assert!(module.stats_handle.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_periodic_scan_records_scan_duration() {
+        // 短いスキャン間隔で起動し、定期スキャンで scan_count が増加することを確認する。
+        let dir = tempfile::tempdir().unwrap();
+        let file1 = dir.path().join("a.txt");
+        std::fs::write(&file1, "content a").unwrap();
+
+        let config = FileIntegrityConfig {
+            enabled: true,
+            scan_interval_secs: 1,
+            watch_paths: vec![dir.path().to_path_buf()],
+            hmac_key: None,
+        };
+        let mut module = FileIntegrityModule::new(config, None);
+        module.init().unwrap();
+
+        let stats = ModuleStatsHandle::new();
+        module.set_module_stats(stats.clone());
+
+        let handle = module.start().await.unwrap();
+
+        // interval 1 秒 + マージンで 1 回以上の tick を待つ
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+
+        module.stop().await.unwrap();
+        let _ = handle.await;
+
+        let s = stats.get(MODULE_STATS_NAME).expect("stats must exist");
+        assert!(
+            s.scan_count >= 1,
+            "scan_count={} expected >= 1",
+            s.scan_count
+        );
+        assert!(s.scan_total_ms.is_some());
     }
 }
