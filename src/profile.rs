@@ -189,6 +189,7 @@ impl ProfileKind {
         config.modules.container_namespace.enabled = true;
         config.modules.cgroup_monitor.enabled = true;
         config.modules.kernel_params.enabled = true;
+        config.modules.kernel_taint_monitor.enabled = true;
         config.modules.proc_net_monitor.enabled = true;
         config.modules.seccomp_monitor.enabled = true;
         config.modules.usb_monitor.enabled = true;

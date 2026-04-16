@@ -132,6 +132,7 @@ src/
     kernel_cmdline_monitor.rs # カーネルコマンドライン実行時監視モジュール
     kernel_module.rs   # カーネルモジュール監視モジュール
     kernel_params.rs   # /proc/sys/ カーネルパラメータ監視モジュール
+    kernel_taint_monitor.rs # カーネル taint フラグ監視モジュール
     ld_preload_monitor.rs # 環境変数・LD_PRELOAD 監視モジュール
     listening_port_monitor.rs # リスニングポート監視モジュール
     livepatch_monitor.rs # カーネルライブパッチ監視モジュール
