@@ -9,12 +9,16 @@
 
 use crate::config::DnsMonitorConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
+use crate::core::module_stats::ModuleStatsHandle;
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
+
+/// モジュール識別子（`ModuleStats` に登録する統計上のモジュール名）
+pub(crate) const MODULE_STATS_NAME: &str = "DNS設定改ざん検知モジュール";
 
 /// DNS設定変更レポート
 struct ChangeReport {
@@ -38,6 +42,7 @@ pub struct DnsMonitorModule {
     event_bus: Option<EventBus>,
     baseline: Option<HashMap<PathBuf, String>>,
     cancel_token: CancellationToken,
+    stats_handle: Option<ModuleStatsHandle>,
 }
 
 impl DnsMonitorModule {
@@ -48,6 +53,7 @@ impl DnsMonitorModule {
             event_bus,
             baseline: None,
             cancel_token: CancellationToken::new(),
+            stats_handle: None,
         }
     }
 
@@ -163,6 +169,7 @@ impl Module for DnsMonitorModule {
         let scan_interval_secs = self.config.scan_interval_secs;
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
+        let stats_handle = self.stats_handle.clone();
 
         let handle = tokio::spawn(async move {
             let mut interval =
@@ -177,6 +184,7 @@ impl Module for DnsMonitorModule {
                         break;
                     }
                     _ = interval.tick() => {
+                        let scan_start = std::time::Instant::now();
                         let current = DnsMonitorModule::scan_files(&watch_paths);
                         let report = DnsMonitorModule::detect_changes(&baseline, &current);
 
@@ -228,12 +236,20 @@ impl Module for DnsMonitorModule {
                         } else {
                             tracing::debug!("DNS設定ファイルの変更はありません");
                         }
+                        let scan_elapsed = scan_start.elapsed();
+                        if let Some(ref handle) = stats_handle {
+                            handle.record_scan_duration(MODULE_STATS_NAME, scan_elapsed);
+                        }
                     }
                 }
             }
         });
 
         Ok(handle)
+    }
+
+    fn set_module_stats(&mut self, handle: ModuleStatsHandle) {
+        self.stats_handle = Some(handle);
     }
 
     async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {
@@ -484,5 +500,47 @@ mod tests {
 
         let result = module.initial_scan().await.unwrap();
         assert_eq!(result.items_scanned, 0);
+    }
+
+    #[test]
+    fn test_set_module_stats_stores_handle() {
+        let config = DnsMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 30,
+            watch_paths: vec![],
+        };
+        let mut module = DnsMonitorModule::new(config, None);
+        assert!(module.stats_handle.is_none());
+        module.set_module_stats(ModuleStatsHandle::new());
+        assert!(module.stats_handle.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_periodic_scan_records_scan_duration() {
+        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+        write!(tmpfile, "nameserver 8.8.8.8").unwrap();
+
+        let config = DnsMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 1,
+            watch_paths: vec![tmpfile.path().to_path_buf()],
+        };
+        let mut module = DnsMonitorModule::new(config, None);
+        module.init().unwrap();
+
+        let stats = ModuleStatsHandle::new();
+        module.set_module_stats(stats.clone());
+
+        let handle = module.start().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        module.stop().await.unwrap();
+        let _ = handle.await;
+
+        let s = stats.get(MODULE_STATS_NAME).expect("stats must exist");
+        assert!(
+            s.scan_count >= 1,
+            "scan_count={} expected >= 1",
+            s.scan_count
+        );
     }
 }
