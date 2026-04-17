@@ -9,11 +9,15 @@
 
 use crate::config::NetworkMonitorConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
+use crate::core::module_stats::ModuleStatsHandle;
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
 use std::collections::{BTreeMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tokio_util::sync::CancellationToken;
+
+/// モジュール識別子（`ModuleStats` に登録する統計上のモジュール名）
+pub(crate) const MODULE_STATS_NAME: &str = "ネットワーク接続監視モジュール";
 
 /// プロトコル種別
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -277,6 +281,7 @@ pub struct NetworkMonitorModule {
     config: NetworkMonitorConfig,
     cancel_token: CancellationToken,
     event_bus: Option<EventBus>,
+    stats_handle: Option<ModuleStatsHandle>,
 }
 
 impl NetworkMonitorModule {
@@ -286,6 +291,7 @@ impl NetworkMonitorModule {
             config,
             cancel_token: CancellationToken::new(),
             event_bus,
+            stats_handle: None,
         }
     }
 
@@ -371,6 +377,7 @@ impl Module for NetworkMonitorModule {
         let enable_ipv6 = self.config.enable_ipv6;
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
+        let stats_handle = self.stats_handle.clone();
 
         // 既知の不審接続を記録し、同じ接続の繰り返し警告を抑制
         let mut known_suspicious: HashSet<(IpAddr, u16)> = HashSet::new();
@@ -387,7 +394,12 @@ impl Module for NetworkMonitorModule {
                         break;
                     }
                     _ = interval.tick() => {
+                        let scan_start = std::time::Instant::now();
                         let entries = NetworkMonitorModule::read_connections(enable_ipv6);
+                        let scan_elapsed = scan_start.elapsed();
+                        if let Some(ref handle) = stats_handle {
+                            handle.record_scan_duration(MODULE_STATS_NAME, scan_elapsed);
+                        }
 
                         // 不審ポート接続の検知
                         let suspicious =
@@ -512,6 +524,10 @@ impl Module for NetworkMonitorModule {
             ),
             snapshot: BTreeMap::new(),
         })
+    }
+
+    fn set_module_stats(&mut self, handle: ModuleStatsHandle) {
+        self.stats_handle = Some(handle);
     }
 }
 
@@ -1258,5 +1274,48 @@ mod tests {
         let result = module.initial_scan().await.unwrap();
         assert!(result.summary.contains("ネットワーク接続"));
         assert!(result.summary.contains("不審な接続"));
+    }
+
+    #[test]
+    fn test_set_module_stats_stores_handle() {
+        let config = NetworkMonitorConfig {
+            enabled: true,
+            interval_secs: 60,
+            suspicious_ports: vec![],
+            max_connections: 1000,
+            enable_ipv6: false,
+        };
+        let mut module = NetworkMonitorModule::new(config, None);
+        assert!(module.stats_handle.is_none());
+        module.set_module_stats(ModuleStatsHandle::new());
+        assert!(module.stats_handle.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_periodic_scan_records_scan_duration() {
+        let config = NetworkMonitorConfig {
+            enabled: true,
+            interval_secs: 1,
+            suspicious_ports: vec![],
+            max_connections: 10_000,
+            enable_ipv6: false,
+        };
+        let mut module = NetworkMonitorModule::new(config, None);
+        module.init().unwrap();
+
+        let stats = ModuleStatsHandle::new();
+        module.set_module_stats(stats.clone());
+
+        let handle = module.start().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        module.stop().await.unwrap();
+        let _ = handle.await;
+
+        let s = stats.get(MODULE_STATS_NAME).expect("stats must exist");
+        assert!(
+            s.scan_count >= 1,
+            "scan_count={} expected >= 1",
+            s.scan_count
+        );
     }
 }

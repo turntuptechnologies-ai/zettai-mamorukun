@@ -3270,7 +3270,7 @@ dependencies = [
 
 [[package]]
 name = "zettai-mamorukun"
-version = "1.53.0"
+version = "1.54.0"
 dependencies = [
  "aes-gcm",
  "base64",

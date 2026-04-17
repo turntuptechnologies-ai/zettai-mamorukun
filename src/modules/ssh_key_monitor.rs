@@ -8,12 +8,16 @@
 
 use crate::config::SshKeyMonitorConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
+use crate::core::module_stats::ModuleStatsHandle;
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
+
+/// モジュール識別子（`ModuleStats` に登録する統計上のモジュール名）
+pub(crate) const MODULE_STATS_NAME: &str = "SSH公開鍵ファイル監視モジュール";
 
 /// ファイルごとのスナップショット
 struct FileSnapshot {
@@ -43,6 +47,7 @@ pub struct SshKeyMonitorModule {
     config: SshKeyMonitorConfig,
     cancel_token: CancellationToken,
     event_bus: Option<EventBus>,
+    stats_handle: Option<ModuleStatsHandle>,
 }
 
 impl SshKeyMonitorModule {
@@ -52,6 +57,7 @@ impl SshKeyMonitorModule {
             config,
             cancel_token: CancellationToken::new(),
             event_bus,
+            stats_handle: None,
         }
     }
 
@@ -281,6 +287,7 @@ impl Module for SshKeyMonitorModule {
         let scan_interval_secs = self.config.scan_interval_secs;
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
+        let stats_handle = self.stats_handle.clone();
 
         let handle = tokio::spawn(async move {
             let mut interval =
@@ -297,8 +304,13 @@ impl Module for SshKeyMonitorModule {
                         break;
                     }
                     _ = interval.tick() => {
+                        let scan_start = std::time::Instant::now();
                         let current = SshKeyMonitorModule::scan_files(&watch_paths);
                         let changed = SshKeyMonitorModule::detect_and_report(&baseline, &current, &event_bus);
+                        let scan_elapsed = scan_start.elapsed();
+                        if let Some(ref handle) = stats_handle {
+                            handle.record_scan_duration(MODULE_STATS_NAME, scan_elapsed);
+                        }
 
                         if changed {
                             baseline = current;
@@ -338,6 +350,10 @@ impl Module for SshKeyMonitorModule {
             summary: format!("SSH 公開鍵ファイル {}件をスキャンしました", items_scanned),
             snapshot: scan_snapshot,
         })
+    }
+
+    fn set_module_stats(&mut self, handle: ModuleStatsHandle) {
+        self.stats_handle = Some(handle);
     }
 }
 
@@ -631,5 +647,48 @@ mod tests {
         let result = module.initial_scan().await.unwrap();
         assert_eq!(result.items_scanned, 0);
         assert_eq!(result.issues_found, 0);
+    }
+
+    #[test]
+    fn test_set_module_stats_stores_handle() {
+        let config = SshKeyMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            watch_paths: vec![],
+        };
+        let mut module = SshKeyMonitorModule::new(config, None);
+        assert!(module.stats_handle.is_none());
+        module.set_module_stats(ModuleStatsHandle::new());
+        assert!(module.stats_handle.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_periodic_scan_records_scan_duration() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let key_file = tmpdir.path().join("authorized_keys");
+        std::fs::write(&key_file, "ssh-rsa AAAAB3... user@host\n").unwrap();
+
+        let config = SshKeyMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 1,
+            watch_paths: vec![key_file],
+        };
+        let mut module = SshKeyMonitorModule::new(config, None);
+        module.init().unwrap();
+
+        let stats = ModuleStatsHandle::new();
+        module.set_module_stats(stats.clone());
+
+        let handle = module.start().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        module.stop().await.unwrap();
+        let _ = handle.await;
+
+        let s = stats.get(MODULE_STATS_NAME).expect("stats must exist");
+        assert!(
+            s.scan_count >= 1,
+            "scan_count={} expected >= 1",
+            s.scan_count
+        );
     }
 }
