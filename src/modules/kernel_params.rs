@@ -10,11 +10,15 @@
 
 use crate::config::{KernelParamRule, KernelParamsConfig};
 use crate::core::event::{EventBus, SecurityEvent, Severity};
+use crate::core::module_stats::ModuleStatsHandle;
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
 use std::collections::BTreeMap;
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
+
+/// モジュール識別子（`ModuleStats` に登録する統計上のモジュール名）
+pub(crate) const MODULE_STATS_NAME: &str = "カーネルパラメータ監視モジュール";
 
 /// パラメータのスナップショット（パス → 値）
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +62,7 @@ pub struct KernelParamsModule {
     config: KernelParamsConfig,
     cancel_token: CancellationToken,
     event_bus: Option<EventBus>,
+    stats_handle: Option<ModuleStatsHandle>,
 }
 
 impl KernelParamsModule {
@@ -67,6 +72,7 @@ impl KernelParamsModule {
             config,
             cancel_token: CancellationToken::new(),
             event_bus,
+            stats_handle: None,
         }
     }
 
@@ -229,6 +235,7 @@ impl Module for KernelParamsModule {
         let scan_interval_secs = self.config.scan_interval_secs;
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
+        let stats_handle = self.stats_handle.clone();
 
         let baseline = take_snapshot(Path::new(&proc_sys_path), &watch_params);
         tracing::info!(
@@ -250,6 +257,7 @@ impl Module for KernelParamsModule {
                         break;
                     }
                     _ = interval.tick() => {
+                        let scan_start = std::time::Instant::now();
                         let current = take_snapshot(
                             Path::new(&proc_sys_path),
                             &watch_params,
@@ -257,6 +265,10 @@ impl Module for KernelParamsModule {
                         let changed = KernelParamsModule::detect_and_report(
                             &baseline, &current, &watch_params, &event_bus,
                         );
+                        let scan_elapsed = scan_start.elapsed();
+                        if let Some(ref handle) = stats_handle {
+                            handle.record_scan_duration(MODULE_STATS_NAME, scan_elapsed);
+                        }
 
                         if changed {
                             baseline = current;
@@ -371,6 +383,10 @@ impl Module for KernelParamsModule {
     async fn stop(&mut self) -> Result<(), AppError> {
         self.cancel_token.cancel();
         Ok(())
+    }
+
+    fn set_module_stats(&mut self, handle: ModuleStatsHandle) {
+        self.stats_handle = Some(handle);
     }
 }
 
@@ -734,5 +750,47 @@ mod tests {
         }];
         let snapshot = take_snapshot(Path::new("/nonexistent_proc_sys"), &rules);
         assert!(snapshot.values.is_empty());
+    }
+
+    #[test]
+    fn test_set_module_stats_stores_handle() {
+        let dir = TempDir::new().unwrap();
+        let config = default_config_with_path(dir.path().to_str().unwrap());
+        let mut module = KernelParamsModule::new(config, None);
+        assert!(module.stats_handle.is_none());
+        module.set_module_stats(ModuleStatsHandle::new());
+        assert!(module.stats_handle.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_periodic_scan_records_scan_duration() {
+        let dir = TempDir::new().unwrap();
+        create_test_proc_sys(
+            &dir,
+            &[
+                ("kernel/kptr_restrict", "1"),
+                ("kernel/randomize_va_space", "2"),
+                ("kernel/sysrq", "0"),
+            ],
+        );
+        let mut config = default_config_with_path(dir.path().to_str().unwrap());
+        config.scan_interval_secs = 1;
+        let mut module = KernelParamsModule::new(config, None);
+        module.init().unwrap();
+
+        let stats = ModuleStatsHandle::new();
+        module.set_module_stats(stats.clone());
+
+        let handle = module.start().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        module.stop().await.unwrap();
+        let _ = handle.await;
+
+        let s = stats.get(MODULE_STATS_NAME).expect("stats must exist");
+        assert!(
+            s.scan_count >= 1,
+            "scan_count={} expected >= 1",
+            s.scan_count
+        );
     }
 }
