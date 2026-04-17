@@ -10,11 +10,15 @@
 
 use crate::config::TlsCertMonitorConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
+use crate::core::module_stats::ModuleStatsHandle;
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
+
+/// モジュール識別子（`ModuleStats` に登録する統計上のモジュール名）
+pub(crate) const MODULE_STATS_NAME: &str = "TLS 証明書有効期限監視モジュール";
 
 /// 単一ファイルのチェック結果
 struct CertCheckResult {
@@ -39,6 +43,7 @@ pub struct TlsCertMonitorModule {
     config: TlsCertMonitorConfig,
     cancel_token: CancellationToken,
     event_bus: Option<EventBus>,
+    stats_handle: Option<ModuleStatsHandle>,
 }
 
 impl TlsCertMonitorModule {
@@ -48,6 +53,7 @@ impl TlsCertMonitorModule {
             config,
             cancel_token: CancellationToken::new(),
             event_bus,
+            stats_handle: None,
         }
     }
 
@@ -310,6 +316,10 @@ impl Module for TlsCertMonitorModule {
         "tls_cert_monitor"
     }
 
+    fn set_module_stats(&mut self, handle: ModuleStatsHandle) {
+        self.stats_handle = Some(handle);
+    }
+
     fn init(&mut self) -> Result<(), AppError> {
         if self.config.check_interval_secs == 0 {
             return Err(AppError::ModuleConfig {
@@ -345,6 +355,7 @@ impl Module for TlsCertMonitorModule {
         let critical_days = self.config.critical_days;
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
+        let stats_handle = self.stats_handle.clone();
 
         let result = Self::scan_certs(
             &watch_dirs,
@@ -372,6 +383,7 @@ impl Module for TlsCertMonitorModule {
                         break;
                     }
                     _ = interval.tick() => {
+                        let scan_start = std::time::Instant::now();
                         let result = TlsCertMonitorModule::scan_certs(
                             &watch_dirs,
                             &file_extensions,
@@ -379,6 +391,10 @@ impl Module for TlsCertMonitorModule {
                             critical_days,
                             &event_bus,
                         );
+                        let scan_elapsed = scan_start.elapsed();
+                        if let Some(ref handle) = stats_handle {
+                            handle.record_scan_duration(MODULE_STATS_NAME, scan_elapsed);
+                        }
                         tracing::debug!(
                             items_scanned = result.items_scanned,
                             issues_found = result.issues_found,
@@ -744,5 +760,51 @@ mod tests {
         assert_eq!(config.critical_days, 7);
         assert_eq!(config.watch_dirs.len(), 2);
         assert_eq!(config.file_extensions.len(), 3);
+    }
+
+    #[test]
+    fn test_set_module_stats_stores_handle() {
+        let config = TlsCertMonitorConfig {
+            enabled: true,
+            check_interval_secs: 3600,
+            watch_dirs: vec![],
+            warning_days: 30,
+            critical_days: 7,
+            file_extensions: vec![".pem".to_string()],
+        };
+        let mut module = TlsCertMonitorModule::new(config, None);
+        assert!(module.stats_handle.is_none());
+        module.set_module_stats(ModuleStatsHandle::new());
+        assert!(module.stats_handle.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_periodic_scan_records_scan_duration() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let config = TlsCertMonitorConfig {
+            enabled: true,
+            check_interval_secs: 1,
+            watch_dirs: vec![tmpdir.path().to_path_buf()],
+            warning_days: 30,
+            critical_days: 7,
+            file_extensions: vec![".pem".to_string()],
+        };
+        let mut module = TlsCertMonitorModule::new(config, None);
+        module.init().unwrap();
+
+        let stats = ModuleStatsHandle::new();
+        module.set_module_stats(stats.clone());
+
+        let handle = module.start().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        module.stop().await.unwrap();
+        let _ = handle.await;
+
+        let s = stats.get(MODULE_STATS_NAME).expect("stats must exist");
+        assert!(
+            s.scan_count >= 1,
+            "scan_count={} expected >= 1",
+            s.scan_count
+        );
     }
 }
