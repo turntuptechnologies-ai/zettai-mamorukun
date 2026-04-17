@@ -1,0 +1,132 @@
+# promtool 用ユニットテスト: zettai-mamorukun.events グループ
+#
+# 対象アラート:
+#   - ZettaiCriticalEventSurge   (発火 / 非発火)
+#   - ZettaiWarningEventSurge    (発火 / 非発火)
+#   - ZettaiModuleEventSpike     (発火 / 非発火)
+#
+# 実行:
+#   promtool test rules grafana/alerts/tests/events_test.yaml
+---
+rule_files:
+  - ../prometheus_alerts.yaml
+
+evaluation_interval: 30s
+
+tests:
+  # --------------------------------------------------------------------------
+  # ZettaiCriticalEventSurge: rate(...) > 0.05/sec を 5 分継続で発火
+  # --------------------------------------------------------------------------
+  - interval: 1m
+    name: ZettaiCriticalEventSurge が高レートで発火する
+    input_series:
+      # 1 分あたり 10 件増加 = 0.1667/sec > 0.05
+      - series: 'zettai_events_by_severity_total{severity="critical",instance="host1",job="zettai-mamorukun-exporter"}'
+        values: '0+10x15'
+    alert_rule_test:
+      # 5 分の for 期間経過前は発火しない
+      - eval_time: 5m
+        alertname: ZettaiCriticalEventSurge
+        exp_alerts: []
+      # 10 分時点では for (5m) を超えて発火する
+      - eval_time: 12m
+        alertname: ZettaiCriticalEventSurge
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: zettai-mamorukun
+            exp_annotations:
+              summary: "Critical セキュリティイベントが急増しています (instance=)"
+              description: |
+                過去 5 分間の Critical イベント発生レートが 0.05/sec
+                （= 15 件/5 分）を超過しています。
+                攻撃の兆候か誤検知の可能性があるため、速やかにイベント詳細を確認してください。
+                現在値: 0.1667 events/sec
+
+  - interval: 1m
+    name: ZettaiCriticalEventSurge は低レートでは発火しない
+    input_series:
+      # 1 分あたり 1 件増加 = 0.0167/sec < 0.05
+      - series: 'zettai_events_by_severity_total{severity="critical",instance="host1",job="zettai-mamorukun-exporter"}'
+        values: '0+1x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: ZettaiCriticalEventSurge
+        exp_alerts: []
+
+  # --------------------------------------------------------------------------
+  # ZettaiWarningEventSurge: rate(...) > 0.5/sec を 10 分継続で発火
+  # --------------------------------------------------------------------------
+  - interval: 1m
+    name: ZettaiWarningEventSurge が高レートで発火する
+    input_series:
+      # 1 分あたり 60 件増加 = 1/sec > 0.5
+      - series: 'zettai_events_by_severity_total{severity="warning",instance="host1",job="zettai-mamorukun-exporter"}'
+        values: '0+60x20'
+    alert_rule_test:
+      # for (10m) 経過前は発火しない
+      - eval_time: 10m
+        alertname: ZettaiWarningEventSurge
+        exp_alerts: []
+      # for (10m) を超えて発火
+      - eval_time: 18m
+        alertname: ZettaiWarningEventSurge
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: zettai-mamorukun
+            exp_annotations:
+              summary: "Warning セキュリティイベントが継続的に増加しています"
+              description: |
+                過去 5 分間の Warning イベント発生レートが 0.5/sec
+                （= 150 件/5 分）を 10 分間継続して超過しています。
+                現在値: 1.0000 events/sec
+
+  - interval: 1m
+    name: ZettaiWarningEventSurge は中レートでは発火しない
+    input_series:
+      # 1 分あたり 10 件増加 = 0.1667/sec < 0.5
+      - series: 'zettai_events_by_severity_total{severity="warning",instance="host1",job="zettai-mamorukun-exporter"}'
+        values: '0+10x20'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: ZettaiWarningEventSurge
+        exp_alerts: []
+
+  # --------------------------------------------------------------------------
+  # ZettaiModuleEventSpike: モジュール別 rate(...) > 1/sec を 5 分継続で発火
+  # --------------------------------------------------------------------------
+  - interval: 1m
+    name: ZettaiModuleEventSpike が特定モジュールで発火する
+    input_series:
+      # 1 分あたり 120 件増加 = 2/sec > 1
+      - series: 'zettai_module_events_total{module="file_integrity",instance="host1",job="zettai-mamorukun-exporter"}'
+        values: '0+120x15'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ZettaiModuleEventSpike
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: ZettaiModuleEventSpike
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: zettai-mamorukun
+              module: file_integrity
+            exp_annotations:
+              summary: "モジュール file_integrity の検知件数が急増しています"
+              description: |
+                モジュール file_integrity の検知レートが 1/sec を超えています。
+                特定モジュールに異常なイベントが集中している可能性があります。
+                現在値: 2.0000 events/sec
+
+  - interval: 1m
+    name: ZettaiModuleEventSpike は閾値以下では発火しない
+    input_series:
+      # 1 分あたり 30 件増加 = 0.5/sec < 1
+      - series: 'zettai_module_events_total{module="file_integrity",instance="host1",job="zettai-mamorukun-exporter"}'
+        values: '0+30x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: ZettaiModuleEventSpike
+        exp_alerts: []

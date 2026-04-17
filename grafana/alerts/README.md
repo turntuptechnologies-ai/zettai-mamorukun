@@ -86,7 +86,74 @@ spec:
 promtool check rules grafana/alerts/prometheus_alerts.yaml
 ```
 
-単体テスト用のユニットテストを書く場合は `promtool test rules` を活用可能。
+## ユニットテスト
+
+`grafana/alerts/tests/` に promtool 用のユニットテスト (`*_test.yaml`) を収録している。
+10 個のアラートそれぞれについて、発火ケースと非発火ケースを最低 2 件ずつ検証する。
+
+| テストファイル | 対象グループ | アラート数 |
+|----------------|--------------|-----------|
+| `events_test.yaml` | `zettai-mamorukun.events` | 3 |
+| `scans_test.yaml` | `zettai-mamorukun.scans` | 5 |
+| `availability_test.yaml` | `zettai-mamorukun.availability` | 2 |
+
+ローカル実行:
+
+```bash
+# promtool を入手していない場合は Prometheus リリースから取得
+# https://github.com/prometheus/prometheus/releases
+
+promtool test rules grafana/alerts/tests/*.yaml
+```
+
+全テストが `SUCCESS` になることを確認する。
+
+各テストは以下をカバーする:
+
+- **発火ケース**: `for` 期間を超えた時刻でアラートが発火すること、およびラベル・アノテーションが期待値と一致すること
+- **非発火ケース**: 閾値未満の入力、あるいは `for` 期間経過前の時刻でアラートが発火しないこと
+- **ラベル条件**: `ZettaiExporterDown` の `job=~".*zettai.*"` のような正規表現マッチの分岐確認
+
+### CI への組み込み例
+
+GitHub Actions で自動検証する場合のワークフロー例を示す。
+`.github/workflows/promtool.yaml` として配置すれば、`grafana/alerts/**` の変更があった
+push / PR で自動実行される。
+
+```yaml
+name: promtool
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'grafana/alerts/**'
+      - '.github/workflows/promtool.yaml'
+  pull_request:
+    paths:
+      - 'grafana/alerts/**'
+      - '.github/workflows/promtool.yaml'
+
+jobs:
+  promtool:
+    runs-on: ubuntu-latest
+    env:
+      PROMETHEUS_VERSION: 2.55.0
+    steps:
+      - uses: actions/checkout@v4
+      - name: promtool をダウンロード
+        run: |
+          set -euo pipefail
+          curl -sSL -o prometheus.tar.gz \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+          tar -xzf prometheus.tar.gz "prometheus-${PROMETHEUS_VERSION}.linux-amd64/promtool"
+          sudo install -m 0755 "prometheus-${PROMETHEUS_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
+          promtool --version
+      - name: アラートルールの静的検証
+        run: promtool check rules grafana/alerts/prometheus_alerts.yaml
+      - name: アラートルールのユニットテスト
+        run: promtool test rules grafana/alerts/tests/*.yaml
+```
 
 ## カスタマイズのヒント
 

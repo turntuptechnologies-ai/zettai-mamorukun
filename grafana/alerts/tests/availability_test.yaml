@@ -1,0 +1,104 @@
+# promtool 用ユニットテスト: zettai-mamorukun.availability グループ
+#
+# 対象アラート:
+#   - ZettaiExporterDown         (発火 / 非発火)
+#   - ZettaiNoEventsReceived     (発火 / 非発火)
+#
+# 実行:
+#   promtool test rules grafana/alerts/tests/availability_test.yaml
+---
+rule_files:
+  - ../prometheus_alerts.yaml
+
+evaluation_interval: 30s
+
+tests:
+  # --------------------------------------------------------------------------
+  # ZettaiExporterDown: up == 0 を 2 分継続で発火
+  # --------------------------------------------------------------------------
+  - interval: 30s
+    name: ZettaiExporterDown が up==0 で発火する
+    input_series:
+      - series: 'up{job="zettai-mamorukun-exporter",instance="host1"}'
+        values: '0x20'
+    alert_rule_test:
+      # for (2m) 経過前は発火しない
+      - eval_time: 1m
+        alertname: ZettaiExporterDown
+        exp_alerts: []
+      # for (2m) を超えて発火
+      - eval_time: 5m
+        alertname: ZettaiExporterDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: zettai-mamorukun
+              instance: host1
+              job: zettai-mamorukun-exporter
+            exp_annotations:
+              summary: "zettai-mamorukun エクスポーターがダウン (instance=host1)"
+              description: |
+                Prometheus スクレイプが 2 分間失敗しています。
+                デーモン停止・ネットワーク障害・TLS 証明書エラー等の可能性があります。
+
+  - interval: 30s
+    name: ZettaiExporterDown は up==1 では発火しない
+    input_series:
+      - series: 'up{job="zettai-mamorukun-exporter",instance="host1"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ZettaiExporterDown
+        exp_alerts: []
+
+  - interval: 30s
+    name: ZettaiExporterDown は zettai を含まない job では発火しない
+    input_series:
+      # job 名に zettai を含まないためルールのセレクタにマッチしない
+      - series: 'up{job="node-exporter",instance="host1"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ZettaiExporterDown
+        exp_alerts: []
+
+  # --------------------------------------------------------------------------
+  # ZettaiNoEventsReceived: rate(total[30m])==0 かつ total>0 を 30 分継続で発火
+  # --------------------------------------------------------------------------
+  - interval: 1m
+    name: ZettaiNoEventsReceived がイベント停止で発火
+    input_series:
+      # 最初 10 までカウントアップしたあと、以降ずっと 10 を 90 分維持
+      - series: 'zettai_events_total{instance="host1",job="zettai-mamorukun-exporter"}'
+        values: '1 2 3 4 5 6 7 8 9 10 10x90'
+    alert_rule_test:
+      # 停止直後は rate ウィンドウ (30m) に古い増加が残るため rate != 0
+      - eval_time: 30m
+        alertname: ZettaiNoEventsReceived
+        exp_alerts: []
+      # 停止から 90 分経過 (rate==0 を 30m 維持後 for=30m 経過) で発火
+      - eval_time: 90m
+        alertname: ZettaiNoEventsReceived
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: zettai-mamorukun
+              instance: host1
+              job: zettai-mamorukun-exporter
+            exp_annotations:
+              summary: "イベントが 30 分間まったく発生していません"
+              description: |
+                過去 30 分間 SecurityEvent が 0 件です。
+                検知モジュールが正常動作しているか確認してください
+                （無音は平時の可能性もあるが、全モジュール停止の兆候の可能性もあり）。
+
+  - interval: 1m
+    name: ZettaiNoEventsReceived はイベント継続中では発火しない
+    input_series:
+      # 継続的に増加
+      - series: 'zettai_events_total{instance="host1",job="zettai-mamorukun-exporter"}'
+        values: '0+1x90'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: ZettaiNoEventsReceived
+        exp_alerts: []
