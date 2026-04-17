@@ -69,6 +69,135 @@ pub struct ModuleStats {
     pub scan_p99_ms: Option<u64>,
 }
 
+/// `/api/v1/stats/modules` レスポンスに対応するスナップショット構造体
+///
+/// `module-stats --save-snapshot` で保存される JSON ファイルと、
+/// `--diff` でベースラインとして読み込む JSON の形式を表す。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleStatsSnapshot {
+    /// モジュール数
+    pub total: usize,
+    /// モジュール単位の統計の配列
+    pub modules: Vec<ModuleStats>,
+}
+
+/// 単一モジュールの差分エントリ
+///
+/// ベースライン（過去スナップショット）と現時点の統計の差分を
+/// 1 モジュール分表現する。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleStatsDiffEntry {
+    /// モジュール名
+    pub module: String,
+    /// `events_total` の差分（現在値 - ベースライン値）
+    pub events_delta: i64,
+    /// `events_info` の差分
+    pub events_info_delta: i64,
+    /// `events_warning` の差分
+    pub events_warning_delta: i64,
+    /// `events_critical` の差分
+    pub events_critical_delta: i64,
+    /// `scan_count` の差分
+    pub scan_count_delta: i64,
+    /// `scan_p50_ms` の差分（両者ともに値がある場合のみ）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scan_p50_ms_delta: Option<i64>,
+    /// `scan_p95_ms` の差分
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scan_p95_ms_delta: Option<i64>,
+    /// `scan_p99_ms` の差分
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scan_p99_ms_delta: Option<i64>,
+    /// ベースラインに存在しなかった新規モジュールかどうか
+    pub is_new: bool,
+}
+
+/// モジュール統計差分レポート
+///
+/// `module-stats --diff <SNAPSHOT>` の結果を表す。
+/// `compute_diff` で生成する。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleStatsDiffReport {
+    /// ベースラインの取得時刻（わかる場合）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_taken_at: Option<String>,
+    /// 現時点の取得時刻（RFC3339）
+    pub current_taken_at: String,
+    /// `events_total` の差分合計
+    pub total_events_delta: i64,
+    /// モジュール別の差分エントリ（モジュール名昇順）
+    pub modules: Vec<ModuleStatsDiffEntry>,
+}
+
+/// ベースラインと現時点のモジュール統計から差分レポートを算出する
+///
+/// - `module_filter` が `Some(name)` の場合、その名前のモジュールのみ報告する
+/// - ベースラインのみに存在するモジュール（削除済み）はレポートに含めない
+/// - 現時点のみに存在するモジュール（新規）は `is_new = true` で報告する
+/// - 百分位点 delta は両者の値が存在する場合のみ `Some` を返す
+pub fn compute_diff(
+    baseline: &[ModuleStats],
+    current: &[ModuleStats],
+    module_filter: Option<&str>,
+) -> ModuleStatsDiffReport {
+    let baseline_map: HashMap<&str, &ModuleStats> =
+        baseline.iter().map(|s| (s.module.as_str(), s)).collect();
+
+    let mut entries: Vec<ModuleStatsDiffEntry> = Vec::new();
+    for cur in current {
+        if let Some(filter) = module_filter
+            && cur.module != filter
+        {
+            continue;
+        }
+        let base = baseline_map.get(cur.module.as_str()).copied();
+        entries.push(diff_entry(base, cur));
+    }
+    entries.sort_by(|a, b| a.module.cmp(&b.module));
+
+    let total_events_delta: i64 = entries.iter().map(|e| e.events_delta).sum();
+
+    ModuleStatsDiffReport {
+        baseline_taken_at: None,
+        current_taken_at: current_rfc3339(),
+        total_events_delta,
+        modules: entries,
+    }
+}
+
+fn diff_entry(base: Option<&ModuleStats>, cur: &ModuleStats) -> ModuleStatsDiffEntry {
+    let is_new = base.is_none();
+    let base_total = base.map(|b| b.events_total).unwrap_or(0);
+    let base_info = base.map(|b| b.events_info).unwrap_or(0);
+    let base_warn = base.map(|b| b.events_warning).unwrap_or(0);
+    let base_crit = base.map(|b| b.events_critical).unwrap_or(0);
+    let base_scan_count = base.map(|b| b.scan_count).unwrap_or(0);
+
+    ModuleStatsDiffEntry {
+        module: cur.module.clone(),
+        events_delta: u64_diff(cur.events_total, base_total),
+        events_info_delta: u64_diff(cur.events_info, base_info),
+        events_warning_delta: u64_diff(cur.events_warning, base_warn),
+        events_critical_delta: u64_diff(cur.events_critical, base_crit),
+        scan_count_delta: u64_diff(cur.scan_count, base_scan_count),
+        scan_p50_ms_delta: option_diff(cur.scan_p50_ms, base.and_then(|b| b.scan_p50_ms)),
+        scan_p95_ms_delta: option_diff(cur.scan_p95_ms, base.and_then(|b| b.scan_p95_ms)),
+        scan_p99_ms_delta: option_diff(cur.scan_p99_ms, base.and_then(|b| b.scan_p99_ms)),
+        is_new,
+    }
+}
+
+fn u64_diff(current: u64, baseline: u64) -> i64 {
+    (current as i128 - baseline as i128).clamp(i64::MIN as i128, i64::MAX as i128) as i64
+}
+
+fn option_diff(current: Option<u64>, baseline: Option<u64>) -> Option<i64> {
+    match (current, baseline) {
+        (Some(c), Some(b)) => Some(u64_diff(c, b)),
+        _ => None,
+    }
+}
+
 /// モジュール統計レジストリ内部の単一エントリ
 ///
 /// `ModuleStats`（公開・シリアライズ用）に加え、百分位点を計算するための
@@ -660,6 +789,134 @@ mod tests {
         assert!(json.contains("\"module\":\"mod_a\""));
         assert!(json.contains("\"events_total\":1"));
         assert!(json.contains("\"events_warning\":1"));
+    }
+
+    fn mk_stats(module: &str, total: u64, p50: Option<u64>, p95: Option<u64>) -> ModuleStats {
+        ModuleStats {
+            module: module.to_string(),
+            events_total: total,
+            events_info: total,
+            events_warning: 0,
+            events_critical: 0,
+            scan_count: total,
+            scan_p50_ms: p50,
+            scan_p95_ms: p95,
+            scan_p99_ms: p95,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_compute_diff_basic() {
+        let baseline = vec![
+            mk_stats("mod_a", 10, Some(5), Some(20)),
+            mk_stats("mod_b", 2, Some(1), Some(4)),
+        ];
+        let current = vec![
+            mk_stats("mod_a", 15, Some(6), Some(25)),
+            mk_stats("mod_b", 2, Some(1), Some(4)),
+        ];
+        let report = compute_diff(&baseline, &current, None);
+        assert_eq!(report.modules.len(), 2);
+        assert_eq!(report.total_events_delta, 5);
+
+        let a = report.modules.iter().find(|m| m.module == "mod_a").unwrap();
+        assert_eq!(a.events_delta, 5);
+        assert_eq!(a.events_info_delta, 5);
+        assert_eq!(a.scan_p50_ms_delta, Some(1));
+        assert_eq!(a.scan_p95_ms_delta, Some(5));
+        assert!(!a.is_new);
+
+        let b = report.modules.iter().find(|m| m.module == "mod_b").unwrap();
+        assert_eq!(b.events_delta, 0);
+        assert_eq!(b.scan_p50_ms_delta, Some(0));
+    }
+
+    #[test]
+    fn test_compute_diff_module_only_in_baseline_is_excluded() {
+        let baseline = vec![
+            mk_stats("mod_a", 10, Some(5), Some(20)),
+            mk_stats("removed_mod", 99, Some(100), Some(200)),
+        ];
+        let current = vec![mk_stats("mod_a", 11, Some(5), Some(20))];
+        let report = compute_diff(&baseline, &current, None);
+        assert_eq!(report.modules.len(), 1);
+        assert_eq!(report.modules[0].module, "mod_a");
+    }
+
+    #[test]
+    fn test_compute_diff_module_only_in_current_is_new() {
+        let baseline = vec![mk_stats("mod_a", 10, Some(5), Some(20))];
+        let current = vec![
+            mk_stats("mod_a", 10, Some(5), Some(20)),
+            mk_stats("new_mod", 7, Some(3), Some(12)),
+        ];
+        let report = compute_diff(&baseline, &current, None);
+        let new_mod = report
+            .modules
+            .iter()
+            .find(|m| m.module == "new_mod")
+            .unwrap();
+        assert!(new_mod.is_new);
+        assert_eq!(new_mod.events_delta, 7);
+        assert_eq!(new_mod.events_info_delta, 7);
+        // 百分位点はベースラインに値がないので None
+        assert_eq!(new_mod.scan_p50_ms_delta, None);
+        assert_eq!(new_mod.scan_p95_ms_delta, None);
+    }
+
+    #[test]
+    fn test_compute_diff_module_filter() {
+        let baseline = vec![
+            mk_stats("mod_a", 10, Some(5), Some(20)),
+            mk_stats("mod_b", 3, Some(2), Some(8)),
+        ];
+        let current = vec![
+            mk_stats("mod_a", 12, Some(5), Some(20)),
+            mk_stats("mod_b", 4, Some(2), Some(8)),
+        ];
+        let report = compute_diff(&baseline, &current, Some("mod_b"));
+        assert_eq!(report.modules.len(), 1);
+        assert_eq!(report.modules[0].module, "mod_b");
+        assert_eq!(report.modules[0].events_delta, 1);
+        assert_eq!(report.total_events_delta, 1);
+    }
+
+    #[test]
+    fn test_compute_diff_percentile_none_yields_none() {
+        let baseline = vec![mk_stats("mod_a", 10, Some(5), None)];
+        let current = vec![mk_stats("mod_a", 10, None, Some(20))];
+        let report = compute_diff(&baseline, &current, None);
+        let a = &report.modules[0];
+        assert_eq!(a.scan_p50_ms_delta, None);
+        assert_eq!(a.scan_p95_ms_delta, None);
+    }
+
+    #[test]
+    fn test_compute_diff_negative_delta() {
+        let baseline = vec![mk_stats("mod_a", 20, Some(50), Some(100))];
+        let current = vec![mk_stats("mod_a", 15, Some(40), Some(80))];
+        let report = compute_diff(&baseline, &current, None);
+        assert_eq!(report.modules[0].events_delta, -5);
+        assert_eq!(report.modules[0].scan_p50_ms_delta, Some(-10));
+        assert_eq!(report.modules[0].scan_p95_ms_delta, Some(-20));
+        assert_eq!(report.total_events_delta, -5);
+    }
+
+    #[test]
+    fn test_module_stats_snapshot_serde_roundtrip() {
+        let snapshot = ModuleStatsSnapshot {
+            total: 2,
+            modules: vec![
+                mk_stats("mod_a", 1, Some(10), Some(20)),
+                mk_stats("mod_b", 2, Some(5), Some(15)),
+            ],
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let parsed: ModuleStatsSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.total, 2);
+        assert_eq!(parsed.modules.len(), 2);
+        assert_eq!(parsed.modules[0].module, "mod_a");
     }
 
     #[tokio::test]

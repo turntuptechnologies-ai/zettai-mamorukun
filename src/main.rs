@@ -186,6 +186,12 @@ enum Commands {
         /// API トークン
         #[arg(long)]
         api_token: Option<String>,
+        /// 現在のモジュール統計をスナップショットとして指定 JSON ファイルに保存する
+        #[arg(long, value_name = "PATH", conflicts_with = "diff")]
+        save_snapshot: Option<PathBuf>,
+        /// 指定スナップショットファイルと現在の統計を比較して差分を表示する
+        #[arg(long, value_name = "SNAPSHOT")]
+        diff: Option<PathBuf>,
     },
     /// API トークンの SHA-256 ハッシュを生成する
     HashToken {
@@ -1004,8 +1010,109 @@ fn run_module_stats_command(
     api_token: Option<&str>,
     module: Option<&str>,
     json: bool,
+    save_snapshot: Option<&Path>,
+    diff: Option<&Path>,
 ) {
-    use zettai_mamorukun::core::module_stats::ModuleStats;
+    use zettai_mamorukun::core::module_stats::{ModuleStats, ModuleStatsSnapshot, compute_diff};
+
+    if save_snapshot.is_some() && diff.is_some() {
+        eprintln!("エラー: --save-snapshot と --diff は同時に指定できません");
+        process::exit(2);
+    }
+
+    if let Some(path) = save_snapshot {
+        let body = match http_get_api(api_url, "/api/v1/stats/modules", api_token) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("エラー: {}", e);
+                process::exit(1);
+            }
+        };
+        let snapshot: ModuleStatsSnapshot = match serde_json::from_str(&body) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("エラー: レスポンスの解析に失敗しました: {}", e);
+                println!("{}", body);
+                process::exit(1);
+            }
+        };
+        let pretty = match serde_json::to_string_pretty(&snapshot) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("エラー: JSON のシリアライズに失敗しました: {}", e);
+                process::exit(1);
+            }
+        };
+        if let Err(e) = std::fs::write(path, format!("{}\n", pretty)) {
+            eprintln!(
+                "エラー: スナップショットの保存に失敗しました ({}): {}",
+                path.display(),
+                e
+            );
+            process::exit(1);
+        }
+        eprintln!(
+            "スナップショットを保存しました: {} ({} モジュール)",
+            path.display(),
+            snapshot.total
+        );
+        return;
+    }
+
+    if let Some(snapshot_path) = diff {
+        let baseline_text = match std::fs::read_to_string(snapshot_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "エラー: スナップショットファイルの読み込みに失敗しました ({}): {}",
+                    snapshot_path.display(),
+                    e
+                );
+                process::exit(1);
+            }
+        };
+        let baseline: ModuleStatsSnapshot = match serde_json::from_str(&baseline_text) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "エラー: スナップショットファイルの解析に失敗しました: {}",
+                    e
+                );
+                process::exit(1);
+            }
+        };
+
+        let body = match http_get_api(api_url, "/api/v1/stats/modules", api_token) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("エラー: {}", e);
+                process::exit(1);
+            }
+        };
+        let current: ModuleStatsSnapshot = match serde_json::from_str(&body) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("エラー: レスポンスの解析に失敗しました: {}", e);
+                println!("{}", body);
+                process::exit(1);
+            }
+        };
+
+        let report = compute_diff(&baseline.modules, &current.modules, module);
+
+        if json {
+            match serde_json::to_string_pretty(&report) {
+                Ok(s) => println!("{}", s),
+                Err(e) => {
+                    eprintln!("エラー: JSON のシリアライズに失敗しました: {}", e);
+                    process::exit(1);
+                }
+            }
+        } else {
+            print!("{}", format_module_stats_diff(snapshot_path, &report));
+        }
+        return;
+    }
 
     let path = match module {
         Some(name) => format!("/api/v1/stats/modules/{}", name),
@@ -1311,6 +1418,70 @@ fn format_module_stats_single(stats: &zettai_mamorukun::core::module_stats::Modu
         }
     }
     out
+}
+
+/// モジュール統計差分レポートをテキスト形式でフォーマットする
+fn format_module_stats_diff(
+    snapshot_path: &Path,
+    report: &zettai_mamorukun::core::module_stats::ModuleStatsDiffReport,
+) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "=== モジュール実行統計差分レポート ===");
+    let _ = writeln!(out, "スナップショット: {}", snapshot_path.display());
+    if let Some(ts) = &report.baseline_taken_at {
+        let _ = writeln!(out, "ベースライン時刻: {}", ts);
+    }
+    let _ = writeln!(out, "現在時刻:         {}", report.current_taken_at);
+    let _ = writeln!(
+        out,
+        "合計イベント差分: {}",
+        format_signed(report.total_events_delta)
+    );
+    let _ = writeln!(out);
+
+    if report.modules.is_empty() {
+        let _ = writeln!(out, "対象モジュールの差分はありません。");
+        return out;
+    }
+
+    let _ = writeln!(
+        out,
+        "  {:<24} {:>12} {:>10} {:>10} {:>10}",
+        "モジュール", "events_delta", "P50_delta", "P95_delta", "P99_delta"
+    );
+    for entry in &report.modules {
+        let marker = if entry.is_new { "*" } else { " " };
+        let _ = writeln!(
+            out,
+            "{} {:<24} {:>12} {:>10} {:>10} {:>10}",
+            marker,
+            entry.module,
+            format_signed(entry.events_delta),
+            format_signed_opt(entry.scan_p50_ms_delta),
+            format_signed_opt(entry.scan_p95_ms_delta),
+            format_signed_opt(entry.scan_p99_ms_delta),
+        );
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "* = 新規モジュール（ベースラインに存在せず）");
+    out
+}
+
+fn format_signed(v: i64) -> String {
+    if v > 0 {
+        format!("+{}", v)
+    } else {
+        v.to_string()
+    }
+}
+
+fn format_signed_opt(v: Option<i64>) -> String {
+    match v {
+        Some(n) => format_signed(n),
+        None => "-".to_string(),
+    }
 }
 
 fn resolve_encryption_key(config_path: &Path) -> zettai_mamorukun::encryption::EncryptionKey {
@@ -1903,8 +2074,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             json,
             api_url,
             api_token,
+            save_snapshot,
+            diff,
         }) => {
-            run_module_stats_command(api_url, api_token.as_deref(), module.as_deref(), *json);
+            run_module_stats_command(
+                api_url,
+                api_token.as_deref(),
+                module.as_deref(),
+                *json,
+                save_snapshot.as_deref(),
+                diff.as_deref(),
+            );
             return Ok(());
         }
         Some(Commands::Archive { action }) => {
