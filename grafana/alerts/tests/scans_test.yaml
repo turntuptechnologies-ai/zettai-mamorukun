@@ -1,0 +1,207 @@
+# promtool 用ユニットテスト: zettai-mamorukun.scans グループ
+#
+# 対象アラート:
+#   - ZettaiInitialScanIssuesFound     (発火 / 非発火)
+#   - ZettaiInitialScanIssuesCritical  (発火 / 非発火)
+#   - ZettaiScanDurationP95High        (発火 / 非発火)
+#   - ZettaiScanDurationP99Critical    (発火 / 非発火)
+#   - ZettaiScanStalled                (発火 / 非発火)
+#
+# 実行:
+#   promtool test rules grafana/alerts/tests/scans_test.yaml
+---
+rule_files:
+  - ../prometheus_alerts.yaml
+
+evaluation_interval: 30s
+
+tests:
+  # --------------------------------------------------------------------------
+  # ZettaiInitialScanIssuesFound: gauge > 0 を 1 分継続で発火
+  # ZettaiInitialScanIssuesCritical: gauge >= 5 を 1 分継続で発火
+  # （同じメトリクスを値 3 で与えると Found のみ発火、5 で両方発火）
+  # --------------------------------------------------------------------------
+  - interval: 30s
+    name: ZettaiInitialScanIssuesFound のみ発火（値=3）
+    input_series:
+      - series: 'zettai_module_initial_scan_issues_found{module="file_integrity",instance="host1",job="zettai-mamorukun-exporter"}'
+        values: '3x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ZettaiInitialScanIssuesFound
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: zettai-mamorukun
+              module: file_integrity
+              instance: host1
+              job: zettai-mamorukun-exporter
+            exp_annotations:
+              summary: "起動時スキャンで問題を検知: file_integrity"
+              description: |
+                モジュール file_integrity の起動時スキャンで
+                3 件の問題が検知されました。
+                監視対象ファイル・設定の改ざんや異常の可能性があります。
+      # Critical 側は値 3 では発火しない
+      - eval_time: 3m
+        alertname: ZettaiInitialScanIssuesCritical
+        exp_alerts: []
+
+  - interval: 30s
+    name: ZettaiInitialScanIssuesCritical が発火（値=7）
+    input_series:
+      - series: 'zettai_module_initial_scan_issues_found{module="sudoers_monitor",instance="host1",job="zettai-mamorukun-exporter"}'
+        values: '7x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ZettaiInitialScanIssuesCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: zettai-mamorukun
+              module: sudoers_monitor
+              instance: host1
+              job: zettai-mamorukun-exporter
+            exp_annotations:
+              summary: "起動時スキャンで多数の問題を検知: sudoers_monitor"
+              description: |
+                モジュール sudoers_monitor の起動時スキャンで
+                7 件（閾値 5）以上の問題が検知されました。
+                即時の調査対応が必要です。
+
+  - interval: 30s
+    name: ZettaiInitialScanIssuesFound が値=0 では発火しない
+    input_series:
+      - series: 'zettai_module_initial_scan_issues_found{module="file_integrity",instance="host1",job="zettai-mamorukun-exporter"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ZettaiInitialScanIssuesFound
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: ZettaiInitialScanIssuesCritical
+        exp_alerts: []
+
+  # --------------------------------------------------------------------------
+  # ZettaiScanDurationP95High: quantile="0.95" が 5 秒超を 15 分継続で発火
+  # --------------------------------------------------------------------------
+  - interval: 1m
+    name: ZettaiScanDurationP95High が発火する
+    input_series:
+      - series: 'zettai_module_scan_duration_seconds{module="process_monitor",quantile="0.95",instance="host1",job="zettai-mamorukun-exporter"}'
+        values: '7x20'
+    alert_rule_test:
+      # for (15m) 経過前は発火しない
+      - eval_time: 14m
+        alertname: ZettaiScanDurationP95High
+        exp_alerts: []
+      # for (15m) を超えて発火
+      - eval_time: 17m
+        alertname: ZettaiScanDurationP95High
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: zettai-mamorukun
+              module: process_monitor
+              instance: host1
+              job: zettai-mamorukun-exporter
+              quantile: "0.95"
+            exp_annotations:
+              summary: "モジュール process_monitor のスキャン P95 が 5 秒を超過"
+              description: |
+                モジュール process_monitor の定期スキャン実行時間
+                P95 が 15 分間継続して 5 秒を超えています。
+                パフォーマンス劣化・リソース枯渇の兆候の可能性があります。
+                現在値: 7.00 sec
+
+  - interval: 1m
+    name: ZettaiScanDurationP95High は閾値以下では発火しない
+    input_series:
+      - series: 'zettai_module_scan_duration_seconds{module="process_monitor",quantile="0.95",instance="host1",job="zettai-mamorukun-exporter"}'
+        values: '3x20'
+    alert_rule_test:
+      - eval_time: 17m
+        alertname: ZettaiScanDurationP95High
+        exp_alerts: []
+
+  # --------------------------------------------------------------------------
+  # ZettaiScanDurationP99Critical: quantile="0.99" が 30 秒超を 15 分継続で発火
+  # --------------------------------------------------------------------------
+  - interval: 1m
+    name: ZettaiScanDurationP99Critical が発火する
+    input_series:
+      - series: 'zettai_module_scan_duration_seconds{module="package_verify",quantile="0.99",instance="host1",job="zettai-mamorukun-exporter"}'
+        values: '35x20'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: ZettaiScanDurationP99Critical
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: ZettaiScanDurationP99Critical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: zettai-mamorukun
+              module: package_verify
+              instance: host1
+              job: zettai-mamorukun-exporter
+              quantile: "0.99"
+            exp_annotations:
+              summary: "モジュール package_verify のスキャン P99 が 30 秒を超過"
+              description: |
+                モジュール package_verify の定期スキャン実行時間
+                P99 が 15 分間継続して 30 秒を超えています。
+                即時の調査が必要です（I/O 遅延・大量ファイル増加等）。
+                現在値: 35.00 sec
+
+  - interval: 1m
+    name: ZettaiScanDurationP99Critical は閾値以下では発火しない
+    input_series:
+      - series: 'zettai_module_scan_duration_seconds{module="package_verify",quantile="0.99",instance="host1",job="zettai-mamorukun-exporter"}'
+        values: '10x20'
+    alert_rule_test:
+      - eval_time: 17m
+        alertname: ZettaiScanDurationP99Critical
+        exp_alerts: []
+
+  # --------------------------------------------------------------------------
+  # ZettaiScanStalled: rate(count[10m])==0 かつ count > 0 を 15 分継続で発火
+  # カウンタが増加後に停止したケースを模擬する
+  # --------------------------------------------------------------------------
+  - interval: 1m
+    name: ZettaiScanStalled がカウンタ停止で発火
+    input_series:
+      # 初期に 5 までカウントアップしたあと、以降はずっと同じ値（停止）を 40 分間維持
+      - series: 'zettai_module_scan_duration_seconds_count{module="file_integrity",instance="host1",job="zettai-mamorukun-exporter"}'
+        values: '1 2 3 4 5 5x35'
+    alert_rule_test:
+      # 停止直後は rate ウィンドウ (10m) に古いサンプルが残るため rate != 0
+      - eval_time: 10m
+        alertname: ZettaiScanStalled
+        exp_alerts: []
+      # 停止後 25 分経過 (rate 10m=0 が 15m 継続) で発火
+      - eval_time: 30m
+        alertname: ZettaiScanStalled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: zettai-mamorukun
+              module: file_integrity
+              instance: host1
+              job: zettai-mamorukun-exporter
+            exp_annotations:
+              summary: "モジュール file_integrity の定期スキャンが停止しています"
+              description: |
+                モジュール file_integrity の定期スキャン実行回数が
+                過去 10 分間増加していません。モジュール停止またはハング中の可能性があります。
+
+  - interval: 1m
+    name: ZettaiScanStalled はカウンタ増加中では発火しない
+    input_series:
+      # カウンタは継続的に増加
+      - series: 'zettai_module_scan_duration_seconds_count{module="file_integrity",instance="host1",job="zettai-mamorukun-exporter"}'
+        values: '0+1x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ZettaiScanStalled
+        exp_alerts: []
