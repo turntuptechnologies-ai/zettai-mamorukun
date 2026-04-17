@@ -18,6 +18,10 @@ Linux サーバ上でデーモンとして動作し（systemd で管理）、あ
 
 [Releases](https://github.com/turntuptechnologies-ai/zettai-mamorukun/releases) からバイナリをダウンロードしてください。
 
+## 観測性
+
+Prometheus エクスポーター（`/metrics`）が公開するモジュール統計メトリクスを可視化するための Grafana ダッシュボードを [`grafana/`](grafana/) に用意しています。詳細は [`grafana/README.md`](grafana/README.md) を参照してください。
+
 ## ビルド
 
 ```bash
