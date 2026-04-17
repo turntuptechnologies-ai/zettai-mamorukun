@@ -159,11 +159,12 @@
 - [x] **定期スキャン実行時間計測の追加展開（suid_sgid / kernel_module / container_namespace / tls_cert）** — v1.53.0 (#311, PR #312)
 - [x] **定期スキャン実行時間計測の展開 Wave 3（ssh_key_monitor / systemd_service / network_monitor / pkg_repo_monitor）** — v1.54.0 (#313, PR #314)
 - [x] **定期スキャン実行時間計測の展開 Wave 4（sudoers / sshd_config / dns / shell_config / cron / security_files）** — v1.55.0 (#315, PR #316)
+- [x] **Prometheus メトリクス可視化用の Grafana ダッシュボード例** — v1.56.0 (#318, PR #319)
 
 ## 候補
 
-1. **モジュール統計 Prometheus 公開の Grafana ダッシュボード例** — `grafana/` ディレクトリに `zettai_module_*` メトリクス（イベント件数、P50/P95/P99 ヒストグラムを含む）を使った Grafana ダッシュボード JSON を追加する。対象モジュールが Wave 4 完了で 17 に到達したため、代表的なパネル設計の参考価値が高まった
-2. **定期スキャン計測の展開 Wave 5（残りの設定監視系モジュール）** — `set_module_stats` フックを残るファイル/設定監視系モジュール（at_job_monitor、security_files_monitor 以外の /etc/security 系、capabilities_monitor、pam_monitor、kernel_params、firewall_monitor、mac_monitor、user_account 等）のうち定期スキャン型のものへさらに展開する
+1. **定期スキャン計測の展開 Wave 5（残りの設定監視系モジュール）** — `set_module_stats` フックを残るファイル/設定監視系モジュール（at_job_monitor、capabilities_monitor、pam_monitor、kernel_params、firewall_monitor、mac_monitor、user_account 等）のうち定期スキャン型のものへさらに展開する
+2. **Grafana ダッシュボードのアラートルール付属** — v1.56.0 で追加したダッシュボード JSON に加え、Alertmanager 連携用のアラートルール（Critical イベント急増・P95 逸脱・起動時スキャン失敗等）のサンプル YAML を `grafana/alerts/` に追加する
 3. **module-stats CLI の統計比較モード** — `--diff` オプションで 2 時点の統計差分を表示し、期間内に増加した検知件数・百分位点の変化を可視化する
 4. **module-stats 履歴スナップショット機能** — `record_scan_duration` による最新 1024 サンプルに加え、1h/1d など時間粒度で集計したスナップショットを保持し、長期傾向（1日/1週間の P95 推移）を REST API で取得可能にする
 5. **clippy ベースライン整備** — main ブランチで発生している 97 件の clippy 警告 / 2 件のエラーを段階的に解消し、CI で `cargo clippy --all-targets -- -D warnings` を強制できる状態にする
