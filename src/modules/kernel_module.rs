@@ -8,10 +8,14 @@
 
 use crate::config::KernelModuleConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
+use crate::core::module_stats::ModuleStatsHandle;
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
 use std::collections::{BTreeMap, HashSet};
 use tokio_util::sync::CancellationToken;
+
+/// モジュール識別子（`ModuleStats` に登録する統計上のモジュール名）
+pub(crate) const MODULE_STATS_NAME: &str = "カーネルモジュール監視モジュール";
 
 /// `/proc/modules` の各行をパースした結果
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +37,7 @@ pub struct KernelModuleMonitor {
     config: KernelModuleConfig,
     event_bus: Option<EventBus>,
     cancel_token: CancellationToken,
+    stats_handle: Option<ModuleStatsHandle>,
 }
 
 impl KernelModuleMonitor {
@@ -42,6 +47,7 @@ impl KernelModuleMonitor {
             config,
             event_bus,
             cancel_token: CancellationToken::new(),
+            stats_handle: None,
         }
     }
 
@@ -120,6 +126,10 @@ impl Module for KernelModuleMonitor {
         "kernel_module"
     }
 
+    fn set_module_stats(&mut self, handle: ModuleStatsHandle) {
+        self.stats_handle = Some(handle);
+    }
+
     fn init(&mut self) -> Result<(), AppError> {
         if self.config.scan_interval_secs == 0 {
             return Err(AppError::ModuleConfig {
@@ -149,6 +159,7 @@ impl Module for KernelModuleMonitor {
         let scan_interval_secs = self.config.scan_interval_secs;
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
+        let stats_handle = self.stats_handle.clone();
 
         let handle = tokio::spawn(async move {
             let mut interval =
@@ -165,6 +176,7 @@ impl Module for KernelModuleMonitor {
                         break;
                     }
                     _ = interval.tick() => {
+                        let scan_start = std::time::Instant::now();
                         let content = match KernelModuleMonitor::read_proc_modules() {
                             Ok(c) => c,
                             Err(e) => {
@@ -231,6 +243,11 @@ impl Module for KernelModuleMonitor {
 
                         // ベースラインを更新
                         current_baseline = current;
+
+                        let scan_elapsed = scan_start.elapsed();
+                        if let Some(ref handle) = stats_handle {
+                            handle.record_scan_duration(MODULE_STATS_NAME, scan_elapsed);
+                        }
                     }
                 }
             }
@@ -480,5 +497,42 @@ ip_tables 32768 0 - Live 0xffffffffc0800000";
         assert!(result.items_scanned > 0);
         assert_eq!(result.issues_found, 0);
         assert!(result.summary.contains("件を検出しました"));
+    }
+
+    #[test]
+    fn test_set_module_stats_stores_handle() {
+        let config = KernelModuleConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+        };
+        let mut module = KernelModuleMonitor::new(config, None);
+        assert!(module.stats_handle.is_none());
+        module.set_module_stats(ModuleStatsHandle::new());
+        assert!(module.stats_handle.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_periodic_scan_records_scan_duration() {
+        let config = KernelModuleConfig {
+            enabled: true,
+            scan_interval_secs: 1,
+        };
+        let mut module = KernelModuleMonitor::new(config, None);
+        module.init().unwrap();
+
+        let stats = ModuleStatsHandle::new();
+        module.set_module_stats(stats.clone());
+
+        let handle = module.start().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        module.stop().await.unwrap();
+        let _ = handle.await;
+
+        let s = stats.get(MODULE_STATS_NAME).expect("stats must exist");
+        assert!(
+            s.scan_count >= 1,
+            "scan_count={} expected >= 1",
+            s.scan_count
+        );
     }
 }
