@@ -1,0 +1,161 @@
+# Prometheus Alertmanager 連携用のアラートルールサンプル
+#
+# zettai-mamorukun の Prometheus エクスポーター（/metrics）が公開する
+# メトリクスを監視し、インシデント発生時に Alertmanager へ通知するための
+# ルール例。実環境に導入する際は各閾値・for 期間・ラベルを自環境の運用に
+# 合わせて調整すること。
+#
+# 読み込み方法:
+#   - Prometheus 単体: prometheus.yml の rule_files に本ファイルを追加
+#   - Prometheus Operator: PrometheusRule CRD に書き写すか kustomize で取り込む
+#
+# 検証:
+#   promtool check rules grafana/alerts/prometheus_alerts.yaml
+---
+groups:
+  - name: zettai-mamorukun.events
+    interval: 30s
+    rules:
+      - alert: ZettaiCriticalEventSurge
+        expr: sum(rate(zettai_events_by_severity_total{severity="critical"}[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          service: zettai-mamorukun
+        annotations:
+          summary: "Critical セキュリティイベントが急増しています (instance={{ $labels.instance }})"
+          description: |
+            過去 5 分間の Critical イベント発生レートが 0.05/sec
+            （= 15 件/5 分）を超過しています。
+            攻撃の兆候か誤検知の可能性があるため、速やかにイベント詳細を確認してください。
+            現在値: {{ $value | printf "%.4f" }} events/sec
+
+      - alert: ZettaiWarningEventSurge
+        expr: sum(rate(zettai_events_by_severity_total{severity="warning"}[5m])) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+          service: zettai-mamorukun
+        annotations:
+          summary: "Warning セキュリティイベントが継続的に増加しています"
+          description: |
+            過去 5 分間の Warning イベント発生レートが 0.5/sec
+            （= 150 件/5 分）を 10 分間継続して超過しています。
+            現在値: {{ $value | printf "%.4f" }} events/sec
+
+      - alert: ZettaiModuleEventSpike
+        expr: |
+          topk(3,
+            sum by (module) (rate(zettai_module_events_total[5m]))
+          ) > 1
+        for: 5m
+        labels:
+          severity: warning
+          service: zettai-mamorukun
+        annotations:
+          summary: "モジュール {{ $labels.module }} の検知件数が急増しています"
+          description: |
+            モジュール {{ $labels.module }} の検知レートが 1/sec を超えています。
+            特定モジュールに異常なイベントが集中している可能性があります。
+            現在値: {{ $value | printf "%.4f" }} events/sec
+
+  - name: zettai-mamorukun.scans
+    interval: 1m
+    rules:
+      - alert: ZettaiInitialScanIssuesFound
+        expr: zettai_module_initial_scan_issues_found > 0
+        for: 1m
+        labels:
+          severity: warning
+          service: zettai-mamorukun
+        annotations:
+          summary: "起動時スキャンで問題を検知: {{ $labels.module }}"
+          description: |
+            モジュール {{ $labels.module }} の起動時スキャンで
+            {{ $value }} 件の問題が検知されました。
+            監視対象ファイル・設定の改ざんや異常の可能性があります。
+
+      - alert: ZettaiInitialScanIssuesCritical
+        expr: zettai_module_initial_scan_issues_found >= 5
+        for: 1m
+        labels:
+          severity: critical
+          service: zettai-mamorukun
+        annotations:
+          summary: "起動時スキャンで多数の問題を検知: {{ $labels.module }}"
+          description: |
+            モジュール {{ $labels.module }} の起動時スキャンで
+            {{ $value }} 件（閾値 5）以上の問題が検知されました。
+            即時の調査対応が必要です。
+
+      - alert: ZettaiScanDurationP95High
+        expr: zettai_module_scan_duration_seconds{quantile="0.95"} > 5
+        for: 15m
+        labels:
+          severity: warning
+          service: zettai-mamorukun
+        annotations:
+          summary: "モジュール {{ $labels.module }} のスキャン P95 が 5 秒を超過"
+          description: |
+            モジュール {{ $labels.module }} の定期スキャン実行時間
+            P95 が 15 分間継続して 5 秒を超えています。
+            パフォーマンス劣化・リソース枯渇の兆候の可能性があります。
+            現在値: {{ $value | printf "%.2f" }} sec
+
+      - alert: ZettaiScanDurationP99Critical
+        expr: zettai_module_scan_duration_seconds{quantile="0.99"} > 30
+        for: 15m
+        labels:
+          severity: critical
+          service: zettai-mamorukun
+        annotations:
+          summary: "モジュール {{ $labels.module }} のスキャン P99 が 30 秒を超過"
+          description: |
+            モジュール {{ $labels.module }} の定期スキャン実行時間
+            P99 が 15 分間継続して 30 秒を超えています。
+            即時の調査が必要です（I/O 遅延・大量ファイル増加等）。
+            現在値: {{ $value | printf "%.2f" }} sec
+
+      - alert: ZettaiScanStalled
+        expr: |
+          rate(zettai_module_scan_duration_seconds_count[10m]) == 0
+          and on(module) zettai_module_scan_duration_seconds_count > 0
+        for: 15m
+        labels:
+          severity: critical
+          service: zettai-mamorukun
+        annotations:
+          summary: "モジュール {{ $labels.module }} の定期スキャンが停止しています"
+          description: |
+            モジュール {{ $labels.module }} の定期スキャン実行回数が
+            過去 10 分間増加していません。モジュール停止またはハング中の可能性があります。
+
+  - name: zettai-mamorukun.availability
+    interval: 30s
+    rules:
+      - alert: ZettaiExporterDown
+        expr: up{job=~".*zettai.*"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: zettai-mamorukun
+        annotations:
+          summary: "zettai-mamorukun エクスポーターがダウン (instance={{ $labels.instance }})"
+          description: |
+            Prometheus スクレイプが 2 分間失敗しています。
+            デーモン停止・ネットワーク障害・TLS 証明書エラー等の可能性があります。
+
+      - alert: ZettaiNoEventsReceived
+        expr: |
+          rate(zettai_events_total[30m]) == 0
+          and zettai_events_total > 0
+        for: 30m
+        labels:
+          severity: warning
+          service: zettai-mamorukun
+        annotations:
+          summary: "イベントが 30 分間まったく発生していません"
+          description: |
+            過去 30 分間 SecurityEvent が 0 件です。
+            検知モジュールが正常動作しているか確認してください
+            （無音は平時の可能性もあるが、全モジュール停止の兆候の可能性もあり）。
