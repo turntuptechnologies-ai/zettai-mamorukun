@@ -10,6 +10,7 @@
 
 use crate::config::AtJobMonitorConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
+use crate::core::module_stats::ModuleStatsHandle;
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
 use sha2::{Digest, Sha256};
@@ -17,6 +18,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 use walkdir::WalkDir;
+
+/// モジュール識別子（`ModuleStats` に登録する統計上のモジュール名）
+pub(crate) const MODULE_STATS_NAME: &str = "at/batch ジョブ監視モジュール";
 
 /// at ファイル変更レポート
 struct ChangeReport {
@@ -60,6 +64,7 @@ pub struct AtJobMonitorModule {
     baseline: Option<HashMap<PathBuf, String>>,
     cancel_token: CancellationToken,
     event_bus: Option<EventBus>,
+    stats_handle: Option<ModuleStatsHandle>,
 }
 
 impl AtJobMonitorModule {
@@ -70,6 +75,7 @@ impl AtJobMonitorModule {
             baseline: None,
             cancel_token: CancellationToken::new(),
             event_bus,
+            stats_handle: None,
         }
     }
 
@@ -207,6 +213,7 @@ impl Module for AtJobMonitorModule {
         let scan_interval_secs = self.config.scan_interval_secs;
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
+        let stats_handle = self.stats_handle.clone();
 
         let handle = tokio::spawn(async move {
             let mut interval =
@@ -221,8 +228,13 @@ impl Module for AtJobMonitorModule {
                         break;
                     }
                     _ = interval.tick() => {
+                        let scan_start = std::time::Instant::now();
                         let current = AtJobMonitorModule::scan_files(&watch_paths);
                         let report = AtJobMonitorModule::detect_changes(&baseline, &current);
+                        let scan_elapsed = scan_start.elapsed();
+                        if let Some(ref handle) = stats_handle {
+                            handle.record_scan_duration(MODULE_STATS_NAME, scan_elapsed);
+                        }
 
                         if report.has_changes() {
                             for path in &report.modified {
@@ -320,6 +332,10 @@ impl Module for AtJobMonitorModule {
     async fn stop(&mut self) -> Result<(), AppError> {
         self.cancel_token.cancel();
         Ok(())
+    }
+
+    fn set_module_stats(&mut self, handle: ModuleStatsHandle) {
+        self.stats_handle = Some(handle);
     }
 }
 
@@ -741,5 +757,48 @@ mod tests {
         let result = module.initial_scan().await.unwrap();
         assert_eq!(result.items_scanned, 0);
         assert_eq!(result.issues_found, 0);
+    }
+
+    #[test]
+    fn test_set_module_stats_stores_handle() {
+        let config = AtJobMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            watch_paths: vec![],
+        };
+        let mut module = AtJobMonitorModule::new(config, None);
+        assert!(module.stats_handle.is_none());
+        module.set_module_stats(ModuleStatsHandle::new());
+        assert!(module.stats_handle.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_periodic_scan_records_scan_duration() {
+        let dir = tempfile::tempdir().unwrap();
+        let file1 = dir.path().join("job1");
+        std::fs::write(&file1, "echo hello").unwrap();
+
+        let config = AtJobMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 1,
+            watch_paths: vec![dir.path().to_path_buf()],
+        };
+        let mut module = AtJobMonitorModule::new(config, None);
+        module.init().unwrap();
+
+        let stats = ModuleStatsHandle::new();
+        module.set_module_stats(stats.clone());
+
+        let handle = module.start().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        module.stop().await.unwrap();
+        let _ = handle.await;
+
+        let s = stats.get(MODULE_STATS_NAME).expect("stats must exist");
+        assert!(
+            s.scan_count >= 1,
+            "scan_count={} expected >= 1",
+            s.scan_count
+        );
     }
 }

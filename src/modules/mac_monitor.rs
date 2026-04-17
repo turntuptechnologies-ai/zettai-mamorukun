@@ -11,12 +11,16 @@
 
 use crate::config::MacMonitorConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
+use crate::core::module_stats::ModuleStatsHandle;
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
+
+/// モジュール識別子（`ModuleStats` に登録する統計上のモジュール名）
+pub(crate) const MODULE_STATS_NAME: &str = "SELinux / AppArmor 監視モジュール";
 
 /// MAC スナップショット — スキャン時点の状態を保持する
 struct MacSnapshot {
@@ -35,6 +39,7 @@ pub struct MacMonitorModule {
     config: MacMonitorConfig,
     event_bus: Option<EventBus>,
     cancel_token: CancellationToken,
+    stats_handle: Option<ModuleStatsHandle>,
 }
 
 impl MacMonitorModule {
@@ -44,6 +49,7 @@ impl MacMonitorModule {
             config,
             event_bus,
             cancel_token: CancellationToken::new(),
+            stats_handle: None,
         }
     }
 
@@ -433,6 +439,7 @@ impl Module for MacMonitorModule {
         let config = self.config.clone();
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
+        let stats_handle = self.stats_handle.clone();
 
         let handle = tokio::spawn(async move {
             let mut baseline = baseline;
@@ -448,8 +455,13 @@ impl Module for MacMonitorModule {
                         break;
                     }
                     _ = interval.tick() => {
+                        let scan_start = std::time::Instant::now();
                         let current = MacMonitorModule::scan(&config);
                         MacMonitorModule::detect_and_report(&baseline, &current, &event_bus);
+                        let scan_elapsed = scan_start.elapsed();
+                        if let Some(ref handle) = stats_handle {
+                            handle.record_scan_duration(MODULE_STATS_NAME, scan_elapsed);
+                        }
                         // ベースラインを更新
                         baseline = current;
                     }
@@ -503,6 +515,10 @@ impl Module for MacMonitorModule {
     async fn stop(&mut self) -> Result<(), AppError> {
         self.cancel_token.cancel();
         Ok(())
+    }
+
+    fn set_module_stats(&mut self, handle: ModuleStatsHandle) {
+        self.stats_handle = Some(handle);
     }
 }
 
@@ -926,6 +942,53 @@ mod tests {
         assert_eq!(
             result.snapshot.get("apparmor:/usr/bin/firefox"),
             Some(&"complain".to_string())
+        );
+    }
+
+    #[test]
+    fn test_set_module_stats_stores_handle() {
+        let config = MacMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            selinux_config_paths: vec![],
+            selinux_policy_dirs: vec![],
+            selinux_enforce_path: PathBuf::from("/nonexistent"),
+            apparmor_config_paths: vec![],
+            apparmor_profiles_path: PathBuf::from("/nonexistent"),
+        };
+        let mut module = MacMonitorModule::new(config, None);
+        assert!(module.stats_handle.is_none());
+        module.set_module_stats(ModuleStatsHandle::new());
+        assert!(module.stats_handle.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_periodic_scan_records_scan_duration() {
+        let config = MacMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 1,
+            selinux_config_paths: vec![],
+            selinux_policy_dirs: vec![],
+            selinux_enforce_path: PathBuf::from("/nonexistent"),
+            apparmor_config_paths: vec![],
+            apparmor_profiles_path: PathBuf::from("/nonexistent"),
+        };
+        let mut module = MacMonitorModule::new(config, None);
+        module.init().unwrap();
+
+        let stats = ModuleStatsHandle::new();
+        module.set_module_stats(stats.clone());
+
+        let handle = module.start().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        module.stop().await.unwrap();
+        let _ = handle.await;
+
+        let s = stats.get(MODULE_STATS_NAME).expect("stats must exist");
+        assert!(
+            s.scan_count >= 1,
+            "scan_count={} expected >= 1",
+            s.scan_count
         );
     }
 }
