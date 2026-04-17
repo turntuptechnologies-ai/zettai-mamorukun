@@ -10,6 +10,7 @@
 
 use crate::config::CronMonitorConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
+use crate::core::module_stats::ModuleStatsHandle;
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
 use inotify::{Inotify, WatchDescriptor, WatchMask};
@@ -19,6 +20,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use walkdir::WalkDir;
+
+/// モジュール識別子（`ModuleStats` に登録する統計上のモジュール名）
+pub(crate) const MODULE_STATS_NAME: &str = "Cron ジョブ改ざん検知モジュール";
 
 /// Cron ファイル変更レポート
 struct ChangeReport {
@@ -42,6 +46,7 @@ pub struct CronMonitorModule {
     baseline: Option<HashMap<PathBuf, String>>,
     cancel_token: CancellationToken,
     event_bus: Option<EventBus>,
+    stats_handle: Option<ModuleStatsHandle>,
 }
 
 impl CronMonitorModule {
@@ -52,6 +57,7 @@ impl CronMonitorModule {
             baseline: None,
             cancel_token: CancellationToken::new(),
             event_bus,
+            stats_handle: None,
         }
     }
 
@@ -339,6 +345,7 @@ impl Module for CronMonitorModule {
         let event_bus = self.event_bus.clone();
         let use_inotify = self.config.use_inotify;
         let inotify_debounce_ms = self.config.inotify_debounce_ms;
+        let stats_handle = self.stats_handle.clone();
 
         // inotify の初期化（有効時のみ）
         let inotify_state = if use_inotify {
@@ -382,6 +389,7 @@ impl Module for CronMonitorModule {
                             break;
                         }
                         _ = interval.tick() => {
+                            let scan_start = Instant::now();
                             let current = CronMonitorModule::scan_files(&watch_paths);
                             let report = CronMonitorModule::detect_changes(&baseline, &current);
 
@@ -390,6 +398,10 @@ impl Module for CronMonitorModule {
                                 baseline = current;
                             } else {
                                 tracing::debug!("cron ファイルの変更はありません");
+                            }
+                            let scan_elapsed = scan_start.elapsed();
+                            if let Some(ref handle) = stats_handle {
+                                handle.record_scan_duration(MODULE_STATS_NAME, scan_elapsed);
                             }
                         }
                         _ = poll_interval.tick() => {
@@ -448,6 +460,7 @@ impl Module for CronMonitorModule {
                             break;
                         }
                         _ = interval.tick() => {
+                            let scan_start = Instant::now();
                             let current = CronMonitorModule::scan_files(&watch_paths);
                             let report = CronMonitorModule::detect_changes(&baseline, &current);
 
@@ -457,6 +470,10 @@ impl Module for CronMonitorModule {
                             } else {
                                 tracing::debug!("cron ファイルの変更はありません");
                             }
+                            let scan_elapsed = scan_start.elapsed();
+                            if let Some(ref handle) = stats_handle {
+                                handle.record_scan_duration(MODULE_STATS_NAME, scan_elapsed);
+                            }
                         }
                     }
                 }
@@ -464,6 +481,10 @@ impl Module for CronMonitorModule {
         });
 
         Ok(handle)
+    }
+
+    fn set_module_stats(&mut self, handle: ModuleStatsHandle) {
+        self.stats_handle = Some(handle);
     }
 
     async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {
@@ -1030,5 +1051,53 @@ mod tests {
 
         assert_eq!(debounce_map.len(), 1);
         assert!(debounce_map.contains_key(&PathBuf::from("/etc/cron.d/recent")));
+    }
+
+    #[test]
+    fn test_set_module_stats_stores_handle() {
+        let config = CronMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            watch_paths: vec![],
+            use_inotify: false,
+            inotify_debounce_ms: 500,
+        };
+        let mut module = CronMonitorModule::new(config, None);
+        assert!(module.stats_handle.is_none());
+        module.set_module_stats(ModuleStatsHandle::new());
+        assert!(module.stats_handle.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_periodic_scan_records_scan_duration() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let cron_file = tmpdir.path().join("testjob");
+        std::fs::write(&cron_file, "* * * * * root echo test\n").unwrap();
+
+        let config = CronMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 1,
+            watch_paths: vec![cron_file],
+            // inotify は CI 環境依存のため非ホットパスのループ側を計測する
+            use_inotify: false,
+            inotify_debounce_ms: 500,
+        };
+        let mut module = CronMonitorModule::new(config, None);
+        module.init().unwrap();
+
+        let stats = ModuleStatsHandle::new();
+        module.set_module_stats(stats.clone());
+
+        let handle = module.start().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        module.stop().await.unwrap();
+        let _ = handle.await;
+
+        let s = stats.get(MODULE_STATS_NAME).expect("stats must exist");
+        assert!(
+            s.scan_count >= 1,
+            "scan_count={} expected >= 1",
+            s.scan_count
+        );
     }
 }

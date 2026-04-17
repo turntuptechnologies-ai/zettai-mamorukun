@@ -10,6 +10,7 @@
 
 use crate::config::SecurityFilesMonitorConfig;
 use crate::core::event::{EventBus, SecurityEvent, Severity};
+use crate::core::module_stats::ModuleStatsHandle;
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
 use sha2::{Digest, Sha256};
@@ -17,6 +18,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 use walkdir::WalkDir;
+
+/// モジュール識別子（`ModuleStats` に登録する統計上のモジュール名）
+pub(crate) const MODULE_STATS_NAME: &str = "/etc/security/ 監視モジュール";
 
 /// ファイルごとのスナップショット
 struct FileSnapshot {
@@ -49,6 +53,7 @@ pub struct SecurityFilesMonitorModule {
     config: SecurityFilesMonitorConfig,
     cancel_token: CancellationToken,
     event_bus: Option<EventBus>,
+    stats_handle: Option<ModuleStatsHandle>,
 }
 
 impl SecurityFilesMonitorModule {
@@ -58,6 +63,7 @@ impl SecurityFilesMonitorModule {
             config,
             cancel_token: CancellationToken::new(),
             event_bus,
+            stats_handle: None,
         }
     }
 
@@ -406,6 +412,7 @@ impl Module for SecurityFilesMonitorModule {
         let scan_interval_secs = self.config.scan_interval_secs;
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
+        let stats_handle = self.stats_handle.clone();
 
         // 初回の危険パターンチェック
         let mut reported_dangers = HashSet::new();
@@ -426,6 +433,7 @@ impl Module for SecurityFilesMonitorModule {
                         break;
                     }
                     _ = interval.tick() => {
+                        let scan_start = std::time::Instant::now();
                         let current = SecurityFilesMonitorModule::scan_files(&watch_paths);
                         let changed = SecurityFilesMonitorModule::detect_and_report(&baseline, &current, &event_bus);
 
@@ -436,6 +444,10 @@ impl Module for SecurityFilesMonitorModule {
                         } else {
                             tracing::debug!("セキュリティ設定ファイルの変更はありません");
                             SecurityFilesMonitorModule::check_dangerous_patterns(&watch_paths, &mut reported_dangers, &event_bus);
+                        }
+                        let scan_elapsed = scan_start.elapsed();
+                        if let Some(ref handle) = stats_handle {
+                            handle.record_scan_duration(MODULE_STATS_NAME, scan_elapsed);
                         }
                     }
                 }
@@ -448,6 +460,10 @@ impl Module for SecurityFilesMonitorModule {
     async fn stop(&mut self) -> Result<(), AppError> {
         self.cancel_token.cancel();
         Ok(())
+    }
+
+    fn set_module_stats(&mut self, handle: ModuleStatsHandle) {
+        self.stats_handle = Some(handle);
     }
 
     async fn initial_scan(&self) -> Result<InitialScanResult, AppError> {
@@ -986,5 +1002,48 @@ mod tests {
         let result = module.initial_scan().await.unwrap();
         assert_eq!(result.items_scanned, 0);
         assert_eq!(result.issues_found, 0);
+    }
+
+    #[test]
+    fn test_set_module_stats_stores_handle() {
+        let config = SecurityFilesMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 60,
+            watch_paths: vec![],
+        };
+        let mut module = SecurityFilesMonitorModule::new(config, None);
+        assert!(module.stats_handle.is_none());
+        module.set_module_stats(ModuleStatsHandle::new());
+        assert!(module.stats_handle.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_periodic_scan_records_scan_duration() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let limits_path = tmpdir.path().join("limits.conf");
+        std::fs::write(&limits_path, "* soft nofile 1024\n").unwrap();
+
+        let config = SecurityFilesMonitorConfig {
+            enabled: true,
+            scan_interval_secs: 1,
+            watch_paths: vec![tmpdir.path().to_path_buf()],
+        };
+        let mut module = SecurityFilesMonitorModule::new(config, None);
+        module.init().unwrap();
+
+        let stats = ModuleStatsHandle::new();
+        module.set_module_stats(stats.clone());
+
+        let handle = module.start().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        module.stop().await.unwrap();
+        let _ = handle.await;
+
+        let s = stats.get(MODULE_STATS_NAME).expect("stats must exist");
+        assert!(
+            s.scan_count >= 1,
+            "scan_count={} expected >= 1",
+            s.scan_count
+        );
     }
 }
