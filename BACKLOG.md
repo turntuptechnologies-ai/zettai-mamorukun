@@ -161,10 +161,11 @@
 - [x] **定期スキャン実行時間計測の展開 Wave 4（sudoers / sshd_config / dns / shell_config / cron / security_files）** — v1.55.0 (#315, PR #316)
 - [x] **Prometheus メトリクス可視化用の Grafana ダッシュボード例** — v1.56.0 (#318, PR #319)
 - [x] **定期スキャン実行時間計測の展開 Wave 5（at_job / capabilities / pam / kernel_params / firewall / mac / user_account）** — v1.57.0 (#320, PR #321)
+- [x] **Grafana ダッシュボードのアラートルールサンプル** — v1.58.0 (#322, PR #323)
 
 ## 候補
 
-1. **Grafana ダッシュボードのアラートルール付属** — v1.56.0 で追加したダッシュボード JSON に加え、Alertmanager 連携用のアラートルール（Critical イベント急増・P95 逸脱・起動時スキャン失敗等）のサンプル YAML を `grafana/alerts/` に追加する
+1. **Grafana アラートルールの promtool ユニットテスト付属** — `grafana/alerts/tests/` に `promtool test rules` 用のテスト YAML を追加し、サンプル入力に対して期待通りのアラートが発火するかを CI で検証できるようにする
 2. **module-stats CLI の統計比較モード** — `--diff` オプションで 2 時点の統計差分を表示し、期間内に増加した検知件数・百分位点の変化を可視化する
 3. **module-stats 履歴スナップショット機能** — `record_scan_duration` による最新 1024 サンプルに加え、1h/1d など時間粒度で集計したスナップショットを保持し、長期傾向（1日/1週間の P95 推移）を REST API で取得可能にする
 4. **clippy ベースライン整備** — main ブランチで発生している clippy 警告・エラー（現状 ~100 件）を段階的に解消し、CI で `cargo clippy --all-targets -- -D warnings` を強制できる状態にする
