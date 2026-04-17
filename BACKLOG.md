@@ -162,13 +162,14 @@
 - [x] **Prometheus メトリクス可視化用の Grafana ダッシュボード例** — v1.56.0 (#318, PR #319)
 - [x] **定期スキャン実行時間計測の展開 Wave 5（at_job / capabilities / pam / kernel_params / firewall / mac / user_account）** — v1.57.0 (#320, PR #321)
 - [x] **Grafana ダッシュボードのアラートルールサンプル** — v1.58.0 (#322, PR #323)
+- [x] **Grafana アラートルールの promtool ユニットテスト付属** — v1.59.0 (#324, PR #325)
 
 ## 候補
 
-1. **Grafana アラートルールの promtool ユニットテスト付属** — `grafana/alerts/tests/` に `promtool test rules` 用のテスト YAML を追加し、サンプル入力に対して期待通りのアラートが発火するかを CI で検証できるようにする
+1. **promtool ユニットテスト用の GitHub Actions ワークフロー追加** — PAT の workflow スコープ制約で v1.59.0 では README のサンプル掲載にとどめた `.github/workflows/promtool.yaml` を、適切な権限で追加し `grafana/alerts/**` の変更時に自動検証する
 2. **module-stats CLI の統計比較モード** — `--diff` オプションで 2 時点の統計差分を表示し、期間内に増加した検知件数・百分位点の変化を可視化する
 3. **module-stats 履歴スナップショット機能** — `record_scan_duration` による最新 1024 サンプルに加え、1h/1d など時間粒度で集計したスナップショットを保持し、長期傾向（1日/1週間の P95 推移）を REST API で取得可能にする
-4. **clippy ベースライン整備** — main ブランチで発生している clippy 警告・エラー（現状 ~100 件）を段階的に解消し、CI で `cargo clippy --all-targets -- -D warnings` を強制できる状態にする
+4. **clippy ベースライン整備** — main ブランチで発生している clippy 警告・エラーを段階的に解消し、CI で `cargo clippy --all-targets -- -D warnings` を強制できる状態にする
 5. **Webhook 統合テスト強化** — wiremock を使った Webhook 送信の統合テスト（リトライ動作、4xx/5xx エラー処理、タイムアウト等）を追加する
 6. **モジュール依存関係管理** — モジュール間の依存関係を定義し、起動順序の制御やカスケード停止を可能にする仕組み
 7. **ダッシュボード機能拡張** — TUI ダッシュボードにイベント詳細表示、フィルタリング、イベント検索機能を追加する
