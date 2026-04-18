@@ -1013,7 +1013,9 @@ fn run_module_stats_command(
     save_snapshot: Option<&Path>,
     diff: Option<&Path>,
 ) {
-    use zettai_mamorukun::core::module_stats::{ModuleStats, ModuleStatsSnapshot, compute_diff};
+    use zettai_mamorukun::core::module_stats::{
+        ModuleStats, ModuleStatsSnapshot, compute_diff, current_rfc3339,
+    };
 
     if save_snapshot.is_some() && diff.is_some() {
         eprintln!("エラー: --save-snapshot と --diff は同時に指定できません");
@@ -1028,7 +1030,7 @@ fn run_module_stats_command(
                 process::exit(1);
             }
         };
-        let snapshot: ModuleStatsSnapshot = match serde_json::from_str(&body) {
+        let mut snapshot: ModuleStatsSnapshot = match serde_json::from_str(&body) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("エラー: レスポンスの解析に失敗しました: {}", e);
@@ -1036,6 +1038,7 @@ fn run_module_stats_command(
                 process::exit(1);
             }
         };
+        snapshot.taken_at = Some(current_rfc3339());
         let pretty = match serde_json::to_string_pretty(&snapshot) {
             Ok(s) => s,
             Err(e) => {
@@ -1098,7 +1101,12 @@ fn run_module_stats_command(
             }
         };
 
-        let report = compute_diff(&baseline.modules, &current.modules, module);
+        let report = compute_diff(
+            &baseline.modules,
+            &current.modules,
+            module,
+            baseline.taken_at.clone(),
+        );
 
         if json {
             match serde_json::to_string_pretty(&report) {

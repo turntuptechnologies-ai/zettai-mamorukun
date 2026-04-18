@@ -73,8 +73,14 @@ pub struct ModuleStats {
 ///
 /// `module-stats --save-snapshot` で保存される JSON ファイルと、
 /// `--diff` でベースラインとして読み込む JSON の形式を表す。
+///
+/// `taken_at` は v1.61.0 以降で書き出される RFC3339 形式の保存時刻。
+/// 古い v1.60.0 形式のスナップショット（フィールド無し）も `None` で読み込める。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModuleStatsSnapshot {
+    /// スナップショット保存時刻（RFC3339 UTC 秒精度）。古い形式では存在しない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taken_at: Option<String>,
     /// モジュール数
     pub total: usize,
     /// モジュール単位の統計の配列
@@ -135,10 +141,12 @@ pub struct ModuleStatsDiffReport {
 /// - ベースラインのみに存在するモジュール（削除済み）はレポートに含めない
 /// - 現時点のみに存在するモジュール（新規）は `is_new = true` で報告する
 /// - 百分位点 delta は両者の値が存在する場合のみ `Some` を返す
+/// - `baseline_taken_at` はベースラインスナップショットの `taken_at` を伝搬させる
 pub fn compute_diff(
     baseline: &[ModuleStats],
     current: &[ModuleStats],
     module_filter: Option<&str>,
+    baseline_taken_at: Option<String>,
 ) -> ModuleStatsDiffReport {
     let baseline_map: HashMap<&str, &ModuleStats> =
         baseline.iter().map(|s| (s.module.as_str(), s)).collect();
@@ -158,7 +166,7 @@ pub fn compute_diff(
     let total_events_delta: i64 = entries.iter().map(|e| e.events_delta).sum();
 
     ModuleStatsDiffReport {
-        baseline_taken_at: None,
+        baseline_taken_at,
         current_taken_at: current_rfc3339(),
         total_events_delta,
         modules: entries,
@@ -402,7 +410,7 @@ fn percentile_sorted(sorted_samples: &[u64], p: f64) -> u64 {
 }
 
 /// 現在時刻を RFC3339 形式の文字列で返す（UTC 秒精度）
-fn current_rfc3339() -> String {
+pub fn current_rfc3339() -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
@@ -816,7 +824,7 @@ mod tests {
             mk_stats("mod_a", 15, Some(6), Some(25)),
             mk_stats("mod_b", 2, Some(1), Some(4)),
         ];
-        let report = compute_diff(&baseline, &current, None);
+        let report = compute_diff(&baseline, &current, None, None);
         assert_eq!(report.modules.len(), 2);
         assert_eq!(report.total_events_delta, 5);
 
@@ -839,7 +847,7 @@ mod tests {
             mk_stats("removed_mod", 99, Some(100), Some(200)),
         ];
         let current = vec![mk_stats("mod_a", 11, Some(5), Some(20))];
-        let report = compute_diff(&baseline, &current, None);
+        let report = compute_diff(&baseline, &current, None, None);
         assert_eq!(report.modules.len(), 1);
         assert_eq!(report.modules[0].module, "mod_a");
     }
@@ -851,7 +859,7 @@ mod tests {
             mk_stats("mod_a", 10, Some(5), Some(20)),
             mk_stats("new_mod", 7, Some(3), Some(12)),
         ];
-        let report = compute_diff(&baseline, &current, None);
+        let report = compute_diff(&baseline, &current, None, None);
         let new_mod = report
             .modules
             .iter()
@@ -875,7 +883,7 @@ mod tests {
             mk_stats("mod_a", 12, Some(5), Some(20)),
             mk_stats("mod_b", 4, Some(2), Some(8)),
         ];
-        let report = compute_diff(&baseline, &current, Some("mod_b"));
+        let report = compute_diff(&baseline, &current, Some("mod_b"), None);
         assert_eq!(report.modules.len(), 1);
         assert_eq!(report.modules[0].module, "mod_b");
         assert_eq!(report.modules[0].events_delta, 1);
@@ -886,7 +894,7 @@ mod tests {
     fn test_compute_diff_percentile_none_yields_none() {
         let baseline = vec![mk_stats("mod_a", 10, Some(5), None)];
         let current = vec![mk_stats("mod_a", 10, None, Some(20))];
-        let report = compute_diff(&baseline, &current, None);
+        let report = compute_diff(&baseline, &current, None, None);
         let a = &report.modules[0];
         assert_eq!(a.scan_p50_ms_delta, None);
         assert_eq!(a.scan_p95_ms_delta, None);
@@ -896,7 +904,7 @@ mod tests {
     fn test_compute_diff_negative_delta() {
         let baseline = vec![mk_stats("mod_a", 20, Some(50), Some(100))];
         let current = vec![mk_stats("mod_a", 15, Some(40), Some(80))];
-        let report = compute_diff(&baseline, &current, None);
+        let report = compute_diff(&baseline, &current, None, None);
         assert_eq!(report.modules[0].events_delta, -5);
         assert_eq!(report.modules[0].scan_p50_ms_delta, Some(-10));
         assert_eq!(report.modules[0].scan_p95_ms_delta, Some(-20));
@@ -906,6 +914,7 @@ mod tests {
     #[test]
     fn test_module_stats_snapshot_serde_roundtrip() {
         let snapshot = ModuleStatsSnapshot {
+            taken_at: None,
             total: 2,
             modules: vec![
                 mk_stats("mod_a", 1, Some(10), Some(20)),
@@ -917,6 +926,52 @@ mod tests {
         assert_eq!(parsed.total, 2);
         assert_eq!(parsed.modules.len(), 2);
         assert_eq!(parsed.modules[0].module, "mod_a");
+        assert_eq!(parsed.taken_at, None);
+    }
+
+    #[test]
+    fn test_module_stats_snapshot_serde_with_taken_at() {
+        let snapshot = ModuleStatsSnapshot {
+            taken_at: Some("2026-04-18T12:34:56Z".into()),
+            total: 1,
+            modules: vec![mk_stats("mod_a", 1, Some(10), Some(20))],
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(
+            json.contains("\"taken_at\":\"2026-04-18T12:34:56Z\""),
+            "taken_at field missing from JSON: {}",
+            json
+        );
+        let parsed: ModuleStatsSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.taken_at.as_deref(), Some("2026-04-18T12:34:56Z"));
+        assert_eq!(parsed.total, 1);
+    }
+
+    #[test]
+    fn test_module_stats_snapshot_serde_without_taken_at_backward_compat() {
+        // v1.60.0 形式: taken_at フィールドが存在しない JSON
+        let json = r#"{"total":1,"modules":[{"module":"mod_a","events_total":0,"events_info":0,"events_warning":0,"events_critical":0,"scan_count":0}]}"#;
+        let parsed: ModuleStatsSnapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.taken_at, None);
+        assert_eq!(parsed.total, 1);
+        assert_eq!(parsed.modules.len(), 1);
+        assert_eq!(parsed.modules[0].module, "mod_a");
+    }
+
+    #[test]
+    fn test_compute_diff_propagates_baseline_taken_at() {
+        let baseline = vec![mk_stats("mod_a", 10, Some(5), Some(20))];
+        let current = vec![mk_stats("mod_a", 11, Some(5), Some(20))];
+        let report = compute_diff(
+            &baseline,
+            &current,
+            None,
+            Some("2026-04-18T10:00:00Z".into()),
+        );
+        assert_eq!(
+            report.baseline_taken_at.as_deref(),
+            Some("2026-04-18T10:00:00Z")
+        );
     }
 
     #[tokio::test]
