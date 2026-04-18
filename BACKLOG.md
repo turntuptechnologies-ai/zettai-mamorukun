@@ -169,10 +169,11 @@
 - [x] **module-stats diff warn ログのテスト整備** — v1.63.0 (#333, PR #334)
 - [x] **NTP / 時刻同期設定監視モジュール** — v1.64.0 (#335, PR #336)
 - [x] **ntp_config_monitor の監査ルール拡充** — v1.65.0 (#337, PR #338)
+- [x] **clippy ベースライン整備（Rust 1.95.0 新規 lint 対応）** — v1.66.0 (#339, PR #340)
 
 ## 候補
 
-1. **clippy ベースライン整備** — main ブランチで発生している clippy 警告 + エラー（Rust 1.95.0 の新規 lint 由来が大半）を段階的に解消し、CI で `cargo clippy --all-targets -- -D warnings` を強制できる状態にする。特に `src/core/module_manager.rs` の `absurd_extreme_comparisons` エラーは deny 指定で即修正可能
+1. **CI ワークフローでの clippy -D warnings 強制化** — v1.66.0 で現状の警告はゼロにしたので、GitHub Actions で `cargo clippy --all-targets -- -D warnings` / `cargo fmt --check` を PR 時に自動実行する `.github/workflows/ci.yaml` を整備する（promtool.yaml と同様、PAT の workflow スコープ問題があれば README 記載にとどめる）
 2. **ntp_config_monitor の inotify 連携** — 定期ポーリングだけでなく inotify ベースでリアルタイムに改ざんを検知する。`cron_monitor` の inotify 実装パターンを参考にする
 3. **ntp_config_monitor の追加監査ルール** — v1.65.0 で追加した allow / bindcmdaddress / restrict / driftfile に加え、chrony の `cmdport` / `port` が既定以外の場合、ntpsigndsocket 公開、`keys` ファイル不在による NTP 認証無効化などを検知する
 4. **promtool ユニットテスト用の GitHub Actions ワークフロー追加** — PAT の workflow スコープ制約で v1.59.0 では README のサンプル掲載にとどめた `.github/workflows/promtool.yaml` を、適切な権限で追加し `grafana/alerts/**` の変更時に自動検証する
