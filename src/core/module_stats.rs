@@ -163,7 +163,9 @@ pub fn compute_diff(
     }
     entries.sort_by(|a, b| a.module.cmp(&b.module));
 
-    let total_events_delta: i64 = entries.iter().map(|e| e.events_delta).sum();
+    let total_events_delta: i64 = entries
+        .iter()
+        .fold(0i64, |acc, e| acc.saturating_add(e.events_delta));
 
     ModuleStatsDiffReport {
         baseline_taken_at,
@@ -180,28 +182,85 @@ fn diff_entry(base: Option<&ModuleStats>, cur: &ModuleStats) -> ModuleStatsDiffE
     let base_warn = base.map(|b| b.events_warning).unwrap_or(0);
     let base_crit = base.map(|b| b.events_critical).unwrap_or(0);
     let base_scan_count = base.map(|b| b.scan_count).unwrap_or(0);
+    let module_name = cur.module.as_str();
 
     ModuleStatsDiffEntry {
         module: cur.module.clone(),
-        events_delta: u64_diff(cur.events_total, base_total),
-        events_info_delta: u64_diff(cur.events_info, base_info),
-        events_warning_delta: u64_diff(cur.events_warning, base_warn),
-        events_critical_delta: u64_diff(cur.events_critical, base_crit),
-        scan_count_delta: u64_diff(cur.scan_count, base_scan_count),
-        scan_p50_ms_delta: option_diff(cur.scan_p50_ms, base.and_then(|b| b.scan_p50_ms)),
-        scan_p95_ms_delta: option_diff(cur.scan_p95_ms, base.and_then(|b| b.scan_p95_ms)),
-        scan_p99_ms_delta: option_diff(cur.scan_p99_ms, base.and_then(|b| b.scan_p99_ms)),
+        events_delta: u64_diff(cur.events_total, base_total, module_name, "events_total"),
+        events_info_delta: u64_diff(cur.events_info, base_info, module_name, "events_info"),
+        events_warning_delta: u64_diff(
+            cur.events_warning,
+            base_warn,
+            module_name,
+            "events_warning",
+        ),
+        events_critical_delta: u64_diff(
+            cur.events_critical,
+            base_crit,
+            module_name,
+            "events_critical",
+        ),
+        scan_count_delta: u64_diff(cur.scan_count, base_scan_count, module_name, "scan_count"),
+        scan_p50_ms_delta: option_diff(
+            cur.scan_p50_ms,
+            base.and_then(|b| b.scan_p50_ms),
+            module_name,
+            "scan_p50_ms",
+        ),
+        scan_p95_ms_delta: option_diff(
+            cur.scan_p95_ms,
+            base.and_then(|b| b.scan_p95_ms),
+            module_name,
+            "scan_p95_ms",
+        ),
+        scan_p99_ms_delta: option_diff(
+            cur.scan_p99_ms,
+            base.and_then(|b| b.scan_p99_ms),
+            module_name,
+            "scan_p99_ms",
+        ),
         is_new,
     }
 }
 
-fn u64_diff(current: u64, baseline: u64) -> i64 {
-    (current as i128 - baseline as i128).clamp(i64::MIN as i128, i64::MAX as i128) as i64
+/// `u64` 値の差分を `i64` として算出する。
+///
+/// 差分が `i64` の表現範囲外になる場合は `i64::MAX` / `i64::MIN` にサチュレートし、
+/// `tracing::warn!` で警告ログを出力する（モジュール名・メトリック名・current/baseline 付き）。
+/// 実運用のイベント件数ではほぼ発生しないが、防御的に wrap-around を防ぐ。
+fn u64_diff(current: u64, baseline: u64, module: &str, metric: &str) -> i64 {
+    let diff = current as i128 - baseline as i128;
+    if diff > i64::MAX as i128 {
+        tracing::warn!(
+            module = module,
+            metric = metric,
+            current = current,
+            baseline = baseline,
+            "module-stats diff saturated at i64::MAX"
+        );
+        i64::MAX
+    } else if diff < i64::MIN as i128 {
+        tracing::warn!(
+            module = module,
+            metric = metric,
+            current = current,
+            baseline = baseline,
+            "module-stats diff saturated at i64::MIN"
+        );
+        i64::MIN
+    } else {
+        diff as i64
+    }
 }
 
-fn option_diff(current: Option<u64>, baseline: Option<u64>) -> Option<i64> {
+fn option_diff(
+    current: Option<u64>,
+    baseline: Option<u64>,
+    module: &str,
+    metric: &str,
+) -> Option<i64> {
     match (current, baseline) {
-        (Some(c), Some(b)) => Some(u64_diff(c, b)),
+        (Some(c), Some(b)) => Some(u64_diff(c, b, module, metric)),
         _ => None,
     }
 }
@@ -972,6 +1031,77 @@ mod tests {
             report.baseline_taken_at.as_deref(),
             Some("2026-04-18T10:00:00Z")
         );
+    }
+
+    #[test]
+    fn test_compute_diff_saturates_at_i64_max_when_overflowing_positive() {
+        // baseline=0, current=u64::MAX → 差分は u64::MAX (≒ 1.8e19) で i64::MAX (≒ 9.2e18) を超える
+        let baseline = vec![mk_stats("mod_a", 0, None, None)];
+        let current = vec![mk_stats("mod_a", u64::MAX, None, None)];
+        let report = compute_diff(&baseline, &current, None, None);
+        assert_eq!(report.modules.len(), 1);
+        let a = &report.modules[0];
+        assert_eq!(a.events_delta, i64::MAX);
+        assert_eq!(a.events_info_delta, i64::MAX);
+        assert_eq!(a.scan_count_delta, i64::MAX);
+    }
+
+    #[test]
+    fn test_compute_diff_saturates_at_i64_min_when_overflowing_negative() {
+        // baseline=u64::MAX, current=0 → 差分は -(u64::MAX) で i64::MIN を下回る
+        let baseline = vec![mk_stats("mod_a", u64::MAX, None, None)];
+        let current = vec![mk_stats("mod_a", 0, None, None)];
+        let report = compute_diff(&baseline, &current, None, None);
+        let a = &report.modules[0];
+        assert_eq!(a.events_delta, i64::MIN);
+        assert_eq!(a.events_info_delta, i64::MIN);
+        assert_eq!(a.scan_count_delta, i64::MIN);
+    }
+
+    #[test]
+    fn test_compute_diff_total_events_delta_saturates_on_sum_overflow() {
+        // i64::MAX/2 + 100 の delta が複数モジュールで発生し、合計が i64::MAX を超過するケース。
+        // saturating_add で i64::MAX に clamp されることを確認する。
+        let big = (i64::MAX / 2) as u64 + 100;
+        let baseline = vec![
+            mk_stats("mod_a", 0, None, None),
+            mk_stats("mod_b", 0, None, None),
+            mk_stats("mod_c", 0, None, None),
+        ];
+        let current = vec![
+            mk_stats("mod_a", big, None, None),
+            mk_stats("mod_b", big, None, None),
+            mk_stats("mod_c", big, None, None),
+        ];
+        let report = compute_diff(&baseline, &current, None, None);
+        // 3 モジュール × (i64::MAX/2 + 100) ≒ 1.5 × i64::MAX なので i64::MAX に saturate
+        assert_eq!(report.total_events_delta, i64::MAX);
+    }
+
+    #[test]
+    fn test_compute_diff_total_events_delta_normal_sum_unaffected() {
+        // 通常範囲での合計は saturating_add 化しても結果が変わらないことを確認する
+        let baseline = vec![
+            mk_stats("mod_a", 100, None, None),
+            mk_stats("mod_b", 200, None, None),
+        ];
+        let current = vec![
+            mk_stats("mod_a", 150, None, None),
+            mk_stats("mod_b", 250, None, None),
+        ];
+        let report = compute_diff(&baseline, &current, None, None);
+        assert_eq!(report.total_events_delta, 100);
+    }
+
+    #[test]
+    fn test_compute_diff_saturates_percentile_delta() {
+        // 百分位点 delta も同様に saturate することを確認する
+        let baseline = vec![mk_stats("mod_a", 0, Some(u64::MAX), None)];
+        let current = vec![mk_stats("mod_a", 0, Some(0), None)];
+        let report = compute_diff(&baseline, &current, None, None);
+        let a = &report.modules[0];
+        // u64::MAX → 0 の差分は i64::MIN にサチュレート
+        assert_eq!(a.scan_p50_ms_delta, Some(i64::MIN));
     }
 
     #[tokio::test]
