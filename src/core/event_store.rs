@@ -2719,12 +2719,12 @@ mod tests {
         assert_eq!(runtime.batch_size, 50);
         assert_eq!(runtime.batch_interval_secs, 10);
         assert_eq!(runtime.cleanup_interval_hours, 12);
-        assert_eq!(runtime.archive_enabled, true);
+        assert!(runtime.archive_enabled);
         assert_eq!(runtime.archive_after_days, 7);
         assert_eq!(runtime.archive_dir, "/tmp/archive");
         assert_eq!(runtime.archive_interval_hours, 12);
-        assert_eq!(runtime.archive_compress, false);
-        assert_eq!(runtime.archive_rotation_enabled, true);
+        assert!(!runtime.archive_compress);
+        assert!(runtime.archive_rotation_enabled);
         assert_eq!(runtime.archive_max_age_days, 180);
         assert_eq!(runtime.archive_max_total_mb, 1024);
         assert_eq!(runtime.archive_max_files, 100);
@@ -3039,7 +3039,7 @@ mod tests {
         init_database(&conn).unwrap();
 
         let events: Vec<SecurityEvent> = (0..10)
-            .map(|i| SecurityEvent::new("ev", Severity::Info, "mod", &format!("イベント{}", i)))
+            .map(|i| SecurityEvent::new("ev", Severity::Info, "mod", format!("イベント{}", i)))
             .collect();
         EventStore::insert_events(&mut conn, &events).unwrap();
 
@@ -3063,7 +3063,7 @@ mod tests {
         init_database(&conn).unwrap();
 
         let events: Vec<SecurityEvent> = (0..5)
-            .map(|i| SecurityEvent::new("ev", Severity::Info, "mod", &format!("イベント{}", i)))
+            .map(|i| SecurityEvent::new("ev", Severity::Info, "mod", format!("イベント{}", i)))
             .collect();
         EventStore::insert_events(&mut conn, &events).unwrap();
 

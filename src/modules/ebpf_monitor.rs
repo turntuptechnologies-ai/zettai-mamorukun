@@ -645,8 +645,10 @@ mod tests {
 
     #[test]
     fn test_init_zero_interval() {
-        let mut config = EbpfMonitorConfig::default();
-        config.scan_interval_secs = 0;
+        let config = EbpfMonitorConfig {
+            scan_interval_secs: 0,
+            ..Default::default()
+        };
         let mut module = EbpfMonitorModule::new(config, None);
         assert!(module.init().is_err());
     }

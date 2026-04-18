@@ -610,7 +610,7 @@ mod tests {
         let file_path = dir.path().join("honeypot.txt");
         fs::write(&file_path, "canary token").unwrap();
 
-        let snapshot = HoneypotMonitorModule::scan_paths(&[file_path.clone()]);
+        let snapshot = HoneypotMonitorModule::scan_paths(std::slice::from_ref(&file_path));
         assert!(snapshot.contains_key(&file_path.display().to_string()));
         let value = &snapshot[&file_path.display().to_string()];
         assert!(value.starts_with("size="));

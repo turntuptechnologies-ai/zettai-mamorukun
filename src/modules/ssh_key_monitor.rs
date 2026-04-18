@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn test_build_file_snapshot_deterministic() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "ssh-rsa AAAAB3... user@host\n").unwrap();
+        writeln!(tmpfile, "ssh-rsa AAAAB3... user@host").unwrap();
         let snapshot1 = build_file_snapshot(&tmpfile.path().to_path_buf()).unwrap();
         let snapshot2 = build_file_snapshot(&tmpfile.path().to_path_buf()).unwrap();
         assert_eq!(snapshot1.file_hash, snapshot2.file_hash);
@@ -416,7 +416,7 @@ mod tests {
     #[test]
     fn test_scan_files_with_single_file() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "ssh-rsa AAAAB3... user@host\n").unwrap();
+        writeln!(tmpfile, "ssh-rsa AAAAB3... user@host").unwrap();
         let path = tmpfile.path().to_path_buf();
 
         let watch_paths = vec![path.clone()];
@@ -442,7 +442,7 @@ mod tests {
     #[test]
     fn test_detect_no_changes() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "ssh-rsa AAAAB3... user@host\n").unwrap();
+        writeln!(tmpfile, "ssh-rsa AAAAB3... user@host").unwrap();
         let path = tmpfile.path().to_path_buf();
 
         let watch_paths = vec![path];
@@ -581,7 +581,7 @@ mod tests {
     #[tokio::test]
     async fn test_start_and_stop() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "ssh-rsa AAAAB3... user@host\n").unwrap();
+        writeln!(tmpfile, "ssh-rsa AAAAB3... user@host").unwrap();
 
         let config = SshKeyMonitorConfig {
             enabled: true,

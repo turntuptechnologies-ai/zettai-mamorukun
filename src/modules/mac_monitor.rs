@@ -330,29 +330,30 @@ fn detect_apparmor_changes(
     // プロファイルの弱体化・変更の検知
     for (name, old_mode) in &baseline.apparmor_profiles {
         match current.apparmor_profiles.get(name) {
-            Some(new_mode) if old_mode != new_mode => {
+            Some(new_mode)
+                if old_mode != new_mode
                 // enforce → complain/unconfined は Critical
-                if old_mode == "enforce" && (new_mode == "complain" || new_mode == "unconfined") {
-                    tracing::error!(
-                        profile = %name,
-                        old_mode = %old_mode,
-                        new_mode = %new_mode,
-                        "AppArmor プロファイルが弱体化されました"
+                && old_mode == "enforce" && (new_mode == "complain" || new_mode == "unconfined") =>
+            {
+                tracing::error!(
+                    profile = %name,
+                    old_mode = %old_mode,
+                    new_mode = %new_mode,
+                    "AppArmor プロファイルが弱体化されました"
+                );
+                if let Some(bus) = event_bus {
+                    bus.publish(
+                        SecurityEvent::new(
+                            "mac_apparmor_profile_weakened",
+                            Severity::Critical,
+                            "mac_monitor",
+                            format!(
+                                "AppArmor プロファイル '{}' が {} から {} に変更されました",
+                                name, old_mode, new_mode
+                            ),
+                        )
+                        .with_details(format!("{}: {} -> {}", name, old_mode, new_mode)),
                     );
-                    if let Some(bus) = event_bus {
-                        bus.publish(
-                            SecurityEvent::new(
-                                "mac_apparmor_profile_weakened",
-                                Severity::Critical,
-                                "mac_monitor",
-                                format!(
-                                    "AppArmor プロファイル '{}' が {} から {} に変更されました",
-                                    name, old_mode, new_mode
-                                ),
-                            )
-                            .with_details(format!("{}: {} -> {}", name, old_mode, new_mode)),
-                        );
-                    }
                 }
             }
             None => {
@@ -609,7 +610,7 @@ mod tests {
     #[test]
     fn test_read_selinux_enforce_with_value() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "1\n").unwrap();
+        writeln!(tmpfile, "1").unwrap();
         let result = read_selinux_enforce(tmpfile.path());
         assert_eq!(result, Some("1".to_string()));
     }
@@ -617,7 +618,7 @@ mod tests {
     #[test]
     fn test_read_selinux_enforce_zero() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "0\n").unwrap();
+        writeln!(tmpfile, "0").unwrap();
         let result = read_selinux_enforce(tmpfile.path());
         assert_eq!(result, Some("0".to_string()));
     }

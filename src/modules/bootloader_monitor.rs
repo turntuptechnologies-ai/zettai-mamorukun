@@ -741,7 +741,7 @@ GRUB_CMDLINE_LINUX="real_param"
         let path = dir.path().join("grub.cfg");
         fs::write(&path, "content").unwrap();
 
-        let snap1 = BootloaderMonitorModule::take_snapshot(&[path.clone()], &[]);
+        let snap1 = BootloaderMonitorModule::take_snapshot(std::slice::from_ref(&path), &[]);
         let snap2 = BootloaderMonitorModule::take_snapshot(&[path], &[]);
 
         assert!(!BootloaderMonitorModule::detect_changes(
@@ -760,10 +760,10 @@ GRUB_CMDLINE_LINUX="real_param"
         let path = dir.path().join("grub.cfg");
         fs::write(&path, "original content").unwrap();
 
-        let old = BootloaderMonitorModule::take_snapshot(&[path.clone()], &[]);
+        let old = BootloaderMonitorModule::take_snapshot(std::slice::from_ref(&path), &[]);
 
         fs::write(&path, "modified content").unwrap();
-        let new = BootloaderMonitorModule::take_snapshot(&[path.clone()], &[]);
+        let new = BootloaderMonitorModule::take_snapshot(std::slice::from_ref(&path), &[]);
 
         assert!(BootloaderMonitorModule::detect_changes(
             &old,
@@ -781,10 +781,10 @@ GRUB_CMDLINE_LINUX="real_param"
         let path = dir.path().join("grub.cfg");
         fs::write(&path, "content").unwrap();
 
-        let old = BootloaderMonitorModule::take_snapshot(&[path.clone()], &[]);
+        let old = BootloaderMonitorModule::take_snapshot(std::slice::from_ref(&path), &[]);
 
         fs::remove_file(&path).unwrap();
-        let new = BootloaderMonitorModule::take_snapshot(&[path.clone()], &[]);
+        let new = BootloaderMonitorModule::take_snapshot(std::slice::from_ref(&path), &[]);
 
         assert!(BootloaderMonitorModule::detect_changes(
             &old,
@@ -801,10 +801,10 @@ GRUB_CMDLINE_LINUX="real_param"
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("grub.cfg");
 
-        let old = BootloaderMonitorModule::take_snapshot(&[path.clone()], &[]);
+        let old = BootloaderMonitorModule::take_snapshot(std::slice::from_ref(&path), &[]);
 
         fs::write(&path, "new content").unwrap();
-        let new = BootloaderMonitorModule::take_snapshot(&[path.clone()], &[]);
+        let new = BootloaderMonitorModule::take_snapshot(std::slice::from_ref(&path), &[]);
 
         assert!(BootloaderMonitorModule::detect_changes(
             &old,
@@ -822,11 +822,11 @@ GRUB_CMDLINE_LINUX="real_param"
         let path = dir.path().join("grub.cfg");
         fs::write(&path, "content").unwrap();
 
-        let old = BootloaderMonitorModule::take_snapshot(&[path.clone()], &[]);
+        let old = BootloaderMonitorModule::take_snapshot(std::slice::from_ref(&path), &[]);
 
         // パーミッションを変更
         fs::set_permissions(&path, fs::Permissions::from_mode(0o777)).unwrap();
-        let new = BootloaderMonitorModule::take_snapshot(&[path.clone()], &[]);
+        let new = BootloaderMonitorModule::take_snapshot(std::slice::from_ref(&path), &[]);
 
         assert!(BootloaderMonitorModule::detect_changes(
             &old,
@@ -845,10 +845,10 @@ GRUB_CMDLINE_LINUX="real_param"
         fs::create_dir_all(default_grub.parent().unwrap()).unwrap();
         fs::write(&default_grub, "GRUB_CMDLINE_LINUX=\"quiet\"\n").unwrap();
 
-        let old = BootloaderMonitorModule::take_snapshot(&[default_grub.clone()], &[]);
+        let old = BootloaderMonitorModule::take_snapshot(std::slice::from_ref(&default_grub), &[]);
 
         fs::write(&default_grub, "GRUB_CMDLINE_LINUX=\"quiet selinux=0\"\n").unwrap();
-        let new = BootloaderMonitorModule::take_snapshot(&[default_grub.clone()], &[]);
+        let new = BootloaderMonitorModule::take_snapshot(std::slice::from_ref(&default_grub), &[]);
 
         assert!(BootloaderMonitorModule::detect_changes(
             &old,

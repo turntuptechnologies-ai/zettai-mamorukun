@@ -839,13 +839,13 @@ mod tests {
         // 実際には各32bitワードがホストバイトオーダーなのでプラットフォーム依存
         // テストではパース関数の基本動作を確認
         let loopback_hex = format!(
-            "{}{}{}{}",
-            format!("{:08X}", u32::from_ne_bytes([0, 0, 0, 0])),
-            format!("{:08X}", u32::from_ne_bytes([0, 0, 0, 0])),
-            format!("{:08X}", u32::from_ne_bytes([0, 0, 0, 0])),
-            format!("{:08X}", u32::from_ne_bytes([0, 0, 0, 1])),
+            "{:08X}{:08X}{:08X}{:08X}",
+            u32::from_ne_bytes([0, 0, 0, 0]),
+            u32::from_ne_bytes([0, 0, 0, 0]),
+            u32::from_ne_bytes([0, 0, 0, 0]),
+            u32::from_ne_bytes([0, 0, 0, 1]),
         );
-        let field = format!("{}:0050", loopback_hex);
+        let field = format!("{loopback_hex}:0050");
         let result = parse_addr_port_v6(&field);
         assert!(result.is_some());
         let (addr, port) = result.unwrap();
@@ -857,13 +857,13 @@ mod tests {
     fn test_parse_addr_port_v6_loopback() {
         // ::1 のバイト列を直接構築
         let loopback_hex = format!(
-            "{}{}{}{}",
-            format!("{:08X}", u32::from_ne_bytes([0, 0, 0, 0])),
-            format!("{:08X}", u32::from_ne_bytes([0, 0, 0, 0])),
-            format!("{:08X}", u32::from_ne_bytes([0, 0, 0, 0])),
-            format!("{:08X}", u32::from_ne_bytes([0, 0, 0, 1])),
+            "{:08X}{:08X}{:08X}{:08X}",
+            u32::from_ne_bytes([0, 0, 0, 0]),
+            u32::from_ne_bytes([0, 0, 0, 0]),
+            u32::from_ne_bytes([0, 0, 0, 0]),
+            u32::from_ne_bytes([0, 0, 0, 1]),
         );
-        let field = format!("{}:1F90", loopback_hex);
+        let field = format!("{loopback_hex}:1F90");
         let result = parse_addr_port_v6(&field);
         assert!(result.is_some());
         let (addr, port) = result.unwrap();
@@ -887,16 +887,15 @@ mod tests {
     fn test_parse_proc_net_tcp6() {
         // ::1:80 -> :::0 の LISTEN エントリ
         let loopback_hex = format!(
-            "{}{}{}{}",
-            format!("{:08X}", u32::from_ne_bytes([0, 0, 0, 0])),
-            format!("{:08X}", u32::from_ne_bytes([0, 0, 0, 0])),
-            format!("{:08X}", u32::from_ne_bytes([0, 0, 0, 0])),
-            format!("{:08X}", u32::from_ne_bytes([0, 0, 0, 1])),
+            "{:08X}{:08X}{:08X}{:08X}",
+            u32::from_ne_bytes([0, 0, 0, 0]),
+            u32::from_ne_bytes([0, 0, 0, 0]),
+            u32::from_ne_bytes([0, 0, 0, 0]),
+            u32::from_ne_bytes([0, 0, 0, 1]),
         );
         let zero_hex = "00000000000000000000000000000000";
         let content = format!(
-            "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: {}:0050 {}:0000 0A 00000000:00000000 00:00000000 00000000     0        0 12345 1 0000000000000000 100 0 0 10 0",
-            loopback_hex, zero_hex
+            "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: {loopback_hex}:0050 {zero_hex}:0000 0A 00000000:00000000 00:00000000 00000000     0        0 12345 1 0000000000000000 100 0 0 10 0"
         );
 
         let entries = parse_proc_net(&content, Protocol::Tcp, AddressFamily::V6);
@@ -1227,22 +1226,21 @@ mod tests {
     fn test_parse_proc_net_tcp6_established() {
         // 2001:db8::1:443 -> 2001:db8::2:54321 ESTABLISHED
         let local_hex = format!(
-            "{}{}{}{}",
-            format!("{:08X}", u32::from_ne_bytes([0x20, 0x01, 0x0d, 0xb8])),
-            format!("{:08X}", u32::from_ne_bytes([0, 0, 0, 0])),
-            format!("{:08X}", u32::from_ne_bytes([0, 0, 0, 0])),
-            format!("{:08X}", u32::from_ne_bytes([0, 0, 0, 1])),
+            "{:08X}{:08X}{:08X}{:08X}",
+            u32::from_ne_bytes([0x20, 0x01, 0x0d, 0xb8]),
+            u32::from_ne_bytes([0, 0, 0, 0]),
+            u32::from_ne_bytes([0, 0, 0, 0]),
+            u32::from_ne_bytes([0, 0, 0, 1]),
         );
         let remote_hex = format!(
-            "{}{}{}{}",
-            format!("{:08X}", u32::from_ne_bytes([0x20, 0x01, 0x0d, 0xb8])),
-            format!("{:08X}", u32::from_ne_bytes([0, 0, 0, 0])),
-            format!("{:08X}", u32::from_ne_bytes([0, 0, 0, 0])),
-            format!("{:08X}", u32::from_ne_bytes([0, 0, 0, 2])),
+            "{:08X}{:08X}{:08X}{:08X}",
+            u32::from_ne_bytes([0x20, 0x01, 0x0d, 0xb8]),
+            u32::from_ne_bytes([0, 0, 0, 0]),
+            u32::from_ne_bytes([0, 0, 0, 0]),
+            u32::from_ne_bytes([0, 0, 0, 2]),
         );
         let content = format!(
-            "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: {}:01BB {}:D431 01 00000000:00000000 00:00000000 00000000  1000        0 67890 1 0000000000000000 100 0 0 10 0",
-            local_hex, remote_hex
+            "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: {local_hex}:01BB {remote_hex}:D431 01 00000000:00000000 00:00000000 00000000  1000        0 67890 1 0000000000000000 100 0 0 10 0"
         );
 
         let entries = parse_proc_net(&content, Protocol::Tcp, AddressFamily::V6);

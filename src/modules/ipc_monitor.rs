@@ -784,7 +784,7 @@ mod tests {
     #[test]
     fn test_parse_shm_empty() {
         let dir = make_test_dir();
-        let entries = IpcMonitorModule::parse_shm(&dir.path().to_path_buf());
+        let entries = IpcMonitorModule::parse_shm(dir.path());
         assert!(entries.is_empty());
     }
 
@@ -794,7 +794,7 @@ mod tests {
         let content = "       key      shmid perms                  size  cpid  lpid nattch   uid   gid  cuid  cgid      atime      dtime      ctime                   rss                  swap\n         0      12345   666              1048576  1234  5678      2  1000   100  1000   100 1700000000 1700000000 1700000000              1048576                     0\n";
         fs::write(dir.path().join("shm"), content).unwrap();
 
-        let entries = IpcMonitorModule::parse_shm(&dir.path().to_path_buf());
+        let entries = IpcMonitorModule::parse_shm(dir.path());
         assert_eq!(entries.len(), 1);
         let entry = entries.get(&12345).unwrap();
         assert_eq!(entry.shmid, 12345);
@@ -806,7 +806,7 @@ mod tests {
     #[test]
     fn test_parse_sem_empty() {
         let dir = make_test_dir();
-        let entries = IpcMonitorModule::parse_sem(&dir.path().to_path_buf());
+        let entries = IpcMonitorModule::parse_sem(dir.path());
         assert!(entries.is_empty());
     }
 
@@ -816,7 +816,7 @@ mod tests {
         let content = "       key      semid perms      nsems   uid   gid  cuid  cgid      otime      ctime\n         0        100   600          5  1000   100  1000   100 1700000000 1700000000\n";
         fs::write(dir.path().join("sem"), content).unwrap();
 
-        let entries = IpcMonitorModule::parse_sem(&dir.path().to_path_buf());
+        let entries = IpcMonitorModule::parse_sem(dir.path());
         assert_eq!(entries.len(), 1);
         let entry = entries.get(&100).unwrap();
         assert_eq!(entry.semid, 100);
@@ -828,7 +828,7 @@ mod tests {
     #[test]
     fn test_parse_msg_empty() {
         let dir = make_test_dir();
-        let entries = IpcMonitorModule::parse_msg(&dir.path().to_path_buf());
+        let entries = IpcMonitorModule::parse_msg(dir.path());
         assert!(entries.is_empty());
     }
 
@@ -838,7 +838,7 @@ mod tests {
         let content = "       key      msqid perms      cbytes       qnum lspid lrpid   uid   gid  cuid  cgid      stime      rtime      ctime\n         0        200   644        4096         10  1234  5678  1000   100  1000   100 1700000000 1700000000 1700000000\n";
         fs::write(dir.path().join("msg"), content).unwrap();
 
-        let entries = IpcMonitorModule::parse_msg(&dir.path().to_path_buf());
+        let entries = IpcMonitorModule::parse_msg(dir.path());
         assert_eq!(entries.len(), 1);
         let entry = entries.get(&200).unwrap();
         assert_eq!(entry.msqid, 200);
@@ -1219,7 +1219,7 @@ mod tests {
         fs::write(dir.path().join("sem"), sem_content).unwrap();
         fs::write(dir.path().join("msg"), msg_content).unwrap();
 
-        let snapshot = IpcMonitorModule::scan(&dir.path().to_path_buf());
+        let snapshot = IpcMonitorModule::scan(dir.path());
         assert_eq!(snapshot.shm.len(), 1);
         assert_eq!(snapshot.sem.len(), 1);
         assert_eq!(snapshot.msg.len(), 1);
@@ -1231,7 +1231,7 @@ mod tests {
         let content = "       key      shmid perms                  size  cpid  lpid nattch   uid   gid  cuid  cgid      atime      dtime      ctime                   rss                  swap\nthis is not a valid line\n         0          1   600              4096  1234  5678      1     0     0     0     0 1700000000 1700000000 1700000000                 4096                     0\n";
         fs::write(dir.path().join("shm"), content).unwrap();
 
-        let entries = IpcMonitorModule::parse_shm(&dir.path().to_path_buf());
+        let entries = IpcMonitorModule::parse_shm(dir.path());
         assert_eq!(entries.len(), 1); // 不正行はスキップ、有効行のみパース
     }
 
@@ -1241,7 +1241,7 @@ mod tests {
         let content = "       key      shmid perms                  size  cpid  lpid nattch   uid   gid  cuid  cgid      atime      dtime      ctime                   rss                  swap\n         0          1   600              4096  1234  5678      1     0     0     0     0 1700000000 1700000000 1700000000                 4096                     0\n         0          2   666              8192  2345  6789      2  1000   100  1000   100 1700000000 1700000000 1700000000                 8192                     0\n";
         fs::write(dir.path().join("shm"), content).unwrap();
 
-        let entries = IpcMonitorModule::parse_shm(&dir.path().to_path_buf());
+        let entries = IpcMonitorModule::parse_shm(dir.path());
         assert_eq!(entries.len(), 2);
         assert!(entries.contains_key(&1));
         assert!(entries.contains_key(&2));

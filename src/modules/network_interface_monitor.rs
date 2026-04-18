@@ -494,7 +494,7 @@ impl Module for NetworkInterfaceMonitorModule {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+
     use tempfile::TempDir;
 
     /// テスト用の /sys/class/net/ ディレクトリ構造を作成する

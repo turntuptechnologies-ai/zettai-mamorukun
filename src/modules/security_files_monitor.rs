@@ -584,7 +584,7 @@ mod tests {
     #[test]
     fn test_build_file_snapshot_deterministic() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "* soft nofile 1024\n").unwrap();
+        writeln!(tmpfile, "* soft nofile 1024").unwrap();
         let snapshot1 = build_file_snapshot(&tmpfile.path().to_path_buf()).unwrap();
         let snapshot2 = build_file_snapshot(&tmpfile.path().to_path_buf()).unwrap();
         assert_eq!(snapshot1.file_hash, snapshot2.file_hash);
@@ -594,7 +594,7 @@ mod tests {
     #[test]
     fn test_scan_files_with_single_file() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "* soft nofile 1024\n").unwrap();
+        writeln!(tmpfile, "* soft nofile 1024").unwrap();
         let path = tmpfile.path().to_path_buf();
 
         let watch_paths = vec![path.clone()];
@@ -635,7 +635,7 @@ mod tests {
     #[test]
     fn test_detect_no_changes() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "* soft nofile 1024\n").unwrap();
+        writeln!(tmpfile, "* soft nofile 1024").unwrap();
         let path = tmpfile.path().to_path_buf();
 
         let watch_paths = vec![path];
@@ -754,7 +754,11 @@ mod tests {
         std::fs::write(&file, "* hard nofile unlimited\n").unwrap();
 
         let mut reported = HashSet::new();
-        SecurityFilesMonitorModule::check_dangerous_patterns(&[file.clone()], &mut reported, &None);
+        SecurityFilesMonitorModule::check_dangerous_patterns(
+            std::slice::from_ref(&file),
+            &mut reported,
+            &None,
+        );
         assert_eq!(reported.len(), 1);
         assert!(reported.iter().next().unwrap().starts_with("unlimited:"));
     }
@@ -766,7 +770,11 @@ mod tests {
         std::fs::write(&file, "* soft nofile 1024\n* hard nofile 4096\n").unwrap();
 
         let mut reported = HashSet::new();
-        SecurityFilesMonitorModule::check_dangerous_patterns(&[file.clone()], &mut reported, &None);
+        SecurityFilesMonitorModule::check_dangerous_patterns(
+            std::slice::from_ref(&file),
+            &mut reported,
+            &None,
+        );
         assert!(reported.is_empty());
     }
 
@@ -777,7 +785,11 @@ mod tests {
         std::fs::write(&file, "root hard nofile unlimited\n").unwrap();
 
         let mut reported = HashSet::new();
-        SecurityFilesMonitorModule::check_dangerous_patterns(&[file.clone()], &mut reported, &None);
+        SecurityFilesMonitorModule::check_dangerous_patterns(
+            std::slice::from_ref(&file),
+            &mut reported,
+            &None,
+        );
         // root ユーザー限定なので検出しない
         assert!(reported.is_empty());
     }
@@ -802,7 +814,11 @@ mod tests {
         std::fs::write(&file, "* hard nofile unlimited\n").unwrap();
 
         let mut reported = HashSet::new();
-        SecurityFilesMonitorModule::check_dangerous_patterns(&[file.clone()], &mut reported, &None);
+        SecurityFilesMonitorModule::check_dangerous_patterns(
+            std::slice::from_ref(&file),
+            &mut reported,
+            &None,
+        );
         // access.conf は limits 形式ではないので検出しない
         assert!(reported.is_empty());
     }
@@ -814,7 +830,11 @@ mod tests {
         std::fs::write(&file, "# * hard nofile unlimited\n").unwrap();
 
         let mut reported = HashSet::new();
-        SecurityFilesMonitorModule::check_dangerous_patterns(&[file.clone()], &mut reported, &None);
+        SecurityFilesMonitorModule::check_dangerous_patterns(
+            std::slice::from_ref(&file),
+            &mut reported,
+            &None,
+        );
         assert!(reported.is_empty());
     }
 
@@ -825,12 +845,20 @@ mod tests {
         std::fs::write(&file, "* hard nofile unlimited\n").unwrap();
 
         let mut reported = HashSet::new();
-        SecurityFilesMonitorModule::check_dangerous_patterns(&[file.clone()], &mut reported, &None);
+        SecurityFilesMonitorModule::check_dangerous_patterns(
+            std::slice::from_ref(&file),
+            &mut reported,
+            &None,
+        );
         assert_eq!(reported.len(), 1);
 
         // 二回目は新規検出なし
         let before = reported.len();
-        SecurityFilesMonitorModule::check_dangerous_patterns(&[file.clone()], &mut reported, &None);
+        SecurityFilesMonitorModule::check_dangerous_patterns(
+            std::slice::from_ref(&file),
+            &mut reported,
+            &None,
+        );
         assert_eq!(reported.len(), before);
     }
 
@@ -845,7 +873,11 @@ mod tests {
         .unwrap();
 
         let mut reported = HashSet::new();
-        SecurityFilesMonitorModule::check_dangerous_patterns(&[file.clone()], &mut reported, &None);
+        SecurityFilesMonitorModule::check_dangerous_patterns(
+            std::slice::from_ref(&file),
+            &mut reported,
+            &None,
+        );
         assert_eq!(reported.len(), 3);
     }
 
@@ -876,7 +908,7 @@ mod tests {
     #[tokio::test]
     async fn test_start_and_stop() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "* soft nofile 1024\n").unwrap();
+        writeln!(tmpfile, "* soft nofile 1024").unwrap();
 
         let config = SecurityFilesMonitorConfig {
             enabled: true,
@@ -900,7 +932,7 @@ mod tests {
         std::fs::write(&dir_file, "* soft nofile 1024\n").unwrap();
 
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "+ : ALL : LOCAL\n").unwrap();
+        writeln!(tmpfile, "+ : ALL : LOCAL").unwrap();
 
         let watch_paths = vec![tmpfile.path().to_path_buf(), tmpdir.path().to_path_buf()];
         let result = SecurityFilesMonitorModule::scan_files(&watch_paths);
@@ -928,7 +960,7 @@ mod tests {
     #[test]
     fn test_collect_files_to_check_file() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "test\n").unwrap();
+        writeln!(tmpfile, "test").unwrap();
         let result = collect_files_to_check(&tmpfile.path().to_path_buf());
         assert_eq!(result.len(), 1);
     }

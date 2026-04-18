@@ -228,10 +228,7 @@ pub fn rotate_config_keys(
     let mut errors = Vec::new();
 
     let mut search_start = 0;
-    loop {
-        let Some(start) = result[search_start..].find(ENC_PREFIX) else {
-            break;
-        };
+    while let Some(start) = result[search_start..].find(ENC_PREFIX) {
         let start = search_start + start;
 
         let Some(end_offset) = result[start..].find(ENC_SUFFIX) else {
@@ -299,10 +296,7 @@ pub fn decrypt_config_content(content: &str) -> Result<String, AppError> {
 
     let mut result = content.to_string();
     // ENC[...] パターンを検索して復号
-    loop {
-        let Some(start) = result.find(ENC_PREFIX) else {
-            break;
-        };
+    while let Some(start) = result.find(ENC_PREFIX) {
         let Some(end) = result[start..].find(ENC_SUFFIX) else {
             break;
         };
@@ -504,7 +498,7 @@ mod tests {
 
     #[test]
     fn test_key_wrong_length() {
-        let short_key = BASE64.encode(&[0u8; 16]);
+        let short_key = BASE64.encode([0u8; 16]);
         unsafe { std::env::set_var(ENV_KEY_NAME, &short_key) };
         let result = resolve_key(&None);
         unsafe { std::env::remove_var(ENV_KEY_NAME) };
@@ -739,7 +733,7 @@ plain = "hello"
 
     #[test]
     fn test_resolve_key_from_source_base64_wrong_length() {
-        let short = BASE64.encode(&[0u8; 16]);
+        let short = BASE64.encode([0u8; 16]);
         let result = resolve_key_from_source(&short);
         assert!(result.is_err());
     }

@@ -855,7 +855,7 @@ mod tests {
         let result = CronMonitorModule::setup_inotify(&watch_paths);
         assert!(result.is_ok());
         let (_inotify, watch_map) = result.unwrap();
-        assert!(watch_map.len() >= 1);
+        assert!(!watch_map.is_empty());
     }
 
     #[test]
@@ -924,7 +924,7 @@ mod tests {
         let path = PathBuf::from("/etc/crontab");
 
         let now = Instant::now();
-        assert!(debounce_map.get(&path).is_none());
+        assert!(!debounce_map.contains_key(&path));
         debounce_map.insert(path.clone(), now);
 
         let should_skip = debounce_map

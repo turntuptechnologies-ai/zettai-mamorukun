@@ -313,7 +313,7 @@ mod tests {
         let result = module.initial_scan().await;
         assert!(result.is_ok());
         let scan = result.unwrap();
-        assert!(scan.items_scanned > 0 || scan.items_scanned == 0);
+        let _ = scan.items_scanned;
         assert!(!scan.summary.is_empty());
     }
 

@@ -1164,20 +1164,14 @@ mod tests {
     fn test_action_engine_new_valid() {
         let config = ActionConfig {
             enabled: true,
-            rules: vec![
-                {
-                    let r = make_rule_config("log_all", "log", None);
-                    r
-                },
-                {
-                    let mut r =
-                        make_rule_config("critical_command", "command", Some("echo '{{message}}'"));
-                    r.severity = Some("critical".to_string());
-                    r.module = Some("file_integrity".to_string());
-                    r.timeout_secs = 10;
-                    r
-                },
-            ],
+            rules: vec![{ make_rule_config("log_all", "log", None) }, {
+                let mut r =
+                    make_rule_config("critical_command", "command", Some("echo '{{message}}'"));
+                r.severity = Some("critical".to_string());
+                r.module = Some("file_integrity".to_string());
+                r.timeout_secs = 10;
+                r
+            }],
             rate_limit: None,
             digest: None,
         };
@@ -1245,10 +1239,7 @@ mod tests {
     fn test_webhook_rule_validation() {
         let config = ActionConfig {
             enabled: true,
-            rules: vec![{
-                let r = make_rule_config("bad_webhook", "webhook", None);
-                r
-            }],
+            rules: vec![{ make_rule_config("bad_webhook", "webhook", None) }],
             rate_limit: None,
             digest: None,
         };

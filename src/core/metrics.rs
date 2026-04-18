@@ -328,11 +328,13 @@ mod tests {
 
     #[test]
     fn test_shared_metrics_serialize() {
-        let mut metrics = SharedMetrics::default();
-        metrics.total_events = 10;
-        metrics.info_count = 5;
-        metrics.warning_count = 3;
-        metrics.critical_count = 2;
+        let mut metrics = SharedMetrics {
+            total_events: 10,
+            info_count: 5,
+            warning_count: 3,
+            critical_count: 2,
+            ..Default::default()
+        };
         metrics.module_counts.insert("test_module".to_string(), 10);
 
         let json = serde_json::to_string(&metrics).unwrap();

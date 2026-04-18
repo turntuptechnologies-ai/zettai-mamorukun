@@ -426,7 +426,7 @@ mod tests {
     #[test]
     fn test_build_file_snapshot_basic() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "/usr/lib/libevil.so\n").unwrap();
+        writeln!(tmpfile, "/usr/lib/libevil.so").unwrap();
         let snapshot = build_file_snapshot(&tmpfile.path().to_path_buf()).unwrap();
         assert!(!snapshot.file_hash.is_empty());
         assert_eq!(snapshot.file_hash.len(), 64);
@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn test_build_file_snapshot_deterministic() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "/usr/lib/libtest.so\n").unwrap();
+        writeln!(tmpfile, "/usr/lib/libtest.so").unwrap();
         let s1 = build_file_snapshot(&tmpfile.path().to_path_buf()).unwrap();
         let s2 = build_file_snapshot(&tmpfile.path().to_path_buf()).unwrap();
         assert_eq!(s1.file_hash, s2.file_hash);
@@ -450,9 +450,9 @@ mod tests {
     #[test]
     fn test_scan_files_with_file() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "content\n").unwrap();
+        writeln!(tmpfile, "content").unwrap();
         let path = tmpfile.path().to_path_buf();
-        let result = LdPreloadMonitorModule::scan_files(&[path.clone()]);
+        let result = LdPreloadMonitorModule::scan_files(std::slice::from_ref(&path));
         assert_eq!(result.files.len(), 1);
         assert!(result.files.contains_key(&path));
     }
@@ -483,9 +483,9 @@ mod tests {
     #[test]
     fn test_detect_no_changes() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "content\n").unwrap();
+        writeln!(tmpfile, "content").unwrap();
         let path = tmpfile.path().to_path_buf();
-        let s1 = LdPreloadMonitorModule::scan_files(&[path.clone()]);
+        let s1 = LdPreloadMonitorModule::scan_files(std::slice::from_ref(&path));
         let s2 = LdPreloadMonitorModule::scan_files(&[path]);
         let changed = LdPreloadMonitorModule::detect_and_report(&s1, &s2, &None);
         assert!(!changed);
@@ -558,7 +558,7 @@ mod tests {
 
     #[test]
     fn test_check_dangerous_env_vars_detects_ld_preload() {
-        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
         // ファイル名が "environment" である必要がある
         let tmpdir = tempfile::TempDir::new().unwrap();
         let env_path = tmpdir.path().join("environment");
@@ -626,7 +626,7 @@ mod tests {
     #[tokio::test]
     async fn test_start_and_stop() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "content\n").unwrap();
+        writeln!(tmpfile, "content").unwrap();
 
         let config = LdPreloadMonitorConfig {
             enabled: true,

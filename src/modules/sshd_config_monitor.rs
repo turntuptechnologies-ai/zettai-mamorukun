@@ -211,9 +211,8 @@ fn audit_directives(
         let value_lower = directive.value.to_ascii_lowercase();
 
         match key_lower.as_str() {
-            "permitrootlogin" if config.check_permit_root_login => {
-                if value_lower == "yes" {
-                    findings.push(AuditFinding {
+            "permitrootlogin" if config.check_permit_root_login && value_lower == "yes" => {
+                findings.push(AuditFinding {
                         directive: directive.key.clone(),
                         value: directive.value.clone(),
                         severity: Severity::Critical,
@@ -222,12 +221,12 @@ fn audit_directives(
                             directive.line_number
                         ),
                     });
-                }
-                // without-password, prohibit-password, no は安全
             }
-            "passwordauthentication" if config.check_password_authentication => {
-                if value_lower == "yes" {
-                    findings.push(AuditFinding {
+            // without-password, prohibit-password, no は安全
+            "passwordauthentication"
+                if config.check_password_authentication && value_lower == "yes" =>
+            {
+                findings.push(AuditFinding {
                         directive: directive.key.clone(),
                         value: directive.value.clone(),
                         severity: Severity::Warning,
@@ -236,11 +235,11 @@ fn audit_directives(
                             directive.line_number
                         ),
                     });
-                }
             }
-            "permitemptypasswords" if config.check_permit_empty_passwords => {
-                if value_lower == "yes" {
-                    findings.push(AuditFinding {
+            "permitemptypasswords"
+                if config.check_permit_empty_passwords && value_lower == "yes" =>
+            {
+                findings.push(AuditFinding {
                         directive: directive.key.clone(),
                         value: directive.value.clone(),
                         severity: Severity::Critical,
@@ -249,24 +248,20 @@ fn audit_directives(
                             directive.line_number
                         ),
                     });
-                }
             }
-            "protocol" if config.check_protocol_version => {
-                if value_lower.contains('1') {
-                    findings.push(AuditFinding {
-                        directive: directive.key.clone(),
-                        value: directive.value.clone(),
-                        severity: Severity::Critical,
-                        message: format!(
-                            "Protocol に 1 が含まれています（行 {}）。SSH プロトコル v1 は脆弱です",
-                            directive.line_number
-                        ),
-                    });
-                }
+            "protocol" if config.check_protocol_version && value_lower.contains('1') => {
+                findings.push(AuditFinding {
+                    directive: directive.key.clone(),
+                    value: directive.value.clone(),
+                    severity: Severity::Critical,
+                    message: format!(
+                        "Protocol に 1 が含まれています（行 {}）。SSH プロトコル v1 は脆弱です",
+                        directive.line_number
+                    ),
+                });
             }
-            "x11forwarding" if config.check_x11_forwarding => {
-                if value_lower == "yes" {
-                    findings.push(AuditFinding {
+            "x11forwarding" if config.check_x11_forwarding && value_lower == "yes" => {
+                findings.push(AuditFinding {
                         directive: directive.key.clone(),
                         value: directive.value.clone(),
                         severity: Severity::Info,
@@ -275,11 +270,9 @@ fn audit_directives(
                             directive.line_number
                         ),
                     });
-                }
             }
-            "strictmodes" if config.check_strict_modes => {
-                if value_lower == "no" {
-                    findings.push(AuditFinding {
+            "strictmodes" if config.check_strict_modes && value_lower == "no" => {
+                findings.push(AuditFinding {
                         directive: directive.key.clone(),
                         value: directive.value.clone(),
                         severity: Severity::Warning,
@@ -288,7 +281,6 @@ fn audit_directives(
                             directive.line_number
                         ),
                     });
-                }
             }
             "maxauthtries" if config.check_max_auth_tries => {
                 if let Ok(tries) = directive.value.parse::<u32>()
@@ -305,9 +297,8 @@ fn audit_directives(
                     });
                 }
             }
-            "gatewayports" if config.check_gateway_ports => {
-                if value_lower == "yes" {
-                    findings.push(AuditFinding {
+            "gatewayports" if config.check_gateway_ports && value_lower == "yes" => {
+                findings.push(AuditFinding {
                         directive: directive.key.clone(),
                         value: directive.value.clone(),
                         severity: Severity::Warning,
@@ -316,11 +307,9 @@ fn audit_directives(
                             directive.line_number
                         ),
                     });
-                }
             }
-            "permittunnel" if config.check_permit_tunnel => {
-                if value_lower == "yes" {
-                    findings.push(AuditFinding {
+            "permittunnel" if config.check_permit_tunnel && value_lower == "yes" => {
+                findings.push(AuditFinding {
                         directive: directive.key.clone(),
                         value: directive.value.clone(),
                         severity: Severity::Info,
@@ -329,7 +318,6 @@ fn audit_directives(
                             directive.line_number
                         ),
                     });
-                }
             }
             _ => {}
         }
