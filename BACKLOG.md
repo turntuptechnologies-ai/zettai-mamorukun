@@ -170,12 +170,13 @@
 - [x] **NTP / 時刻同期設定監視モジュール** — v1.64.0 (#335, PR #336)
 - [x] **ntp_config_monitor の監査ルール拡充** — v1.65.0 (#337, PR #338)
 - [x] **clippy ベースライン整備（Rust 1.95.0 新規 lint 対応）** — v1.66.0 (#339, PR #340)
+- [x] **ntp_config_monitor の追加監査ルール（cmdport/port・ntpsigndsocket・keys 不在）** — v1.67.0 (#341, PR #342)
 
 ## 候補
 
 1. **CI ワークフローでの clippy -D warnings 強制化** — v1.66.0 で現状の警告はゼロにしたので、GitHub Actions で `cargo clippy --all-targets -- -D warnings` / `cargo fmt --check` を PR 時に自動実行する `.github/workflows/ci.yaml` を整備する（promtool.yaml と同様、PAT の workflow スコープ問題があれば README 記載にとどめる）
 2. **ntp_config_monitor の inotify 連携** — 定期ポーリングだけでなく inotify ベースでリアルタイムに改ざんを検知する。`cron_monitor` の inotify 実装パターンを参考にする
-3. **ntp_config_monitor の追加監査ルール** — v1.65.0 で追加した allow / bindcmdaddress / restrict / driftfile に加え、chrony の `cmdport` / `port` が既定以外の場合、ntpsigndsocket 公開、`keys` ファイル不在による NTP 認証無効化などを検知する
+3. **ntp_config_monitor の `keyfile` / `trustedkey` / `authselectmode` 監査** — v1.67.0 で追加した `keys` ファイル存在チェックに続き、`keyfile` の過剰パーミッション（world-readable / world-writable）、`trustedkey` 未設定、chrony の `authselectmode require` 未使用など NTP 認証強度関連ルールを追加する
 4. **promtool ユニットテスト用の GitHub Actions ワークフロー追加** — PAT の workflow スコープ制約で v1.59.0 では README のサンプル掲載にとどめた `.github/workflows/promtool.yaml` を、適切な権限で追加し `grafana/alerts/**` の変更時に自動検証する
 5. **module-stats 履歴スナップショット機能** — `record_scan_duration` による最新 1024 サンプルに加え、1h/1d など時間粒度で集計したスナップショットを保持し、長期傾向（1日/1週間の P95 推移）を REST API で取得可能にする
 6. **module-stats --diff の定期比較スクリプト / cron ジョブサンプル** — v1.61.0 で `taken_at` 情報が埋め込まれるようになったので、スナップショットを自動ローテートし定期的に差分を Slack/Webhook に通知するユースケースのサンプル（README もしくは `examples/`）を追加する
