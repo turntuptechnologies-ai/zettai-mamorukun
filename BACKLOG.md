@@ -166,16 +166,17 @@
 - [x] **module-stats CLI の統計比較モード (--diff / --save-snapshot)** — v1.60.0 (#326, PR #327)
 - [x] **module-stats スナップショットへの taken_at タイムスタンプ埋め込み** — v1.61.0 (#328, PR #329)
 - [x] **module-stats diff の整数オーバーフロー保護と警告ログ出力** — v1.62.0 (#331, PR #332)
+- [x] **module-stats diff warn ログのテスト整備** — v1.63.0 (#333, PR #334)
 
 ## 候補
 
-1. **promtool ユニットテスト用の GitHub Actions ワークフロー追加** — PAT の workflow スコープ制約で v1.59.0 では README のサンプル掲載にとどめた `.github/workflows/promtool.yaml` を、適切な権限で追加し `grafana/alerts/**` の変更時に自動検証する
-2. **module-stats 履歴スナップショット機能** — `record_scan_duration` による最新 1024 サンプルに加え、1h/1d など時間粒度で集計したスナップショットを保持し、長期傾向（1日/1週間の P95 推移）を REST API で取得可能にする
-3. **module-stats --diff の定期比較スクリプト / cron ジョブサンプル** — v1.61.0 で `taken_at` 情報が埋め込まれるようになったので、スナップショットを自動ローテートし定期的に差分を Slack/Webhook に通知するユースケースのサンプル（README もしくは `examples/`）を追加する
-4. **module-stats diff warn ログのテスト整備** — v1.62.0 で追加した `tracing::warn!` のログ出力を `tracing-test` / `tracing-subscriber::fmt::TestWriter` で検証するテストを追加し、サチュレーション時のログメッセージが期待どおり出力されることを確認する
-5. **clippy ベースライン整備** — main ブランチで発生している 112 件の clippy 警告・エラー（Rust 1.95.0 の新規 lint 由来が大半）を段階的に解消し、CI で `cargo clippy --all-targets -- -D warnings` を強制できる状態にする。特に `src/core/module_manager.rs:1085` の `absurd_extreme_comparisons` エラーは deny 指定で即修正可能
-6. **module-stats --diff の JSON レポート schema ドキュメント化** — 返却 JSON（`ModuleStatsDiffReport` / `ModuleStatsDiffEntry`）の構造を CLAUDE.md もしくは README に明文化し、外部スクリプトからの利用を容易にする
-7. **Webhook 統合テスト強化** — wiremock を使った Webhook 送信の統合テスト（リトライ動作、4xx/5xx エラー処理、タイムアウト等）を追加する
+1. **clippy ベースライン整備** — main ブランチで発生している 111 件の clippy 警告 + 1 件のエラー（Rust 1.95.0 の新規 lint 由来が大半）を段階的に解消し、CI で `cargo clippy --all-targets -- -D warnings` を強制できる状態にする。特に `src/core/module_manager.rs:1085` の `absurd_extreme_comparisons` エラーは deny 指定で即修正可能
+2. **promtool ユニットテスト用の GitHub Actions ワークフロー追加** — PAT の workflow スコープ制約で v1.59.0 では README のサンプル掲載にとどめた `.github/workflows/promtool.yaml` を、適切な権限で追加し `grafana/alerts/**` の変更時に自動検証する
+3. **module-stats 履歴スナップショット機能** — `record_scan_duration` による最新 1024 サンプルに加え、1h/1d など時間粒度で集計したスナップショットを保持し、長期傾向（1日/1週間の P95 推移）を REST API で取得可能にする
+4. **module-stats --diff の定期比較スクリプト / cron ジョブサンプル** — v1.61.0 で `taken_at` 情報が埋め込まれるようになったので、スナップショットを自動ローテートし定期的に差分を Slack/Webhook に通知するユースケースのサンプル（README もしくは `examples/`）を追加する
+5. **module-stats --diff の JSON レポート schema ドキュメント化** — 返却 JSON（`ModuleStatsDiffReport` / `ModuleStatsDiffEntry`）の構造を CLAUDE.md もしくは README に明文化し、外部スクリプトからの利用を容易にする
+6. **Webhook 統合テスト強化** — wiremock を使った Webhook 送信の統合テスト（リトライ動作、4xx/5xx エラー処理、タイムアウト等）を追加する
+7. **module-stats CLI のテキスト出力改善** — `--diff` レポートのテキスト出力に色付き（赤=増加、緑=減少）と並び替えオプション（events_delta / module 名）を追加して可視性を向上する
 8. **モジュール依存関係管理** — モジュール間の依存関係を定義し、起動順序の制御やカスケード停止を可能にする仕組み
 9. **ダッシュボード機能拡張** — TUI ダッシュボードにイベント詳細表示、フィルタリング、イベント検索機能を追加する
 10. **プロセス起動リアルタイム監視強化** — proc connector（netlink）を使ったプロセス fork/exec のリアルタイム検知で、既存の定期スキャンを補完する
