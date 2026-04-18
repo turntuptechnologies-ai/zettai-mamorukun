@@ -1488,6 +1488,14 @@ config_paths = [
 ]
 # 危険な設定（NTP サーバ未設定、makestep 未設定など）の監査を有効化
 audit_enabled = true
+# chrony の `allow` ディレクティブによるネットワーク公開（allow all / 0.0.0.0/0 等）を検知
+check_chrony_allow = true
+# chrony の `bindcmdaddress` が公開アドレス（0.0.0.0 / :: / *）になっている場合を検知
+check_chrony_bindcmdaddress = true
+# ntp.conf の `restrict default` ディレクティブ欠如（既定ポリシー無制限）を検知
+check_ntp_restrict = true
+# `driftfile` が絶対パス以外を指している場合を検知
+check_driftfile_absolute = true
 # ファイルサイズ上限（バイト）
 max_file_size_bytes = 1048576
 

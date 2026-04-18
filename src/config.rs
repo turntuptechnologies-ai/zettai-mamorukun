@@ -6120,6 +6120,22 @@ pub struct NtpConfigMonitorConfig {
     #[serde(default = "NtpConfigMonitorConfig::default_true")]
     pub audit_enabled: bool,
 
+    /// chrony の `allow` ディレクティブによるネットワーク公開を検知
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_chrony_allow: bool,
+
+    /// chrony の `bindcmdaddress` が公開アドレス（0.0.0.0 / :: / *）を検知
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_chrony_bindcmdaddress: bool,
+
+    /// ntp.conf の `restrict default` 欠如を検知
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_ntp_restrict: bool,
+
+    /// `driftfile` が絶対パスでない場合を検知
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_driftfile_absolute: bool,
+
     /// ファイルサイズ上限（バイト）
     #[serde(default = "NtpConfigMonitorConfig::default_max_file_size_bytes")]
     pub max_file_size_bytes: u64,
@@ -6155,6 +6171,10 @@ impl Default for NtpConfigMonitorConfig {
             scan_interval_secs: Self::default_scan_interval_secs(),
             config_paths: Self::default_config_paths(),
             audit_enabled: true,
+            check_chrony_allow: true,
+            check_chrony_bindcmdaddress: true,
+            check_ntp_restrict: true,
+            check_driftfile_absolute: true,
             max_file_size_bytes: Self::default_max_file_size_bytes(),
         }
     }
