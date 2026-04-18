@@ -263,6 +263,10 @@ pub struct ModulesConfig {
     #[serde(default)]
     pub sshd_config_monitor: SshdConfigMonitorConfig,
 
+    /// NTP / 時刻同期設定監視モジュールの設定
+    #[serde(default)]
+    pub ntp_config_monitor: NtpConfigMonitorConfig,
+
     /// パッケージ整合性検証モジュールの設定
     #[serde(default)]
     pub package_verify: PackageVerifyConfig,
@@ -6092,6 +6096,65 @@ impl Default for SshdConfigMonitorConfig {
             check_gateway_ports: true,
             check_permit_tunnel: true,
             follow_includes: true,
+            max_file_size_bytes: Self::default_max_file_size_bytes(),
+        }
+    }
+}
+
+/// NTP / 時刻同期設定監視モジュールの設定
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct NtpConfigMonitorConfig {
+    /// モジュールの有効/無効
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// スキャン間隔（秒）
+    #[serde(default = "NtpConfigMonitorConfig::default_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+
+    /// 監視対象の NTP / 時刻同期設定ファイルパス
+    #[serde(default = "NtpConfigMonitorConfig::default_config_paths")]
+    pub config_paths: Vec<String>,
+
+    /// 危険な設定（NTP サーバ未設定、makestep 未設定など）の監査を有効化
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub audit_enabled: bool,
+
+    /// ファイルサイズ上限（バイト）
+    #[serde(default = "NtpConfigMonitorConfig::default_max_file_size_bytes")]
+    pub max_file_size_bytes: u64,
+}
+
+impl NtpConfigMonitorConfig {
+    fn default_scan_interval_secs() -> u64 {
+        300
+    }
+
+    fn default_config_paths() -> Vec<String> {
+        vec![
+            "/etc/systemd/timesyncd.conf".to_string(),
+            "/etc/ntp.conf".to_string(),
+            "/etc/chrony/chrony.conf".to_string(),
+            "/etc/chrony.conf".to_string(),
+        ]
+    }
+
+    fn default_true() -> bool {
+        true
+    }
+
+    fn default_max_file_size_bytes() -> u64 {
+        1_048_576
+    }
+}
+
+impl Default for NtpConfigMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_interval_secs: Self::default_scan_interval_secs(),
+            config_paths: Self::default_config_paths(),
+            audit_enabled: true,
             max_file_size_bytes: Self::default_max_file_size_bytes(),
         }
     }
