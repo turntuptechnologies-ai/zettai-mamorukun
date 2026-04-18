@@ -168,12 +168,13 @@
 - [x] **module-stats diff の整数オーバーフロー保護と警告ログ出力** — v1.62.0 (#331, PR #332)
 - [x] **module-stats diff warn ログのテスト整備** — v1.63.0 (#333, PR #334)
 - [x] **NTP / 時刻同期設定監視モジュール** — v1.64.0 (#335, PR #336)
+- [x] **ntp_config_monitor の監査ルール拡充** — v1.65.0 (#337, PR #338)
 
 ## 候補
 
-1. **clippy ベースライン整備** — main ブランチで発生している 111 件の clippy 警告 + 1 件のエラー（Rust 1.95.0 の新規 lint 由来が大半）を段階的に解消し、CI で `cargo clippy --all-targets -- -D warnings` を強制できる状態にする。特に `src/core/module_manager.rs:1087` の `absurd_extreme_comparisons` エラーは deny 指定で即修正可能
-2. **ntp_config_monitor の監査ルール拡充** — 現状の「サーバ未設定・makestep 未設定」に加え、`chrony.conf` の `allow`/`bindcmdaddress` による意図せぬネットワーク公開、`ntp.conf` の `restrict` 欠如、`driftfile` の絶対パス以外指定などを検知する。`cert_chain_monitor` のようにチェック項目ごとの boolean フラグで有効/無効を切り替えられるようにする
-3. **ntp_config_monitor の inotify 連携** — 定期ポーリングだけでなく inotify ベースでリアルタイムに改ざんを検知する。`cron_monitor` の inotify 実装パターンを参考にする
+1. **clippy ベースライン整備** — main ブランチで発生している clippy 警告 + エラー（Rust 1.95.0 の新規 lint 由来が大半）を段階的に解消し、CI で `cargo clippy --all-targets -- -D warnings` を強制できる状態にする。特に `src/core/module_manager.rs` の `absurd_extreme_comparisons` エラーは deny 指定で即修正可能
+2. **ntp_config_monitor の inotify 連携** — 定期ポーリングだけでなく inotify ベースでリアルタイムに改ざんを検知する。`cron_monitor` の inotify 実装パターンを参考にする
+3. **ntp_config_monitor の追加監査ルール** — v1.65.0 で追加した allow / bindcmdaddress / restrict / driftfile に加え、chrony の `cmdport` / `port` が既定以外の場合、ntpsigndsocket 公開、`keys` ファイル不在による NTP 認証無効化などを検知する
 4. **promtool ユニットテスト用の GitHub Actions ワークフロー追加** — PAT の workflow スコープ制約で v1.59.0 では README のサンプル掲載にとどめた `.github/workflows/promtool.yaml` を、適切な権限で追加し `grafana/alerts/**` の変更時に自動検証する
 5. **module-stats 履歴スナップショット機能** — `record_scan_duration` による最新 1024 サンプルに加え、1h/1d など時間粒度で集計したスナップショットを保持し、長期傾向（1日/1週間の P95 推移）を REST API で取得可能にする
 6. **module-stats --diff の定期比較スクリプト / cron ジョブサンプル** — v1.61.0 で `taken_at` 情報が埋め込まれるようになったので、スナップショットを自動ローテートし定期的に差分を Slack/Webhook に通知するユースケースのサンプル（README もしくは `examples/`）を追加する
