@@ -6136,6 +6136,21 @@ pub struct NtpConfigMonitorConfig {
     #[serde(default = "NtpConfigMonitorConfig::default_true")]
     pub check_driftfile_absolute: bool,
 
+    /// chrony の `cmdport` / `port` が既定値（cmdport=323 / port=123）から
+    /// 変更されている場合を検知
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_chrony_cmdport_port: bool,
+
+    /// chrony の `ntpsigndsocket` が world-writable な一時領域
+    /// （/tmp/ / /var/tmp/ / /dev/shm/）を指す場合を検知
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_ntpsigndsocket: bool,
+
+    /// chrony.conf / ntp.conf の `keys` ディレクティブが指定されているが
+    /// ファイルが存在しない場合（NTP 認証が事実上無効化されている可能性）を検知
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_keys_file_presence: bool,
+
     /// ファイルサイズ上限（バイト）
     #[serde(default = "NtpConfigMonitorConfig::default_max_file_size_bytes")]
     pub max_file_size_bytes: u64,
@@ -6175,6 +6190,9 @@ impl Default for NtpConfigMonitorConfig {
             check_chrony_bindcmdaddress: true,
             check_ntp_restrict: true,
             check_driftfile_absolute: true,
+            check_chrony_cmdport_port: true,
+            check_ntpsigndsocket: true,
+            check_keys_file_presence: true,
             max_file_size_bytes: Self::default_max_file_size_bytes(),
         }
     }
