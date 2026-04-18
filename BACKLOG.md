@@ -164,13 +164,14 @@
 - [x] **Grafana ダッシュボードのアラートルールサンプル** — v1.58.0 (#322, PR #323)
 - [x] **Grafana アラートルールの promtool ユニットテスト付属** — v1.59.0 (#324, PR #325)
 - [x] **module-stats CLI の統計比較モード (--diff / --save-snapshot)** — v1.60.0 (#326, PR #327)
+- [x] **module-stats スナップショットへの taken_at タイムスタンプ埋め込み** — v1.61.0 (#328, PR #329)
 
 ## 候補
 
 1. **promtool ユニットテスト用の GitHub Actions ワークフロー追加** — PAT の workflow スコープ制約で v1.59.0 では README のサンプル掲載にとどめた `.github/workflows/promtool.yaml` を、適切な権限で追加し `grafana/alerts/**` の変更時に自動検証する
 2. **module-stats 履歴スナップショット機能** — `record_scan_duration` による最新 1024 サンプルに加え、1h/1d など時間粒度で集計したスナップショットを保持し、長期傾向（1日/1週間の P95 推移）を REST API で取得可能にする
-3. **module-stats スナップショットへの taken_at タイムスタンプ埋め込み** — v1.60.0 では `--save-snapshot` 出力は API レスポンスそのままで taken_at が記録されないため、差分レポートの `baseline_taken_at` は常に `None` になる。snapshot 保存時に `{"taken_at": "...", "total": N, "modules": [...]}` の wrapper を追加し、`--diff` が baseline 時刻を表示できるようにする
-4. **module-stats --diff の定期比較スクリプト / cron ジョブサンプル** — スナップショットを自動ローテートし定期的に差分を Slack/Webhook に通知するユースケースのサンプル（README もしくは `examples/`）を追加する
+3. **module-stats --diff の定期比較スクリプト / cron ジョブサンプル** — v1.61.0 で `taken_at` 情報が埋め込まれるようになったので、スナップショットを自動ローテートし定期的に差分を Slack/Webhook に通知するユースケースのサンプル（README もしくは `examples/`）を追加する
+4. **module-stats snapshot 出力の整数オーバーフロー保護** — `compute_diff` の delta は `i64` キャストしているが、`u64::MAX` 近傍の値では wrap が起きるため `checked_sub` への置換と警告出力を追加する
 5. **clippy ベースライン整備** — main ブランチで発生している 112 件の clippy 警告・エラー（Rust 1.95.0 の新規 lint 由来が大半）を段階的に解消し、CI で `cargo clippy --all-targets -- -D warnings` を強制できる状態にする
 6. **Webhook 統合テスト強化** — wiremock を使った Webhook 送信の統合テスト（リトライ動作、4xx/5xx エラー処理、タイムアウト等）を追加する
 7. **モジュール依存関係管理** — モジュール間の依存関係を定義し、起動順序の制御やカスケード停止を可能にする仕組み
