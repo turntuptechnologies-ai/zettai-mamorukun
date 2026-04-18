@@ -1,6 +1,6 @@
 [package]
 name = "zettai-mamorukun"
-version = "1.62.0"
+version = "1.63.0"
 edition = "2024"
 description = "Linux サーバ向けサイバー攻撃防御デーモン"
 license = "MIT"
@@ -51,3 +51,4 @@ tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process"] }
 wiremock = "0.6"
 rcgen = "0.13"
+tracing-test = "0.2"

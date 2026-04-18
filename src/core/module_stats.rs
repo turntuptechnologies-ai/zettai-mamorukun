@@ -1114,4 +1114,68 @@ mod tests {
         };
         spawn_summary_logger(handle, &config);
     }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn test_u64_diff_logs_warn_on_positive_saturation() {
+        let result = u64_diff(u64::MAX, 0, "mod_x", "events_total");
+        assert_eq!(result, i64::MAX);
+        assert!(logs_contain("module-stats diff saturated at i64::MAX"));
+        assert!(logs_contain("mod_x"));
+        assert!(logs_contain("events_total"));
+        assert!(logs_contain(&u64::MAX.to_string()));
+        assert!(logs_contain("baseline=0"));
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn test_u64_diff_logs_warn_on_negative_saturation() {
+        let result = u64_diff(0, u64::MAX, "mod_y", "events_warning");
+        assert_eq!(result, i64::MIN);
+        assert!(logs_contain("module-stats diff saturated at i64::MIN"));
+        assert!(logs_contain("mod_y"));
+        assert!(logs_contain("events_warning"));
+        assert!(logs_contain("current=0"));
+        assert!(logs_contain(&u64::MAX.to_string()));
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn test_u64_diff_no_warn_on_normal_range() {
+        let result = u64_diff(150, 100, "mod_z", "events_total");
+        assert_eq!(result, 50);
+        assert!(!logs_contain("module-stats diff saturated"));
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn test_option_diff_logs_warn_on_saturation() {
+        let result = option_diff(Some(u64::MAX), Some(0), "mod_p", "scan_p95_ms");
+        assert_eq!(result, Some(i64::MAX));
+        assert!(logs_contain("module-stats diff saturated at i64::MAX"));
+        assert!(logs_contain("mod_p"));
+        assert!(logs_contain("scan_p95_ms"));
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn test_option_diff_no_warn_when_either_side_none() {
+        assert_eq!(option_diff(None, Some(100), "m", "x"), None);
+        assert_eq!(option_diff(Some(100), None, "m", "x"), None);
+        assert_eq!(option_diff(None, None, "m", "x"), None);
+        assert!(!logs_contain("module-stats diff saturated"));
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn test_compute_diff_logs_warn_with_module_and_metric_context() {
+        // compute_diff 経由でも各メトリック単位で module / metric を持った
+        // warn ログが出力されることを確認する
+        let baseline = vec![mk_stats("alpha_module", 0, None, None)];
+        let current = vec![mk_stats("alpha_module", u64::MAX, None, None)];
+        let _report = compute_diff(&baseline, &current, None, None);
+        assert!(logs_contain("alpha_module"));
+        assert!(logs_contain("events_total"));
+        assert!(logs_contain("module-stats diff saturated at i64::MAX"));
+    }
 }
