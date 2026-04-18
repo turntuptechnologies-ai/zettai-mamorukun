@@ -1496,6 +1496,12 @@ check_chrony_bindcmdaddress = true
 check_ntp_restrict = true
 # `driftfile` が絶対パス以外を指している場合を検知
 check_driftfile_absolute = true
+# chrony の `cmdport` / `port` が既定値（cmdport=323 / port=123）から変更されている場合を検知
+check_chrony_cmdport_port = true
+# chrony の `ntpsigndsocket` が world-writable な一時領域（/tmp/ / /var/tmp/ / /dev/shm/）を指す場合を検知
+check_ntpsigndsocket = true
+# chrony.conf / ntp.conf の `keys` 指定ファイルが存在しない場合（NTP 認証が無効化されている可能性）を検知
+check_keys_file_presence = true
 # ファイルサイズ上限（バイト）
 max_file_size_bytes = 1048576
 

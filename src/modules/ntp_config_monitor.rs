@@ -9,6 +9,13 @@
 //!   - `timesyncd.conf`: `NTP=` が空、または `FallbackNTP=` も未設定で同期先が存在しない
 //!   - `chrony.conf` / `ntp.conf`: `server` / `pool` エントリが 1 件もない（同期無効化）
 //!   - `chrony.conf`: `makestep` が設定されていない（クロックスキューの強制修正なし）
+//!   - `chrony.conf`: `allow` ディレクティブの全開放（`all` / `0.0.0.0/0` / `::/0`）
+//!   - `chrony.conf`: `bindcmdaddress` が全インターフェース公開（`0.0.0.0` / `::` / `*`）
+//!   - `ntp.conf`: `restrict default` ディレクティブ欠如（既定ポリシー無制限）
+//!   - `chrony.conf` / `ntp.conf`: `driftfile` が絶対パスでない
+//!   - `chrony.conf`: `cmdport` / `port` が既定値（323 / 123）と異なる
+//!   - `chrony.conf`: `ntpsigndsocket` が world-writable な一時領域を指す
+//!   - `chrony.conf` / `ntp.conf`: `keys` で指定された鍵ファイルが存在しない
 //!
 //! 攻撃者は時刻同期を無効化しログのタイムスタンプを改ざんすることで、フォレンジック
 //! 調査を妨害することがあるため、設定ファイルの変更検知と危険設定の検知が重要である。
@@ -284,11 +291,133 @@ fn audit_driftfile_absolute(content: &str, kind: NtpConfigKind) -> Vec<AuditFind
     findings
 }
 
+/// chrony の `cmdport` / `port` が既定値（cmdport=323 / port=123）と異なる場合を監査する
+///
+/// chronyc 制御ポート（`cmdport`）や NTP 待受ポート（`port`）を既定値から変更すると、
+/// 運用上の正当な理由が無い限り検知・監視を回避する踏み台となり得る。
+/// - 変更の事実 → Info
+/// - `cmdport 0`（意図的な無効化） → Info
+fn audit_chrony_cmdport_port(content: &str) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+
+    for value in find_keyword_lines(content, "cmdport") {
+        let trimmed = value.split_whitespace().next().unwrap_or("").trim();
+        if trimmed == "323" {
+            continue;
+        }
+        findings.push(AuditFinding {
+            kind: "chrony_cmdport_non_default".to_string(),
+            severity: Severity::Info,
+            message: format!(
+                "chrony.conf の `cmdport {}` は既定値 (323) と異なります（運用上の意図を確認してください）",
+                trimmed
+            ),
+        });
+    }
+
+    for value in find_keyword_lines(content, "port") {
+        let trimmed = value.split_whitespace().next().unwrap_or("").trim();
+        if trimmed == "123" {
+            continue;
+        }
+        findings.push(AuditFinding {
+            kind: "chrony_port_non_default".to_string(),
+            severity: Severity::Info,
+            message: format!(
+                "chrony.conf の `port {}` は既定値 (123) と異なります（運用上の意図を確認してください）",
+                trimmed
+            ),
+        });
+    }
+
+    findings
+}
+
+/// chrony の `ntpsigndsocket` が world-writable な一時領域を指していないかを監査する
+///
+/// Samba 等と連携する MS-SNTP ソケットを `/tmp/` / `/var/tmp/` / `/dev/shm/` 配下に
+/// 配置すると任意プロセスからの操作によりなりすましや権限昇格の踏み台となる危険がある。
+fn audit_ntpsigndsocket_public(content: &str) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    const RISKY_PREFIXES: [&str; 3] = ["/tmp/", "/var/tmp/", "/dev/shm/"];
+
+    for value in find_keyword_lines(content, "ntpsigndsocket") {
+        let trimmed = value.split_whitespace().next().unwrap_or("").trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let canonical = trimmed.trim_end_matches('/');
+        let is_risky = RISKY_PREFIXES
+            .iter()
+            .any(|prefix| trimmed.starts_with(prefix) || canonical == prefix.trim_end_matches('/'));
+        if is_risky {
+            findings.push(AuditFinding {
+                kind: "chrony_ntpsigndsocket_public".to_string(),
+                severity: Severity::Warning,
+                message: format!(
+                    "chrony.conf の `ntpsigndsocket {}` は world-writable な一時領域に配置されています（MS-SNTP ソケットが任意プロセスから操作され、権限昇格・なりすましの踏み台になる恐れがあります）",
+                    trimmed
+                ),
+            });
+        }
+    }
+
+    findings
+}
+
+/// `keys` ディレクティブが指すファイルの存在を監査する
+///
+/// chrony.conf / ntp.conf で `keys` を指定しながら、指定ファイルが存在しない場合は
+/// NTP 認証（`keyfile` / `trustedkey`）が無効化されている可能性を警告する。
+/// 相対パスは設定ファイルのディレクトリを基準に解決する。
+fn audit_keys_file_presence(
+    content: &str,
+    kind: NtpConfigKind,
+    config_path: &Path,
+) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    let base_dir = config_path.parent();
+
+    for value in find_keyword_lines(content, "keys") {
+        let trimmed = value.split_whitespace().next().unwrap_or("").trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let candidate = std::path::PathBuf::from(trimmed);
+        let resolved = if candidate.is_absolute() {
+            candidate
+        } else if let Some(dir) = base_dir {
+            dir.join(candidate)
+        } else {
+            candidate
+        };
+
+        if !resolved.exists() {
+            let kind_label = match kind {
+                NtpConfigKind::Chrony => "chrony.conf",
+                NtpConfigKind::Ntp => "ntp.conf",
+                _ => "NTP 設定",
+            };
+            findings.push(AuditFinding {
+                kind: "ntp_keys_file_missing".to_string(),
+                severity: Severity::Warning,
+                message: format!(
+                    "{} の `keys {}` が指定されていますが鍵ファイルが存在しません（NTP 認証が無効化されている可能性があります）",
+                    kind_label, trimmed
+                ),
+            });
+        }
+    }
+
+    findings
+}
+
 /// 種別に応じた監査関数をディスパッチする
 fn audit_by_kind(
     kind: NtpConfigKind,
     content: &str,
     config: &NtpConfigMonitorConfig,
+    config_path: &Path,
 ) -> Vec<AuditFinding> {
     let mut findings = Vec::new();
     match kind {
@@ -306,6 +435,15 @@ fn audit_by_kind(
             if config.check_driftfile_absolute {
                 findings.extend(audit_driftfile_absolute(content, kind));
             }
+            if config.check_chrony_cmdport_port {
+                findings.extend(audit_chrony_cmdport_port(content));
+            }
+            if config.check_ntpsigndsocket {
+                findings.extend(audit_ntpsigndsocket_public(content));
+            }
+            if config.check_keys_file_presence {
+                findings.extend(audit_keys_file_presence(content, kind, config_path));
+            }
         }
         NtpConfigKind::Ntp => {
             findings.extend(audit_ntp_servers(content, kind));
@@ -314,6 +452,9 @@ fn audit_by_kind(
             }
             if config.check_driftfile_absolute {
                 findings.extend(audit_driftfile_absolute(content, kind));
+            }
+            if config.check_keys_file_presence {
+                findings.extend(audit_keys_file_presence(content, kind, config_path));
             }
         }
         NtpConfigKind::Unknown => {}
@@ -390,7 +531,7 @@ impl NtpConfigMonitorModule {
         let hash = compute_sha256(content.as_bytes());
         let kind = NtpConfigKind::from_path(path);
         let findings = if config.audit_enabled {
-            audit_by_kind(kind, &content, config)
+            audit_by_kind(kind, &content, config, path)
         } else {
             Vec::new()
         };
@@ -1056,15 +1197,16 @@ mod tests {
         // chrony の allow/bindcmd をトリガーしつつ、サーバと makestep は設定済みにしておく
         let content =
             "pool foo\nmakestep 1.0 3\nallow all\nbindcmdaddress 0.0.0.0\ndriftfile drift\n";
+        let path = Path::new("/etc/chrony/chrony.conf");
 
         // 全フラグ有効（デフォルト） → allow / bindcmd / driftfile の 3 件
         let mut config = NtpConfigMonitorConfig::default();
-        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config);
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
         assert_eq!(findings.len(), 3);
 
         // allow のみ無効 → bindcmd / driftfile の 2 件
         config.check_chrony_allow = false;
-        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config);
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
         assert_eq!(findings.len(), 2);
         assert!(
             findings
@@ -1074,13 +1216,13 @@ mod tests {
 
         // bindcmd も無効 → driftfile 1 件
         config.check_chrony_bindcmdaddress = false;
-        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config);
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, "driftfile_not_absolute");
 
         // driftfile も無効 → 0 件
         config.check_driftfile_absolute = false;
-        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config);
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
         assert!(findings.is_empty());
     }
 
@@ -1088,21 +1230,22 @@ mod tests {
     fn test_audit_by_kind_ntp_restrict_flag() {
         // ntp.conf: server あり / restrict default 無し / driftfile 相対
         let content = "server 0.pool.ntp.org iburst\ndriftfile drift\n";
+        let path = Path::new("/etc/ntp.conf");
 
         // 全フラグ有効 → restrict 欠如 + driftfile 相対の 2 件
         let mut config = NtpConfigMonitorConfig::default();
-        let findings = audit_by_kind(NtpConfigKind::Ntp, content, &config);
+        let findings = audit_by_kind(NtpConfigKind::Ntp, content, &config, path);
         assert_eq!(findings.len(), 2);
 
         // restrict チェック無効 → driftfile のみ
         config.check_ntp_restrict = false;
-        let findings = audit_by_kind(NtpConfigKind::Ntp, content, &config);
+        let findings = audit_by_kind(NtpConfigKind::Ntp, content, &config, path);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, "driftfile_not_absolute");
 
         // driftfile チェック無効 → 0 件
         config.check_driftfile_absolute = false;
-        let findings = audit_by_kind(NtpConfigKind::Ntp, content, &config);
+        let findings = audit_by_kind(NtpConfigKind::Ntp, content, &config, path);
         assert!(findings.is_empty());
     }
 
@@ -1115,11 +1258,293 @@ mod tests {
             check_chrony_bindcmdaddress: false,
             check_ntp_restrict: false,
             check_driftfile_absolute: false,
+            check_chrony_cmdport_port: false,
+            check_ntpsigndsocket: false,
+            check_keys_file_presence: false,
             ..Default::default()
         };
-        let findings = audit_by_kind(NtpConfigKind::Timesyncd, content, &config);
+        let findings = audit_by_kind(
+            NtpConfigKind::Timesyncd,
+            content,
+            &config,
+            Path::new("/etc/systemd/timesyncd.conf"),
+        );
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, "timesyncd_no_servers");
+    }
+
+    // ------------------------------------------------------------------
+    // audit_chrony_cmdport_port
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_chrony_cmdport_default_no_finding() {
+        let content = "cmdport 323\nport 123\n";
+        let findings = audit_chrony_cmdport_port(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_cmdport_non_default_detects() {
+        let content = "cmdport 12345\n";
+        let findings = audit_chrony_cmdport_port(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_cmdport_non_default");
+        assert!(matches!(findings[0].severity, Severity::Info));
+        assert!(findings[0].message.contains("12345"));
+    }
+
+    #[test]
+    fn test_audit_chrony_cmdport_zero_is_reported() {
+        // cmdport 0 は意図的な無効化でも「既定と異なる」という情報提示は残す
+        let content = "cmdport 0\n";
+        let findings = audit_chrony_cmdport_port(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_cmdport_non_default");
+    }
+
+    #[test]
+    fn test_audit_chrony_port_non_default_detects() {
+        let content = "port 1234\n";
+        let findings = audit_chrony_cmdport_port(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_port_non_default");
+        assert!(matches!(findings[0].severity, Severity::Info));
+    }
+
+    #[test]
+    fn test_audit_chrony_cmdport_and_port_both_nonstandard() {
+        let content = "cmdport 999\nport 888\n";
+        let findings = audit_chrony_cmdport_port(content);
+        assert_eq!(findings.len(), 2);
+        let kinds: Vec<_> = findings.iter().map(|f| f.kind.as_str()).collect();
+        assert!(kinds.contains(&"chrony_cmdport_non_default"));
+        assert!(kinds.contains(&"chrony_port_non_default"));
+    }
+
+    #[test]
+    fn test_audit_chrony_cmdport_absent_no_finding() {
+        let content = "server foo\n# cmdport 999\n";
+        let findings = audit_chrony_cmdport_port(content);
+        assert!(findings.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // audit_ntpsigndsocket_public
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_ntpsigndsocket_public_risky_prefixes() {
+        for path in [
+            "/tmp/chrony.sock",
+            "/var/tmp/chrony.sock",
+            "/dev/shm/chrony.sock",
+        ] {
+            let content = format!("ntpsigndsocket {}\n", path);
+            let findings = audit_ntpsigndsocket_public(&content);
+            assert_eq!(findings.len(), 1, "path={}", path);
+            assert_eq!(findings[0].kind, "chrony_ntpsigndsocket_public");
+            assert!(matches!(findings[0].severity, Severity::Warning));
+            assert!(findings[0].message.contains(path));
+        }
+    }
+
+    #[test]
+    fn test_audit_ntpsigndsocket_safe_paths() {
+        for path in [
+            "/var/lib/samba/ntp_signd/socket",
+            "/run/chrony/ntp.signd",
+            "/var/run/chrony.signd",
+        ] {
+            let content = format!("ntpsigndsocket {}\n", path);
+            let findings = audit_ntpsigndsocket_public(&content);
+            assert!(findings.is_empty(), "path={} should not warn", path);
+        }
+    }
+
+    #[test]
+    fn test_audit_ntpsigndsocket_empty_no_finding() {
+        // 空値・未指定は検知しない
+        let content = "ntpsigndsocket \n";
+        let findings = audit_ntpsigndsocket_public(content);
+        assert!(findings.is_empty());
+        let content = "server foo\n";
+        let findings = audit_ntpsigndsocket_public(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_ntpsigndsocket_commented_ignored() {
+        let content = "# ntpsigndsocket /tmp/foo\n";
+        let findings = audit_ntpsigndsocket_public(content);
+        assert!(findings.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // audit_keys_file_presence
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_keys_file_missing_absolute_detects() {
+        let content = "keys /nonexistent/zettai-mamorukun/keys.file\n";
+        let findings = audit_keys_file_presence(
+            content,
+            NtpConfigKind::Chrony,
+            Path::new("/etc/chrony/chrony.conf"),
+        );
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "ntp_keys_file_missing");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+        assert!(findings[0].message.contains("chrony.conf"));
+    }
+
+    #[test]
+    fn test_audit_keys_file_present_absolute_no_finding() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("keys.file");
+        std::fs::write(&keys, "1 MD5 key\n").unwrap();
+        let content = format!("keys {}\n", keys.display());
+        let findings = audit_keys_file_presence(
+            &content,
+            NtpConfigKind::Chrony,
+            Path::new("/etc/chrony/chrony.conf"),
+        );
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_keys_file_relative_resolved_from_config_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("chrony.keys");
+        std::fs::write(&keys, "1 MD5 key\n").unwrap();
+        let config_path = dir.path().join("chrony.conf");
+
+        // 相対パスで指定 → 設定ファイルのディレクトリから解決され、存在するので検知なし
+        let content = "keys chrony.keys\n";
+        let findings = audit_keys_file_presence(content, NtpConfigKind::Chrony, &config_path);
+        assert!(findings.is_empty());
+
+        // 相対パス・別名で不在 → 検知
+        let content = "keys missing.keys\n";
+        let findings = audit_keys_file_presence(content, NtpConfigKind::Chrony, &config_path);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "ntp_keys_file_missing");
+    }
+
+    #[test]
+    fn test_audit_keys_file_ntp_label_used_for_ntp_conf() {
+        let content = "keys /nope/ntp.keys\n";
+        let findings =
+            audit_keys_file_presence(content, NtpConfigKind::Ntp, Path::new("/etc/ntp.conf"));
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].message.contains("ntp.conf"));
+    }
+
+    #[test]
+    fn test_audit_keys_file_no_directive_no_finding() {
+        let content = "server 0.pool.ntp.org iburst\n# keys /etc/nope\n";
+        let findings = audit_keys_file_presence(
+            content,
+            NtpConfigKind::Chrony,
+            Path::new("/etc/chrony/chrony.conf"),
+        );
+        assert!(findings.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // audit_by_kind: 新フラグの有効/無効切替
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_by_kind_chrony_new_flags_toggle() {
+        // pool + makestep は正常。cmdport/port 非既定、ntpsigndsocket を /tmp/ に配置、
+        // keys に不在ファイルを指定 → 新ルール 4 件（cmdport + port + ntpsigndsocket + keys）
+        let content = "pool foo\nmakestep 1.0 3\ncmdport 5000\nport 6000\nntpsigndsocket /tmp/s\nkeys /nope/keys\n";
+        let path = Path::new("/etc/chrony/chrony.conf");
+
+        let mut config = NtpConfigMonitorConfig::default();
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
+        let kinds: Vec<_> = findings.iter().map(|f| f.kind.as_str()).collect();
+        assert!(kinds.contains(&"chrony_cmdport_non_default"));
+        assert!(kinds.contains(&"chrony_port_non_default"));
+        assert!(kinds.contains(&"chrony_ntpsigndsocket_public"));
+        assert!(kinds.contains(&"ntp_keys_file_missing"));
+
+        // cmdport/port チェック無効 → 2 件だけ減る
+        config.check_chrony_cmdport_port = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_cmdport_non_default"
+                    && f.kind != "chrony_port_non_default")
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "chrony_ntpsigndsocket_public")
+        );
+        assert!(findings.iter().any(|f| f.kind == "ntp_keys_file_missing"));
+
+        // ntpsigndsocket も無効
+        config.check_ntpsigndsocket = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_ntpsigndsocket_public")
+        );
+        assert!(findings.iter().any(|f| f.kind == "ntp_keys_file_missing"));
+
+        // keys チェックも無効 → 新ルール由来の finding は 0 件
+        config.check_keys_file_presence = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_cmdport_non_default"
+                    && f.kind != "chrony_port_non_default"
+                    && f.kind != "chrony_ntpsigndsocket_public"
+                    && f.kind != "ntp_keys_file_missing")
+        );
+    }
+
+    #[test]
+    fn test_audit_by_kind_ntp_keys_flag_toggle() {
+        // ntp.conf に restrict default を設定して他のルールは抑制、
+        // driftfile 絶対パス、keys 不在のみ残す
+        let content = "server 0.pool.ntp.org iburst\nrestrict default ignore\ndriftfile /var/ntp.drift\nkeys /nope/keys\n";
+        let path = Path::new("/etc/ntp.conf");
+
+        let mut config = NtpConfigMonitorConfig::default();
+        let findings = audit_by_kind(NtpConfigKind::Ntp, content, &config, path);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "ntp_keys_file_missing");
+
+        config.check_keys_file_presence = false;
+        let findings = audit_by_kind(NtpConfigKind::Ntp, content, &config, path);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_scan_file_resolves_relative_keys_relative_to_config_dir() {
+        // scan_config_file 経由でも相対パスが正しく解決されることを確認
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("chrony.keys");
+        std::fs::write(&keys, "1 MD5 key\n").unwrap();
+
+        let path = dir.path().join("chrony.conf");
+        std::fs::write(
+            &path,
+            "pool 2.pool.ntp.org iburst\nmakestep 1.0 3\nkeys chrony.keys\n",
+        )
+        .unwrap();
+
+        let config = NtpConfigMonitorConfig::default();
+        let (_, findings) = NtpConfigMonitorModule::scan_config_file(&path, &config)
+            .expect("scan ok")
+            .expect("file present");
+        assert!(
+            findings.iter().all(|f| f.kind != "ntp_keys_file_missing"),
+            "expected no keys-missing finding, got: {:?}",
+            findings
+        );
     }
 
     #[tokio::test]
