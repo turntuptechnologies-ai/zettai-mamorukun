@@ -523,9 +523,11 @@ mod tests {
 
     #[test]
     fn test_shared_security_score_serialize() {
-        let mut score = SharedSecurityScore::default();
-        score.overall_score = 85;
-        score.grade = "B".to_string();
+        let mut score = SharedSecurityScore {
+            overall_score: 85,
+            grade: "B".to_string(),
+            ..Default::default()
+        };
         score.summary.total_events = 10;
         score.summary.critical = 1;
         score.summary.high = 2;

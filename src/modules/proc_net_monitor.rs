@@ -692,8 +692,10 @@ mod tests {
 
     #[test]
     fn test_init_zero_interval() {
-        let mut config = ProcNetMonitorConfig::default();
-        config.scan_interval_secs = 0;
+        let config = ProcNetMonitorConfig {
+            scan_interval_secs: 0,
+            ..Default::default()
+        };
         let mut module = ProcNetMonitorModule::new(config, None);
         assert!(module.init().is_err());
     }

@@ -415,7 +415,7 @@ mod tests {
     #[test]
     fn test_build_file_snapshot_deterministic() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "root ALL=(ALL:ALL) ALL\n").unwrap();
+        writeln!(tmpfile, "root ALL=(ALL:ALL) ALL").unwrap();
         let snapshot1 = build_file_snapshot(&tmpfile.path().to_path_buf()).unwrap();
         let snapshot2 = build_file_snapshot(&tmpfile.path().to_path_buf()).unwrap();
         assert_eq!(snapshot1.file_hash, snapshot2.file_hash);
@@ -425,7 +425,7 @@ mod tests {
     #[test]
     fn test_scan_files_with_single_file() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "root ALL=(ALL:ALL) ALL\n").unwrap();
+        writeln!(tmpfile, "root ALL=(ALL:ALL) ALL").unwrap();
         let path = tmpfile.path().to_path_buf();
 
         let watch_paths = vec![path.clone()];
@@ -466,7 +466,7 @@ mod tests {
     #[test]
     fn test_detect_no_changes() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "root ALL=(ALL:ALL) ALL\n").unwrap();
+        writeln!(tmpfile, "root ALL=(ALL:ALL) ALL").unwrap();
         let path = tmpfile.path().to_path_buf();
 
         let watch_paths = vec![path];
@@ -605,7 +605,7 @@ mod tests {
     #[tokio::test]
     async fn test_start_and_stop() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "root ALL=(ALL:ALL) ALL\n").unwrap();
+        writeln!(tmpfile, "root ALL=(ALL:ALL) ALL").unwrap();
 
         let config = SudoersMonitorConfig {
             enabled: true,
@@ -629,7 +629,7 @@ mod tests {
         std::fs::write(&dir_file, "user ALL=(ALL) ALL\n").unwrap();
 
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "root ALL=(ALL:ALL) ALL\n").unwrap();
+        writeln!(tmpfile, "root ALL=(ALL:ALL) ALL").unwrap();
 
         let watch_paths = vec![tmpfile.path().to_path_buf(), tmpdir.path().to_path_buf()];
         let result = SudoersMonitorModule::scan_files(&watch_paths);
@@ -660,8 +660,8 @@ mod tests {
     async fn test_initial_scan_with_files() {
         let mut tmpfile1 = tempfile::NamedTempFile::new().unwrap();
         let mut tmpfile2 = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile1, "root ALL=(ALL:ALL) ALL\n").unwrap();
-        write!(tmpfile2, "%admin ALL=(ALL) ALL\n").unwrap();
+        writeln!(tmpfile1, "root ALL=(ALL:ALL) ALL").unwrap();
+        writeln!(tmpfile2, "%admin ALL=(ALL) ALL").unwrap();
 
         let config = SudoersMonitorConfig {
             enabled: true,
@@ -707,7 +707,7 @@ mod tests {
     #[tokio::test]
     async fn test_periodic_scan_records_scan_duration() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "root ALL=(ALL:ALL) ALL\n").unwrap();
+        writeln!(tmpfile, "root ALL=(ALL:ALL) ALL").unwrap();
 
         let config = SudoersMonitorConfig {
             enabled: true,

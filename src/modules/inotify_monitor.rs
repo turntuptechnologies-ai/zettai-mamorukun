@@ -658,7 +658,7 @@ mod tests {
 
         // 最初のイベントは通過する
         let now = Instant::now();
-        assert!(debounce_map.get(&path).is_none());
+        assert!(!debounce_map.contains_key(&path));
         debounce_map.insert(path.clone(), now);
 
         // debounce 期間内のイベントはスキップされる

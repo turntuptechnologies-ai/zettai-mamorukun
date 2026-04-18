@@ -1083,8 +1083,8 @@ mod tests {
         let config = ModulesConfig::default();
         let event_bus = None;
         let (_, report) = ModuleManager::start_modules(&config, &event_bus, &None, true).await;
-        // total_duration はゼロ以上
-        assert!(report.total_duration.as_nanos() >= 0);
+        // total_duration は Duration 型の性質上常にゼロ以上
+        let _ = report.total_duration;
     }
 
     #[tokio::test]

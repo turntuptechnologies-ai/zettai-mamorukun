@@ -697,8 +697,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_initial_scan_returns_processes() {
-        let mut config = ProcessExecMonitorConfig::default();
-        config.scan_interval_secs = 60;
+        let config = ProcessExecMonitorConfig {
+            scan_interval_secs: 60,
+            ..Default::default()
+        };
         let mut module = ProcessExecMonitorModule::new(config, None);
         module.init().unwrap();
 

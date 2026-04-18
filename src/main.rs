@@ -1255,7 +1255,7 @@ fn format_module_stats_list(stats: &[zettai_mamorukun::core::module_stats::Modul
     // 検知イベント数 TOP 10（件数降順、0 件は除外）
     let mut by_events: Vec<&zettai_mamorukun::core::module_stats::ModuleStats> =
         stats.iter().filter(|s| s.events_total > 0).collect();
-    by_events.sort_by(|a, b| b.events_total.cmp(&a.events_total));
+    by_events.sort_by_key(|s| std::cmp::Reverse(s.events_total));
 
     let _ = writeln!(out, "■ 検知イベント数 TOP 10（モジュール別）");
     if by_events.is_empty() {
@@ -1311,7 +1311,7 @@ fn format_module_stats_list(stats: &[zettai_mamorukun::core::module_stats::Modul
     // スキャン実行時間ヒストグラム（P95 降順・サンプルが 1 件以上あるもののみ）
     let mut by_p95: Vec<&zettai_mamorukun::core::module_stats::ModuleStats> =
         stats.iter().filter(|s| s.scan_count > 0).collect();
-    by_p95.sort_by(|a, b| b.scan_p95_ms.unwrap_or(0).cmp(&a.scan_p95_ms.unwrap_or(0)));
+    by_p95.sort_by_key(|s| std::cmp::Reverse(s.scan_p95_ms.unwrap_or(0)));
 
     let _ = writeln!(out, "■ スキャン実行時間ヒストグラム（P95 降順）");
     if by_p95.is_empty() {

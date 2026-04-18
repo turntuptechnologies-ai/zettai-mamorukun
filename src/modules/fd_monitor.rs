@@ -347,8 +347,10 @@ mod tests {
     use std::os::unix::fs::symlink;
     use tempfile::TempDir;
 
+    type TestProcEntry<'a> = (u32, &'a str, &'a [(&'a str, &'a str)]);
+
     /// テスト用の /proc ディレクトリ構造を作成する
-    fn create_test_proc(entries: &[(u32, &str, &[(&str, &str)])]) -> TempDir {
+    fn create_test_proc(entries: &[TestProcEntry<'_>]) -> TempDir {
         let tmp = TempDir::new().unwrap();
         for (pid, comm, fds) in entries {
             let pid_dir = tmp.path().join(pid.to_string());

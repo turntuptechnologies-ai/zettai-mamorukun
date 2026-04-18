@@ -478,8 +478,10 @@ mod tests {
 
     #[test]
     fn test_init_zero_interval() {
-        let mut config = CoredumpMonitorConfig::default();
-        config.scan_interval_secs = 0;
+        let config = CoredumpMonitorConfig {
+            scan_interval_secs: 0,
+            ..Default::default()
+        };
         let mut module = CoredumpMonitorModule::new(config, None);
         assert!(module.init().is_err());
     }

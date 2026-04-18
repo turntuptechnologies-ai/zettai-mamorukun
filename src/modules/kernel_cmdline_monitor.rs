@@ -357,7 +357,6 @@ impl Module for KernelCmdlineMonitorModule {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     fn test_config(dir: &tempfile::TempDir) -> KernelCmdlineMonitorConfig {
         let cmdline_path = dir.path().join("cmdline");

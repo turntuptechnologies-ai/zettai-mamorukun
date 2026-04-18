@@ -188,9 +188,9 @@ impl SeccompMonitorModule {
                         }
                         has_changes = true;
                     }
-                    None => {
+                    None
                         // 新たに出現した監視対象プロセス
-                        if info.seccomp_mode == 0 {
+                        if info.seccomp_mode == 0 => {
                             let details = format!(
                                 "PID={}, プロセス={}, モード=0(DISABLED)",
                                 info.pid, info.name
@@ -213,7 +213,6 @@ impl SeccompMonitorModule {
                             }
                             has_changes = true;
                         }
-                    }
                     _ => {
                         // モード変更なし
                     }
@@ -338,8 +337,8 @@ impl Module for SeccompMonitorModule {
 
         let scan_snapshot: BTreeMap<String, String> = snapshot
             .processes
-            .iter()
-            .flat_map(|(_, infos)| {
+            .values()
+            .flat_map(|infos| {
                 infos.iter().map(|info| {
                     (
                         format!("{}:{}", info.name, info.pid),

@@ -668,7 +668,7 @@ mod tests {
     #[test]
     fn test_build_file_snapshot_deterministic() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "auth required pam_unix.so\n").unwrap();
+        writeln!(tmpfile, "auth required pam_unix.so").unwrap();
         let snapshot1 = build_file_snapshot(&tmpfile.path().to_path_buf()).unwrap();
         let snapshot2 = build_file_snapshot(&tmpfile.path().to_path_buf()).unwrap();
         assert_eq!(snapshot1.file_hash, snapshot2.file_hash);
@@ -678,7 +678,7 @@ mod tests {
     #[test]
     fn test_scan_files_with_single_file() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "auth required pam_unix.so\n").unwrap();
+        writeln!(tmpfile, "auth required pam_unix.so").unwrap();
         let path = tmpfile.path().to_path_buf();
 
         let watch_paths = vec![path.clone()];
@@ -719,7 +719,7 @@ mod tests {
     #[test]
     fn test_detect_no_changes() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "auth required pam_unix.so\n").unwrap();
+        writeln!(tmpfile, "auth required pam_unix.so").unwrap();
         let path = tmpfile.path().to_path_buf();
 
         let watch_paths = vec![path];
@@ -983,7 +983,7 @@ mod tests {
     #[tokio::test]
     async fn test_start_and_stop() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "auth required pam_unix.so\n").unwrap();
+        writeln!(tmpfile, "auth required pam_unix.so").unwrap();
 
         let config = PamMonitorConfig {
             enabled: true,
@@ -1007,7 +1007,7 @@ mod tests {
         std::fs::write(&dir_file, "auth required pam_unix.so\n").unwrap();
 
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        write!(tmpfile, "session required pam_loginuid.so\n").unwrap();
+        writeln!(tmpfile, "session required pam_loginuid.so").unwrap();
 
         let watch_paths = vec![tmpfile.path().to_path_buf(), tmpdir.path().to_path_buf()];
         let result = PamMonitorModule::scan_files(&watch_paths);
