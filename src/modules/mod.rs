@@ -43,6 +43,7 @@ pub mod namespace_monitor;
 pub mod network_interface_monitor;
 pub mod network_monitor;
 pub mod network_traffic_monitor;
+pub mod ntp_config_monitor;
 pub mod package_verify;
 pub mod pam_monitor;
 pub mod pkg_repo_monitor;

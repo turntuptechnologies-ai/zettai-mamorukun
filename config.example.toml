@@ -1470,6 +1470,27 @@ max_auth_tries_threshold = 6
 check_gateway_ports = true
 check_permit_tunnel = true
 
+[modules.ntp_config_monitor]
+# NTP / 時刻同期設定監視モジュール
+# systemd-timesyncd / chrony / ntpd の設定ファイルを定期的にスキャンし、
+# 改ざん・時刻同期の無効化などを検知する。
+# 攻撃者が時刻同期を止めてログのタイムスタンプを操作する（フォレンジック対策）
+# シナリオに対応するため、存在する設定ファイルすべてを監視する。
+enabled = false
+# スキャン間隔（秒）
+scan_interval_secs = 300
+# 監視対象ファイル（存在しないファイルは自動でスキップ）
+config_paths = [
+    "/etc/systemd/timesyncd.conf",
+    "/etc/ntp.conf",
+    "/etc/chrony/chrony.conf",
+    "/etc/chrony.conf",
+]
+# 危険な設定（NTP サーバ未設定、makestep 未設定など）の監査を有効化
+audit_enabled = true
+# ファイルサイズ上限（バイト）
+max_file_size_bytes = 1048576
+
 [modules.package_verify]
 # パッケージ整合性検証モジュール
 # dpkg --verify / rpm -Va を使ってインストール済みパッケージの改ざんを検知する
