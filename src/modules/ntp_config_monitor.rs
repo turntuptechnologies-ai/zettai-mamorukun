@@ -183,13 +183,142 @@ fn audit_ntp_servers(content: &str, kind: NtpConfigKind) -> Vec<AuditFinding> {
     findings
 }
 
-/// 種別に応じた監査関数をディスパッチする
-fn audit_by_kind(kind: NtpConfigKind, content: &str) -> Vec<AuditFinding> {
-    match kind {
-        NtpConfigKind::Timesyncd => audit_timesyncd(content),
-        NtpConfigKind::Chrony | NtpConfigKind::Ntp => audit_ntp_servers(content, kind),
-        NtpConfigKind::Unknown => Vec::new(),
+/// chrony の `allow` ディレクティブを監査する
+///
+/// - 引数なし（= `allow all`）または全開放（`0.0.0.0/0` / `::/0`）は Warning (`chrony_allow_open`)
+/// - 具体的なサブネット指定は Info (`chrony_allow_network`)
+fn audit_chrony_allow(content: &str) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    for value in find_keyword_lines(content, "allow") {
+        let trimmed = value.trim();
+        let is_open = trimmed.is_empty()
+            || trimmed.eq_ignore_ascii_case("all")
+            || trimmed == "0.0.0.0/0"
+            || trimmed == "::/0";
+
+        if is_open {
+            findings.push(AuditFinding {
+                kind: "chrony_allow_open".to_string(),
+                severity: Severity::Warning,
+                message: format!(
+                    "chrony.conf の `allow` ディレクティブが全開放になっています: `allow {}`（NTP サービスを任意クライアントに公開しており、増幅攻撃の踏み台や意図しない外部公開のリスクがあります）",
+                    if trimmed.is_empty() { "(引数なし)" } else { trimmed }
+                ),
+            });
+        } else {
+            findings.push(AuditFinding {
+                kind: "chrony_allow_network".to_string(),
+                severity: Severity::Info,
+                message: format!(
+                    "chrony.conf の `allow` ディレクティブでネットワークを許可しています: `allow {}`（意図した公開か確認してください）",
+                    trimmed
+                ),
+            });
+        }
     }
+    findings
+}
+
+/// chrony の `bindcmdaddress` が公開アドレスでないかを監査する
+fn audit_chrony_bindcmdaddress(content: &str) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    for value in find_keyword_lines(content, "bindcmdaddress") {
+        let trimmed = value.trim();
+        let is_public = trimmed == "0.0.0.0" || trimmed == "::" || trimmed == "*";
+        if is_public {
+            findings.push(AuditFinding {
+                kind: "chrony_bindcmd_public".to_string(),
+                severity: Severity::Warning,
+                message: format!(
+                    "chrony.conf の `bindcmdaddress {}` は chronyc のコマンドソケットを全インターフェースに公開します（localhost に制限することを推奨）",
+                    trimmed
+                ),
+            });
+        }
+    }
+    findings
+}
+
+/// ntp.conf の `restrict default` ディレクティブ欠如を監査する
+fn audit_ntp_restrict_default(content: &str) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    let has_restrict_default = find_keyword_lines(content, "restrict").any(|value| {
+        // `restrict` の引数先頭が `default` であれば有効とみなす
+        let mut tokens = value.split_whitespace();
+        matches!(tokens.next(), Some(tok) if tok.eq_ignore_ascii_case("default"))
+    });
+
+    if !has_restrict_default {
+        findings.push(AuditFinding {
+            kind: "ntp_no_restrict_default".to_string(),
+            severity: Severity::Warning,
+            message: "ntp.conf に `restrict default` ディレクティブが設定されていません（既定アクセスポリシーが制限されておらず、増幅攻撃の踏み台となるリスクがあります）".to_string(),
+        });
+    }
+    findings
+}
+
+/// `driftfile` が絶対パスかを監査する
+fn audit_driftfile_absolute(content: &str, kind: NtpConfigKind) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    for value in find_keyword_lines(content, "driftfile") {
+        let trimmed = value.trim();
+        // 値の先頭トークン（パス部分）を取り出す
+        let path_value = trimmed.split_whitespace().next().unwrap_or("");
+        if path_value.is_empty() || !path_value.starts_with('/') {
+            let kind_label = match kind {
+                NtpConfigKind::Chrony => "chrony.conf",
+                NtpConfigKind::Ntp => "ntp.conf",
+                _ => "NTP 設定",
+            };
+            findings.push(AuditFinding {
+                kind: "driftfile_not_absolute".to_string(),
+                severity: Severity::Info,
+                message: format!(
+                    "{} の `driftfile` が絶対パスではありません: `{}`（意図しない作業ディレクトリへの書き込みを避けるため絶対パスを推奨）",
+                    kind_label, trimmed
+                ),
+            });
+        }
+    }
+    findings
+}
+
+/// 種別に応じた監査関数をディスパッチする
+fn audit_by_kind(
+    kind: NtpConfigKind,
+    content: &str,
+    config: &NtpConfigMonitorConfig,
+) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    match kind {
+        NtpConfigKind::Timesyncd => {
+            findings.extend(audit_timesyncd(content));
+        }
+        NtpConfigKind::Chrony => {
+            findings.extend(audit_ntp_servers(content, kind));
+            if config.check_chrony_allow {
+                findings.extend(audit_chrony_allow(content));
+            }
+            if config.check_chrony_bindcmdaddress {
+                findings.extend(audit_chrony_bindcmdaddress(content));
+            }
+            if config.check_driftfile_absolute {
+                findings.extend(audit_driftfile_absolute(content, kind));
+            }
+        }
+        NtpConfigKind::Ntp => {
+            findings.extend(audit_ntp_servers(content, kind));
+            if config.check_ntp_restrict {
+                findings.extend(audit_ntp_restrict_default(content));
+            }
+            if config.check_driftfile_absolute {
+                findings.extend(audit_driftfile_absolute(content, kind));
+            }
+        }
+        NtpConfigKind::Unknown => {}
+    }
+    findings
 }
 
 /// NTP / 時刻同期設定監視モジュール
@@ -261,7 +390,7 @@ impl NtpConfigMonitorModule {
         let hash = compute_sha256(content.as_bytes());
         let kind = NtpConfigKind::from_path(path);
         let findings = if config.audit_enabled {
-            audit_by_kind(kind, &content)
+            audit_by_kind(kind, &content, config)
         } else {
             Vec::new()
         };
@@ -744,7 +873,7 @@ mod tests {
 
         // chrony: pool あり / makestep なし → Info 1 件
         std::fs::write(&chrony_path, "pool 2.pool.ntp.org iburst\n").unwrap();
-        // ntp: サーバなし → Warning 1 件
+        // ntp: サーバなし → Warning 1 件 + restrict default 欠如 → Warning 1 件 = 2 件
         std::fs::write(&ntp_path, "# empty\n").unwrap();
 
         let config = NtpConfigMonitorConfig {
@@ -758,7 +887,7 @@ mod tests {
         let module = NtpConfigMonitorModule::new(config, None);
         let result = module.initial_scan().await.unwrap();
         assert_eq!(result.items_scanned, 2);
-        assert_eq!(result.issues_found, 2);
+        assert_eq!(result.issues_found, 3);
         assert_eq!(result.snapshot.len(), 2);
         assert!(result.summary.contains("2件"));
     }
@@ -770,6 +899,227 @@ mod tests {
         assert!(module.stats_handle.is_none());
         module.set_module_stats(ModuleStatsHandle::new());
         assert!(module.stats_handle.is_some());
+    }
+
+    #[test]
+    fn test_audit_chrony_allow_open_variants() {
+        // 引数なしの allow → Warning
+        let content = "allow\n";
+        let findings = audit_chrony_allow(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_allow_open");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+
+        // allow all → Warning
+        let content = "allow all\n";
+        let findings = audit_chrony_allow(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_allow_open");
+
+        // allow 0.0.0.0/0 → Warning
+        let content = "allow 0.0.0.0/0\n";
+        let findings = audit_chrony_allow(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_allow_open");
+
+        // allow ::/0 → Warning
+        let content = "allow ::/0\n";
+        let findings = audit_chrony_allow(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_allow_open");
+    }
+
+    #[test]
+    fn test_audit_chrony_allow_specific_subnet_is_info() {
+        let content = "allow 192.168.0.0/24\n";
+        let findings = audit_chrony_allow(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_allow_network");
+        assert!(matches!(findings[0].severity, Severity::Info));
+    }
+
+    #[test]
+    fn test_audit_chrony_allow_multiple_lines() {
+        let content =
+            "allow 10.0.0.0/8\nallow 0.0.0.0/0\n# allow should not count\nallow 192.168.1.0/24\n";
+        let findings = audit_chrony_allow(content);
+        assert_eq!(findings.len(), 3);
+        let kinds: Vec<_> = findings.iter().map(|f| f.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "chrony_allow_network",
+                "chrony_allow_open",
+                "chrony_allow_network",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_allow_none_returns_empty() {
+        let content = "server time.example.com iburst\n# allow foo\n";
+        let findings = audit_chrony_allow(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_bindcmdaddress_public_addrs() {
+        for addr in ["0.0.0.0", "::", "*"] {
+            let content = format!("bindcmdaddress {}\n", addr);
+            let findings = audit_chrony_bindcmdaddress(&content);
+            assert_eq!(findings.len(), 1, "addr={}", addr);
+            assert_eq!(findings[0].kind, "chrony_bindcmd_public");
+            assert!(matches!(findings[0].severity, Severity::Warning));
+        }
+    }
+
+    #[test]
+    fn test_audit_chrony_bindcmdaddress_localhost_is_ok() {
+        for addr in ["127.0.0.1", "::1", "192.168.0.10"] {
+            let content = format!("bindcmdaddress {}\n", addr);
+            let findings = audit_chrony_bindcmdaddress(&content);
+            assert!(findings.is_empty(), "addr={} should not warn", addr);
+        }
+    }
+
+    #[test]
+    fn test_audit_chrony_bindcmdaddress_absent_is_ok() {
+        let content = "server foo\n# bindcmdaddress 0.0.0.0\n";
+        let findings = audit_chrony_bindcmdaddress(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_ntp_restrict_default_missing_detects() {
+        let content = "server 0.pool.ntp.org iburst\nrestrict 127.0.0.1\n";
+        let findings = audit_ntp_restrict_default(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "ntp_no_restrict_default");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+    }
+
+    #[test]
+    fn test_audit_ntp_restrict_default_ignore_is_ok() {
+        let content = "restrict default ignore\n";
+        let findings = audit_ntp_restrict_default(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_ntp_restrict_default_limited_is_ok() {
+        let content = "restrict default limited kod nomodify notrap nopeer noquery\n";
+        let findings = audit_ntp_restrict_default(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_ntp_restrict_default_commented_detects() {
+        let content = "# restrict default ignore\nserver foo\n";
+        let findings = audit_ntp_restrict_default(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "ntp_no_restrict_default");
+    }
+
+    #[test]
+    fn test_audit_driftfile_absolute_ok() {
+        let content = "driftfile /var/lib/chrony/drift\n";
+        let findings = audit_driftfile_absolute(content, NtpConfigKind::Chrony);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_driftfile_relative_detects() {
+        let content = "driftfile drift\n";
+        let findings = audit_driftfile_absolute(content, NtpConfigKind::Chrony);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "driftfile_not_absolute");
+        assert!(matches!(findings[0].severity, Severity::Info));
+    }
+
+    #[test]
+    fn test_audit_driftfile_missing_no_finding() {
+        let content = "server foo\n";
+        let findings = audit_driftfile_absolute(content, NtpConfigKind::Chrony);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_driftfile_empty_value_detects() {
+        let content = "driftfile \n";
+        let findings = audit_driftfile_absolute(content, NtpConfigKind::Chrony);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "driftfile_not_absolute");
+    }
+
+    #[test]
+    fn test_audit_by_kind_chrony_flags_disable_individual_checks() {
+        // chrony の allow/bindcmd をトリガーしつつ、サーバと makestep は設定済みにしておく
+        let content =
+            "pool foo\nmakestep 1.0 3\nallow all\nbindcmdaddress 0.0.0.0\ndriftfile drift\n";
+
+        // 全フラグ有効（デフォルト） → allow / bindcmd / driftfile の 3 件
+        let mut config = NtpConfigMonitorConfig::default();
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config);
+        assert_eq!(findings.len(), 3);
+
+        // allow のみ無効 → bindcmd / driftfile の 2 件
+        config.check_chrony_allow = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config);
+        assert_eq!(findings.len(), 2);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_allow_open" && f.kind != "chrony_allow_network")
+        );
+
+        // bindcmd も無効 → driftfile 1 件
+        config.check_chrony_bindcmdaddress = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "driftfile_not_absolute");
+
+        // driftfile も無効 → 0 件
+        config.check_driftfile_absolute = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_by_kind_ntp_restrict_flag() {
+        // ntp.conf: server あり / restrict default 無し / driftfile 相対
+        let content = "server 0.pool.ntp.org iburst\ndriftfile drift\n";
+
+        // 全フラグ有効 → restrict 欠如 + driftfile 相対の 2 件
+        let mut config = NtpConfigMonitorConfig::default();
+        let findings = audit_by_kind(NtpConfigKind::Ntp, content, &config);
+        assert_eq!(findings.len(), 2);
+
+        // restrict チェック無効 → driftfile のみ
+        config.check_ntp_restrict = false;
+        let findings = audit_by_kind(NtpConfigKind::Ntp, content, &config);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "driftfile_not_absolute");
+
+        // driftfile チェック無効 → 0 件
+        config.check_driftfile_absolute = false;
+        let findings = audit_by_kind(NtpConfigKind::Ntp, content, &config);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_by_kind_timesyncd_unaffected_by_new_flags() {
+        // timesyncd は新しいフラグの影響を受けない
+        let content = "[Time]\n#NTP=\n#FallbackNTP=\n";
+        let config = NtpConfigMonitorConfig {
+            check_chrony_allow: false,
+            check_chrony_bindcmdaddress: false,
+            check_ntp_restrict: false,
+            check_driftfile_absolute: false,
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Timesyncd, content, &config);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "timesyncd_no_servers");
     }
 
     #[tokio::test]
