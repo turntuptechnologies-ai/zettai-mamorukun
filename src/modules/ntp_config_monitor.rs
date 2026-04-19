@@ -20,6 +20,9 @@
 //!     world-readable / world-writable な過剰パーミッション（共有鍵漏洩リスク）
 //!   - `chrony.conf`: `keys` を設定しているのに `trustedkey` 未設定
 //!   - `chrony.conf`: `keys` を設定しているのに `authselectmode require` 未使用
+//!   - 設定ファイル本体の所有者 uid / gid が許容リスト外（既定: root のみ許容）
+//!     — 権限昇格の足場となる所有者改ざんを検知
+//!   - `keys` で指定された鍵ファイルの所有者 uid / gid が許容リスト外
 //!
 //! 攻撃者は時刻同期を無効化しログのタイムスタンプを改ざんすることで、フォレンジック
 //! 調査を妨害することがあるため、設定ファイルの変更検知と危険設定の検知が重要である。
@@ -479,6 +482,128 @@ fn audit_keys_file_permissions(
     findings
 }
 
+/// 指定された uid / gid が許容リストに含まれるかを判定する
+fn owner_uid_allowed(uid: u32, allowed: &[u32]) -> bool {
+    allowed.is_empty() || allowed.contains(&uid)
+}
+
+fn owner_gid_allowed(gid: u32, allowed: &[u32]) -> bool {
+    allowed.is_empty() || allowed.contains(&gid)
+}
+
+fn format_uid_list(uids: &[u32]) -> String {
+    if uids.is_empty() {
+        "(許容リスト空)".to_string()
+    } else {
+        uids.iter()
+            .map(|u| u.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+/// NTP 設定ファイル自体の所有者・グループを監査する
+///
+/// 設定ファイル（chrony.conf / ntp.conf / timesyncd.conf）の uid / gid が
+/// 許容リストから外れている場合、root 以外のユーザが設定を改変可能な状態となり、
+/// 時刻同期の妨害や鍵ファイル経路の書き換えによる権限昇格の足場となりうる。
+fn audit_config_file_owner(
+    metadata: &std::fs::Metadata,
+    path: &Path,
+    config: &NtpConfigMonitorConfig,
+) -> Vec<AuditFinding> {
+    use std::os::unix::fs::MetadataExt;
+
+    let mut findings = Vec::new();
+    let uid = metadata.uid();
+    let gid = metadata.gid();
+
+    if !owner_uid_allowed(uid, &config.allowed_owner_uids) {
+        findings.push(AuditFinding {
+            kind: "ntp_config_insecure_owner".to_string(),
+            severity: Severity::Warning,
+            message: format!(
+                "NTP 設定ファイル {} の所有者 uid={} が許容リスト ({}) に含まれていません（root 以外が所有する設定ファイルは権限昇格の足場となりえます）",
+                path.display(),
+                uid,
+                format_uid_list(&config.allowed_owner_uids)
+            ),
+        });
+    }
+
+    if !owner_gid_allowed(gid, &config.allowed_owner_gids) {
+        findings.push(AuditFinding {
+            kind: "ntp_config_insecure_group".to_string(),
+            severity: Severity::Warning,
+            message: format!(
+                "NTP 設定ファイル {} の所有グループ gid={} が許容リスト ({}) に含まれていません（書き込み権限を持つグループ経由での改ざんリスクがあります）",
+                path.display(),
+                gid,
+                format_uid_list(&config.allowed_owner_gids)
+            ),
+        });
+    }
+
+    findings
+}
+
+/// `keys` で指定された鍵ファイルの所有者・グループを監査する
+///
+/// keys ファイルの uid / gid が許容リストから外れている場合、共有鍵が第三者の
+/// 制御下にあり、認証情報の漏洩や書き換えが可能な状態を示す。対象ファイルが
+/// 存在しない / メタデータ取得に失敗した場合は検知しない（存在確認は
+/// `audit_keys_file_presence` の責務）。
+fn audit_keys_file_owner(
+    content: &str,
+    kind: NtpConfigKind,
+    config_path: &Path,
+    config: &NtpConfigMonitorConfig,
+) -> Vec<AuditFinding> {
+    use std::os::unix::fs::MetadataExt;
+
+    let mut findings = Vec::new();
+    for (raw, resolved) in iter_keys_paths(content, config_path) {
+        let metadata = match std::fs::metadata(&resolved) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let uid = metadata.uid();
+        let gid = metadata.gid();
+
+        if !owner_uid_allowed(uid, &config.allowed_owner_uids) {
+            findings.push(AuditFinding {
+                kind: "ntp_keys_file_insecure_owner".to_string(),
+                severity: Severity::Warning,
+                message: format!(
+                    "{} の `keys {}` が指す鍵ファイルの所有者 uid={} が許容リスト ({}) に含まれていません（共有鍵の所有者改ざんは認証情報漏洩につながります）",
+                    kind_label(kind),
+                    raw,
+                    uid,
+                    format_uid_list(&config.allowed_owner_uids)
+                ),
+            });
+        }
+
+        if !owner_gid_allowed(gid, &config.allowed_owner_gids) {
+            findings.push(AuditFinding {
+                kind: "ntp_keys_file_insecure_group".to_string(),
+                severity: Severity::Warning,
+                message: format!(
+                    "{} の `keys {}` が指す鍵ファイルの所有グループ gid={} が許容リスト ({}) に含まれていません",
+                    kind_label(kind),
+                    raw,
+                    gid,
+                    format_uid_list(&config.allowed_owner_gids)
+                ),
+            });
+        }
+    }
+    findings
+}
+
 /// chrony.conf で `keys` を設定しているのに `trustedkey` が未設定の場合を監査する
 ///
 /// `trustedkey` は NTP サーバ認証で信頼する key ID を指定するディレクティブで、
@@ -586,6 +711,9 @@ fn audit_by_kind(
             if config.check_chrony_authselectmode {
                 findings.extend(audit_chrony_authselectmode_weak(content));
             }
+            if config.check_keys_file_owner {
+                findings.extend(audit_keys_file_owner(content, kind, config_path, config));
+            }
         }
         NtpConfigKind::Ntp => {
             findings.extend(audit_ntp_servers(content, kind));
@@ -600,6 +728,9 @@ fn audit_by_kind(
             }
             if config.check_keys_file_permissions {
                 findings.extend(audit_keys_file_permissions(content, kind, config_path));
+            }
+            if config.check_keys_file_owner {
+                findings.extend(audit_keys_file_owner(content, kind, config_path, config));
             }
         }
         NtpConfigKind::Unknown => {}
@@ -675,11 +806,14 @@ impl NtpConfigMonitorModule {
 
         let hash = compute_sha256(content.as_bytes());
         let kind = NtpConfigKind::from_path(path);
-        let findings = if config.audit_enabled {
+        let mut findings = if config.audit_enabled {
             audit_by_kind(kind, &content, config, path)
         } else {
             Vec::new()
         };
+        if config.audit_enabled && config.check_config_owner {
+            findings.extend(audit_config_file_owner(&metadata, path, config));
+        }
 
         Ok(Some((hash, findings)))
     }
@@ -1112,7 +1246,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("chrony.conf");
         std::fs::write(&path, "pool 2.pool.ntp.org iburst\nmakestep 1.0 3\n").unwrap();
-        let config = NtpConfigMonitorConfig::default();
+        // owner 監査は既定有効だが、tempdir 配下は非 root 所有なので許容リストを空にして無効化
+        let config = NtpConfigMonitorConfig {
+            allowed_owner_uids: Vec::new(),
+            allowed_owner_gids: Vec::new(),
+            ..Default::default()
+        };
         let (_, findings) = NtpConfigMonitorModule::scan_config_file(&path, &config)
             .expect("scan ok")
             .expect("file present");
@@ -1168,6 +1307,10 @@ mod tests {
                 ntp_path.to_string_lossy().to_string(),
                 missing_path.to_string_lossy().to_string(),
             ],
+            // tempdir 配下は非 root 所有なので、既存の件数アサーションを維持するため
+            // 所有者監査を無効化する
+            check_config_owner: false,
+            check_keys_file_owner: false,
             ..Default::default()
         };
         let module = NtpConfigMonitorModule::new(config, None);
@@ -1960,6 +2103,278 @@ mod tests {
         );
     }
 
+    // ------------------------------------------------------------------
+    // audit_config_file_owner
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_config_file_owner_self_uid_detects() {
+        use std::os::unix::fs::MetadataExt;
+        // 現在のテストプロセスは root 以外で動作している前提
+        // （CI / 開発者環境は通常 uid != 0）
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chrony.conf");
+        std::fs::write(&path, "pool foo\n").unwrap();
+
+        let metadata = std::fs::metadata(&path).unwrap();
+        if metadata.uid() == 0 {
+            // root 環境ではこのテストをスキップ（既定許容 uid に一致するため）
+            return;
+        }
+
+        let config = NtpConfigMonitorConfig::default();
+        let findings = audit_config_file_owner(&metadata, &path, &config);
+        let kinds: Vec<_> = findings.iter().map(|f| f.kind.as_str()).collect();
+        assert!(kinds.contains(&"ntp_config_insecure_owner"));
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f.severity, Severity::Warning))
+        );
+    }
+
+    #[test]
+    fn test_audit_config_file_owner_allowed_uid_no_finding() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chrony.conf");
+        std::fs::write(&path, "pool foo\n").unwrap();
+
+        let metadata = std::fs::metadata(&path).unwrap();
+        // 現在の uid / gid を許容する
+        let config = NtpConfigMonitorConfig {
+            allowed_owner_uids: vec![metadata.uid()],
+            allowed_owner_gids: vec![metadata.gid()],
+            ..Default::default()
+        };
+        let findings = audit_config_file_owner(&metadata, &path, &config);
+        assert!(findings.is_empty(), "許容 uid/gid で検知は発生しない");
+    }
+
+    #[test]
+    fn test_audit_config_file_owner_empty_allowlist_allows_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chrony.conf");
+        std::fs::write(&path, "pool foo\n").unwrap();
+
+        let metadata = std::fs::metadata(&path).unwrap();
+        let config = NtpConfigMonitorConfig {
+            allowed_owner_uids: Vec::new(),
+            allowed_owner_gids: Vec::new(),
+            ..Default::default()
+        };
+        let findings = audit_config_file_owner(&metadata, &path, &config);
+        assert!(findings.is_empty(), "空の許容リストは全 uid/gid を許容する");
+    }
+
+    #[test]
+    fn test_audit_config_file_owner_group_only_violation() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chrony.conf");
+        std::fs::write(&path, "pool foo\n").unwrap();
+
+        let metadata = std::fs::metadata(&path).unwrap();
+        // uid は許容、gid のみ違反させる
+        let config = NtpConfigMonitorConfig {
+            allowed_owner_uids: vec![metadata.uid()],
+            allowed_owner_gids: vec![metadata.gid().wrapping_add(1)],
+            ..Default::default()
+        };
+        let findings = audit_config_file_owner(&metadata, &path, &config);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "ntp_config_insecure_group");
+    }
+
+    // ------------------------------------------------------------------
+    // audit_keys_file_owner
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_keys_file_owner_self_uid_detects() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("chrony.keys");
+        std::fs::write(&keys, "1 MD5 secret\n").unwrap();
+
+        let metadata = std::fs::metadata(&keys).unwrap();
+        if metadata.uid() == 0 {
+            return;
+        }
+
+        let content = format!("keys {}\n", keys.display());
+        let config = NtpConfigMonitorConfig::default();
+        let findings = audit_keys_file_owner(
+            &content,
+            NtpConfigKind::Chrony,
+            Path::new("/etc/chrony/chrony.conf"),
+            &config,
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "ntp_keys_file_insecure_owner")
+        );
+    }
+
+    #[test]
+    fn test_audit_keys_file_owner_missing_file_skipped() {
+        // 不在ファイルはスキップ（検知しない）
+        let content = "keys /nonexistent/zettai/keys.file\n";
+        let config = NtpConfigMonitorConfig::default();
+        let findings = audit_keys_file_owner(
+            content,
+            NtpConfigKind::Chrony,
+            Path::new("/etc/chrony/chrony.conf"),
+            &config,
+        );
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_keys_file_owner_allowed_uid_no_finding() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("chrony.keys");
+        std::fs::write(&keys, "1 MD5 secret\n").unwrap();
+
+        let metadata = std::fs::metadata(&keys).unwrap();
+        let content = format!("keys {}\n", keys.display());
+        let config = NtpConfigMonitorConfig {
+            allowed_owner_uids: vec![metadata.uid()],
+            allowed_owner_gids: vec![metadata.gid()],
+            ..Default::default()
+        };
+        let findings = audit_keys_file_owner(
+            &content,
+            NtpConfigKind::Chrony,
+            Path::new("/etc/chrony/chrony.conf"),
+            &config,
+        );
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_keys_file_owner_ntp_kind_label() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("ntp.keys");
+        std::fs::write(&keys, "1 MD5 secret\n").unwrap();
+
+        let metadata = std::fs::metadata(&keys).unwrap();
+        if metadata.uid() == 0 {
+            return;
+        }
+
+        let content = format!("keys {}\n", keys.display());
+        let config = NtpConfigMonitorConfig::default();
+        let findings = audit_keys_file_owner(
+            &content,
+            NtpConfigKind::Ntp,
+            Path::new("/etc/ntp.conf"),
+            &config,
+        );
+        assert!(findings.iter().any(|f| f.message.contains("ntp.conf")));
+    }
+
+    // ------------------------------------------------------------------
+    // audit_by_kind: owner 監査フラグの切替
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_by_kind_owner_flag_toggle() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("chrony.keys");
+        std::fs::write(&keys, "1 MD5 secret\n").unwrap();
+        std::fs::set_permissions(
+            &keys,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+        )
+        .unwrap();
+
+        let metadata = std::fs::metadata(&keys).unwrap();
+        if metadata.uid() == 0 {
+            return;
+        }
+
+        let config_path = dir.path().join("chrony.conf");
+        // pool+makestep で他ルールは抑制
+        let content = format!(
+            "pool 2.pool.ntp.org iburst\nmakestep 1.0 3\nkeys {}\ntrustedkey 1\nauthselectmode require\n",
+            keys.display()
+        );
+
+        // 既定: check_keys_file_owner = true → owner/group の finding 両方
+        let config = NtpConfigMonitorConfig::default();
+        let findings = audit_by_kind(NtpConfigKind::Chrony, &content, &config, &config_path);
+        let kinds: Vec<_> = findings.iter().map(|f| f.kind.as_str()).collect();
+        assert!(kinds.contains(&"ntp_keys_file_insecure_owner"));
+        assert!(kinds.contains(&"ntp_keys_file_insecure_group"));
+
+        // 無効化 → 検知しない
+        let config = NtpConfigMonitorConfig {
+            check_keys_file_owner: false,
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Chrony, &content, &config, &config_path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "ntp_keys_file_insecure_owner"
+                    && f.kind != "ntp_keys_file_insecure_group")
+        );
+    }
+
+    #[test]
+    fn test_scan_config_file_runs_config_owner_check() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chrony.conf");
+        std::fs::write(&path, "pool 2.pool.ntp.org iburst\nmakestep 1.0 3\n").unwrap();
+
+        let metadata = std::fs::metadata(&path).unwrap();
+        if metadata.uid() == 0 {
+            return;
+        }
+
+        // 既定（owner = true）: 非 root 所有 → ntp_config_insecure_owner 発生
+        let config = NtpConfigMonitorConfig::default();
+        let (_, findings) = NtpConfigMonitorModule::scan_config_file(&path, &config)
+            .expect("scan ok")
+            .expect("file present");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "ntp_config_insecure_owner")
+        );
+
+        // audit_enabled = false にすると owner 監査も実行されない
+        let config = NtpConfigMonitorConfig {
+            audit_enabled: false,
+            ..Default::default()
+        };
+        let (_, findings) = NtpConfigMonitorModule::scan_config_file(&path, &config)
+            .expect("scan ok")
+            .expect("file present");
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "ntp_config_insecure_owner")
+        );
+
+        // check_config_owner = false のみ無効化
+        let config = NtpConfigMonitorConfig {
+            check_config_owner: false,
+            ..Default::default()
+        };
+        let (_, findings) = NtpConfigMonitorModule::scan_config_file(&path, &config)
+            .expect("scan ok")
+            .expect("file present");
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "ntp_config_insecure_owner")
+        );
+    }
+
     #[test]
     fn test_audit_by_kind_ntp_keys_permissions_flag() {
         use std::os::unix::fs::PermissionsExt;
@@ -1986,6 +2401,8 @@ mod tests {
         );
 
         config.check_keys_file_permissions = false;
+        // owner 監査は既定有効で tempdir ファイル（非 root 所有）を検知してしまうので無効化
+        config.check_keys_file_owner = false;
         let findings = audit_by_kind(NtpConfigKind::Ntp, &content, &config, &config_path);
         assert!(findings.is_empty());
     }

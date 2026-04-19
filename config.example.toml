@@ -1508,6 +1508,17 @@ check_keys_file_permissions = true
 check_chrony_trustedkey = true
 # chrony で `keys` を設定しているのに `authselectmode require` が指定されていない場合を検知（認証失敗時のフォールバック）
 check_chrony_authselectmode = true
+# NTP 設定ファイル自体の所有者 uid / gid が許容リストから外れている場合を検知
+# （root 以外が所有する設定ファイルは権限昇格の足場となりえる）
+check_config_owner = true
+# `keys` で指定された鍵ファイルの所有者 uid / gid が許容リストから外れている場合を検知
+check_keys_file_owner = true
+# 所有者監査で許容する uid 一覧（既定: root のみ）。
+# Debian の chrony パッケージのように `_chrony` 所有が正常なディストリでは該当 uid を追加する。
+# 空配列 `[]` を指定するとすべての uid を許容する（監査スキップと同等）
+allowed_owner_uids = [0]
+# 所有者監査で許容する gid 一覧（既定: root のみ）
+allowed_owner_gids = [0]
 # ファイルサイズ上限（バイト）
 max_file_size_bytes = 1048576
 
