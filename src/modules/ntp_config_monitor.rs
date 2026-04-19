@@ -23,6 +23,11 @@
 //!   - 設定ファイル本体の所有者 uid / gid が許容リスト外（既定: root のみ許容）
 //!     — 権限昇格の足場となる所有者改ざんを検知
 //!   - `keys` で指定された鍵ファイルの所有者 uid / gid が許容リスト外
+//!   - `chrony.conf`: `leapsectz` 未設定（うるう秒情報ソースが指定されていない）
+//!   - `chrony.conf`: `maxsamples` が閾値未満（0=無制限を除く。NTP フィルタアルゴリズムの
+//!     サンプル数不足による時刻精度・外れ値耐性低下）
+//!   - `chrony.conf`: `minsamples > maxsamples`（同期に必要なサンプル数が採取できない
+//!     設定矛盾）
 //!
 //! 攻撃者は時刻同期を無効化しログのタイムスタンプを改ざんすることで、フォレンジック
 //! 調査を妨害することがあるため、設定ファイルの変更検知と危険設定の検知が重要である。
@@ -670,6 +675,86 @@ fn audit_chrony_authselectmode_weak(content: &str) -> Vec<AuditFinding> {
     findings
 }
 
+/// chrony.conf の `leapsectz` が設定されていない場合を監査する
+///
+/// `leapsectz` は tzdata の閏秒情報ゾーン名（通常 `right/UTC`）を指定するディレクティブで、
+/// 未設定の場合 chrony はサーバが通知する `Leap Indicator` のみに依存するため、閏秒挿入時
+/// に時刻 step または周波数補正のズレが生じやすくなる。Info で警告する。
+fn audit_chrony_leapsectz_missing(content: &str) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    let has_leapsectz = find_keyword_lines(content, "leapsectz")
+        .any(|v| !v.split_whitespace().next().unwrap_or("").trim().is_empty());
+    if !has_leapsectz {
+        findings.push(AuditFinding {
+            kind: "chrony_leapsectz_missing".to_string(),
+            severity: Severity::Info,
+            message:
+                "chrony.conf に `leapsectz` が設定されていません（閏秒情報ソースが未指定のため、閏秒挿入時の動作が不安定になる可能性があります。tzdata ゾーン `right/UTC` の指定を推奨）"
+                    .to_string(),
+        });
+    }
+    findings
+}
+
+/// chrony.conf の top-level ディレクティブから整数値をパースする
+///
+/// `find_keyword_lines` は行頭トークンが一致した行のみ返すため、`server ... maxsamples N`
+/// のような inline オプションには一致せず、top-level 設定だけを拾える。
+/// 複数行がある場合は後者が優先。
+fn parse_chrony_top_level_u32(content: &str, keyword: &str) -> Option<u32> {
+    let mut last: Option<u32> = None;
+    for value in find_keyword_lines(content, keyword) {
+        let token = value.split_whitespace().next().unwrap_or("").trim();
+        if let Ok(n) = token.parse::<u32>() {
+            last = Some(n);
+        }
+    }
+    last
+}
+
+/// chrony.conf の `maxsamples` / `minsamples` のサンプル数設定を監査する
+///
+/// - `maxsamples` が 0（= 無制限）を除き閾値未満 → `chrony_maxsamples_too_low` (Warning)
+///   - NTP フィルタアルゴリズムが少ないサンプルで動作し、外れ値・ジッター耐性が低下する
+/// - `minsamples > maxsamples`（両方設定かつ maxsamples != 0） → `chrony_minsamples_exceeds_maxsamples`
+///   (Warning) — 設定矛盾により必要サンプル数が採取できない
+fn audit_chrony_sample_counts(content: &str, maxsamples_min_threshold: u32) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+
+    let maxsamples = parse_chrony_top_level_u32(content, "maxsamples");
+    let minsamples = parse_chrony_top_level_u32(content, "minsamples");
+
+    if let Some(max) = maxsamples
+        && max != 0
+        && max < maxsamples_min_threshold
+    {
+        findings.push(AuditFinding {
+            kind: "chrony_maxsamples_too_low".to_string(),
+            severity: Severity::Warning,
+            message: format!(
+                "chrony.conf の `maxsamples {}` は推奨値（{} 以上）を下回っています（NTP フィルタリングのサンプル数が不足し、時刻精度や外れ値耐性が低下します）",
+                max, maxsamples_min_threshold
+            ),
+        });
+    }
+
+    if let (Some(max), Some(min)) = (maxsamples, minsamples)
+        && max != 0
+        && min > max
+    {
+        findings.push(AuditFinding {
+            kind: "chrony_minsamples_exceeds_maxsamples".to_string(),
+            severity: Severity::Warning,
+            message: format!(
+                "chrony.conf の `minsamples {}` が `maxsamples {}` を超えています（設定矛盾のため必要なサンプル数が採取されず、時刻同期が正常に機能しない可能性があります）",
+                min, max
+            ),
+        });
+    }
+
+    findings
+}
+
 /// 種別に応じた監査関数をディスパッチする
 fn audit_by_kind(
     kind: NtpConfigKind,
@@ -713,6 +798,15 @@ fn audit_by_kind(
             }
             if config.check_keys_file_owner {
                 findings.extend(audit_keys_file_owner(content, kind, config_path, config));
+            }
+            if config.check_chrony_leapsectz {
+                findings.extend(audit_chrony_leapsectz_missing(content));
+            }
+            if config.check_chrony_sample_counts {
+                findings.extend(audit_chrony_sample_counts(
+                    content,
+                    config.maxsamples_min_threshold,
+                ));
             }
         }
         NtpConfigKind::Ntp => {
@@ -1245,7 +1339,11 @@ mod tests {
     fn test_scan_chrony_safe_content_yields_no_findings() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("chrony.conf");
-        std::fs::write(&path, "pool 2.pool.ntp.org iburst\nmakestep 1.0 3\n").unwrap();
+        std::fs::write(
+            &path,
+            "pool 2.pool.ntp.org iburst\nmakestep 1.0 3\nleapsectz right/UTC\n",
+        )
+        .unwrap();
         // owner 監査は既定有効だが、tempdir 配下は非 root 所有なので許容リストを空にして無効化
         let config = NtpConfigMonitorConfig {
             allowed_owner_uids: Vec::new(),
@@ -1311,6 +1409,9 @@ mod tests {
             // 所有者監査を無効化する
             check_config_owner: false,
             check_keys_file_owner: false,
+            // leapsectz 未設定 / sample_counts の新規監査は件数に影響するため無効化
+            check_chrony_leapsectz: false,
+            check_chrony_sample_counts: false,
             ..Default::default()
         };
         let module = NtpConfigMonitorModule::new(config, None);
@@ -1483,8 +1584,8 @@ mod tests {
     #[test]
     fn test_audit_by_kind_chrony_flags_disable_individual_checks() {
         // chrony の allow/bindcmd をトリガーしつつ、サーバと makestep は設定済みにしておく
-        let content =
-            "pool foo\nmakestep 1.0 3\nallow all\nbindcmdaddress 0.0.0.0\ndriftfile drift\n";
+        // leapsectz 設定済み & maxsamples/minsamples 未設定で新規ルールが発火しない content にする
+        let content = "pool foo\nmakestep 1.0 3\nallow all\nbindcmdaddress 0.0.0.0\ndriftfile drift\nleapsectz right/UTC\n";
         let path = Path::new("/etc/chrony/chrony.conf");
 
         // 全フラグ有効（デフォルト） → allow / bindcmd / driftfile の 3 件
@@ -2405,6 +2506,246 @@ mod tests {
         config.check_keys_file_owner = false;
         let findings = audit_by_kind(NtpConfigKind::Ntp, &content, &config, &config_path);
         assert!(findings.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // audit_chrony_leapsectz_missing
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_chrony_leapsectz_missing_detects() {
+        let content = "pool 2.pool.ntp.org iburst\nmakestep 1.0 3\n";
+        let findings = audit_chrony_leapsectz_missing(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_leapsectz_missing");
+        assert!(matches!(findings[0].severity, Severity::Info));
+    }
+
+    #[test]
+    fn test_audit_chrony_leapsectz_set_no_finding() {
+        let content = "pool 2.pool.ntp.org iburst\nleapsectz right/UTC\n";
+        let findings = audit_chrony_leapsectz_missing(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_leapsectz_empty_value_detects() {
+        // 値が空なら未設定扱いで検知
+        let content = "pool 2.pool.ntp.org iburst\nleapsectz \n";
+        let findings = audit_chrony_leapsectz_missing(content);
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn test_audit_chrony_leapsectz_comment_ignored() {
+        // コメント行は未設定扱い
+        let content = "pool foo\n# leapsectz right/UTC\n";
+        let findings = audit_chrony_leapsectz_missing(content);
+        assert_eq!(findings.len(), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // audit_chrony_sample_counts
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_chrony_maxsamples_too_low_detects() {
+        let content = "pool foo\nmaxsamples 2\n";
+        let findings = audit_chrony_sample_counts(content, 4);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_maxsamples_too_low");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+        assert!(findings[0].message.contains("maxsamples 2"));
+    }
+
+    #[test]
+    fn test_audit_chrony_maxsamples_zero_is_unlimited_no_finding() {
+        // 0 = 無制限なので検知しない
+        let content = "pool foo\nmaxsamples 0\n";
+        let findings = audit_chrony_sample_counts(content, 4);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxsamples_at_threshold_no_finding() {
+        // 閾値ちょうど（4）は検知しない（< ではない）
+        let content = "pool foo\nmaxsamples 4\n";
+        let findings = audit_chrony_sample_counts(content, 4);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxsamples_high_value_no_finding() {
+        let content = "pool foo\nmaxsamples 64\n";
+        let findings = audit_chrony_sample_counts(content, 4);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_minsamples_exceeds_maxsamples_detects() {
+        let content = "pool foo\nmaxsamples 8\nminsamples 12\n";
+        let findings = audit_chrony_sample_counts(content, 4);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_minsamples_exceeds_maxsamples");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+        assert!(findings[0].message.contains("minsamples 12"));
+        assert!(findings[0].message.contains("maxsamples 8"));
+    }
+
+    #[test]
+    fn test_audit_chrony_minsamples_equal_maxsamples_no_finding() {
+        // min == max は許容（> で判定）
+        let content = "pool foo\nmaxsamples 8\nminsamples 8\n";
+        let findings = audit_chrony_sample_counts(content, 4);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_minsamples_with_maxsamples_zero_no_matrix_finding() {
+        // maxsamples 0 = 無制限の場合、minsamples との比較は行わない
+        let content = "pool foo\nmaxsamples 0\nminsamples 12\n";
+        let findings = audit_chrony_sample_counts(content, 4);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_sample_counts_both_issues_detects() {
+        // maxsamples 2 < 閾値 4 & minsamples 5 > maxsamples 2 の両方を検知
+        let content = "pool foo\nmaxsamples 2\nminsamples 5\n";
+        let findings = audit_chrony_sample_counts(content, 4);
+        assert_eq!(findings.len(), 2);
+        let kinds: Vec<_> = findings.iter().map(|f| f.kind.as_str()).collect();
+        assert!(kinds.contains(&"chrony_maxsamples_too_low"));
+        assert!(kinds.contains(&"chrony_minsamples_exceeds_maxsamples"));
+    }
+
+    #[test]
+    fn test_audit_chrony_sample_counts_not_set_no_finding() {
+        let content = "pool foo\nmakestep 1.0 3\n";
+        let findings = audit_chrony_sample_counts(content, 4);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_sample_counts_inline_option_not_matched() {
+        // server/pool の inline 引数として maxsamples 2 を指定しても、
+        // find_keyword_lines は行頭トークン一致のみのため top-level には該当しない
+        let content = "server 0.pool.ntp.org iburst maxsamples 2 minsamples 8\n";
+        let findings = audit_chrony_sample_counts(content, 4);
+        assert!(
+            findings.is_empty(),
+            "inline maxsamples/minsamples は誤検知しない"
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_sample_counts_custom_threshold() {
+        // 閾値を 8 に設定すると maxsamples 5 が検知対象になる
+        let content = "pool foo\nmaxsamples 5\n";
+        let findings = audit_chrony_sample_counts(content, 8);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_maxsamples_too_low");
+    }
+
+    #[test]
+    fn test_audit_chrony_sample_counts_threshold_zero_disabled() {
+        // 閾値 0 の場合、maxsamples 過少は検知されない（u32 は 0 未満にならない）
+        let content = "pool foo\nmaxsamples 1\n";
+        let findings = audit_chrony_sample_counts(content, 0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_parse_chrony_top_level_u32_last_wins() {
+        let content = "maxsamples 2\nmaxsamples 8\n";
+        assert_eq!(parse_chrony_top_level_u32(content, "maxsamples"), Some(8));
+    }
+
+    #[test]
+    fn test_parse_chrony_top_level_u32_invalid_ignored() {
+        let content = "maxsamples abc\nmaxsamples 7\n";
+        assert_eq!(parse_chrony_top_level_u32(content, "maxsamples"), Some(7));
+    }
+
+    // ------------------------------------------------------------------
+    // audit_by_kind: leapsectz / sample_counts フラグ切替
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_by_kind_leapsectz_flag_toggle() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        // pool+makestep+leapsectz 未設定、trustedkey / authselectmode 設定で他ルール抑制
+        let content = "pool 2.pool.ntp.org iburst\nmakestep 1.0 3\n";
+
+        // 既定有効: leapsectz 未設定を検知
+        let mut config = NtpConfigMonitorConfig {
+            check_keys_file_owner: false,
+            check_config_owner: false,
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, &config_path);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "chrony_leapsectz_missing")
+        );
+
+        // 無効化 → 検知しない
+        config.check_chrony_leapsectz = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, &config_path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_leapsectz_missing")
+        );
+    }
+
+    #[test]
+    fn test_audit_by_kind_sample_counts_flag_toggle() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = "pool 2.pool.ntp.org iburst\nmakestep 1.0 3\nleapsectz right/UTC\nmaxsamples 2\nminsamples 5\n";
+
+        // 既定有効: too_low / exceeds 両方検知
+        let mut config = NtpConfigMonitorConfig {
+            check_keys_file_owner: false,
+            check_config_owner: false,
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, &config_path);
+        let kinds: Vec<_> = findings.iter().map(|f| f.kind.as_str()).collect();
+        assert!(kinds.contains(&"chrony_maxsamples_too_low"));
+        assert!(kinds.contains(&"chrony_minsamples_exceeds_maxsamples"));
+
+        // 無効化 → 検知しない
+        config.check_chrony_sample_counts = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, &config_path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_maxsamples_too_low"
+                    && f.kind != "chrony_minsamples_exceeds_maxsamples")
+        );
+    }
+
+    #[test]
+    fn test_audit_by_kind_ntp_does_not_trigger_chrony_sample_counts() {
+        // NtpConfigKind::Ntp アームでは chrony 専用ルールはディスパッチされない
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("ntp.conf");
+        let content = "server 0.pool.ntp.org iburst\nrestrict default ignore\ndriftfile /var/ntp.drift\nmaxsamples 2\n";
+
+        let config = NtpConfigMonitorConfig {
+            check_keys_file_owner: false,
+            check_config_owner: false,
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Ntp, content, &config, &config_path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_maxsamples_too_low"
+                    && f.kind != "chrony_minsamples_exceeds_maxsamples"
+                    && f.kind != "chrony_leapsectz_missing")
+        );
     }
 
     #[tokio::test]

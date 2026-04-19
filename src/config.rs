@@ -6176,6 +6176,21 @@ pub struct NtpConfigMonitorConfig {
     #[serde(default = "NtpConfigMonitorConfig::default_true")]
     pub check_keys_file_owner: bool,
 
+    /// chrony の `leapsectz` 未設定を検知（閏秒情報ソースが指定されていない場合 Info）
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_chrony_leapsectz: bool,
+
+    /// chrony の `maxsamples` / `minsamples` サンプル数設定の整合性を検知
+    /// - `0 < maxsamples < maxsamples_min_threshold` の過少設定を Warning
+    /// - `minsamples > maxsamples`（両方設定かつ maxsamples != 0）の設定矛盾を Warning
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_chrony_sample_counts: bool,
+
+    /// `maxsamples_too_low` 判定の下限閾値（既定: 4）
+    /// chrony の NTP フィルタアルゴリズムは通常 4 以上のサンプルで安定動作する
+    #[serde(default = "NtpConfigMonitorConfig::default_maxsamples_min_threshold")]
+    pub maxsamples_min_threshold: u32,
+
     /// 所有者監査で許容する uid 一覧（デフォルトは `[0]` = root のみ）
     /// Debian の chrony パッケージのように `_chrony` 所有が正常なディストリでは
     /// 該当 uid を追加する
@@ -6220,6 +6235,10 @@ impl NtpConfigMonitorConfig {
     fn default_max_file_size_bytes() -> u64 {
         1_048_576
     }
+
+    fn default_maxsamples_min_threshold() -> u32 {
+        4
+    }
 }
 
 impl Default for NtpConfigMonitorConfig {
@@ -6241,6 +6260,9 @@ impl Default for NtpConfigMonitorConfig {
             check_chrony_authselectmode: true,
             check_config_owner: true,
             check_keys_file_owner: true,
+            check_chrony_leapsectz: true,
+            check_chrony_sample_counts: true,
+            maxsamples_min_threshold: Self::default_maxsamples_min_threshold(),
             allowed_owner_uids: Self::default_allowed_uids(),
             allowed_owner_gids: Self::default_allowed_gids(),
             max_file_size_bytes: Self::default_max_file_size_bytes(),
