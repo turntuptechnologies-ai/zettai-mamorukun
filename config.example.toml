@@ -1520,6 +1520,15 @@ check_chrony_leapsectz = true
 # - `0 < maxsamples < maxsamples_min_threshold` の過少設定 → Warning
 # - `minsamples > maxsamples`（maxsamples != 0）の設定矛盾 → Warning
 check_chrony_sample_counts = true
+# chrony の `refclock` ディレクティブを監査し、`allowed_refclock_drivers` に
+# 含まれないドライバが使われていれば Warning。特に `SHM` は /dev/shm 経由の
+# 時刻注入攻撃に利用されうるため、明示的に許可されていない場合は追加の警告文を付与する。
+check_chrony_refclock = true
+# `check_chrony_refclock` で許容する refclock ドライバ名（大文字小文字無視）。
+# 既定は空配列 = refclock の使用を一切許可しない（refclock を設定していない環境向け）。
+# PTP / GPS / PPS を正規に使っている環境では該当ドライバを明示的に列挙する。
+# 例: allowed_refclock_drivers = ["PHC", "PPS", "SOCK"]
+allowed_refclock_drivers = []
 # `maxsamples_too_low` 判定の下限閾値（既定: 4）
 # chrony の NTP フィルタアルゴリズムは通常 4 以上のサンプルで安定動作する
 # 0 に設定すると maxsamples 過少の検知を事実上無効化できる
