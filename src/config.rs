@@ -6166,6 +6166,26 @@ pub struct NtpConfigMonitorConfig {
     #[serde(default = "NtpConfigMonitorConfig::default_true")]
     pub check_chrony_authselectmode: bool,
 
+    /// NTP 設定ファイル自体の所有者 uid / gid が許容リストに含まれない場合を検知
+    /// （root 以外が所有する設定ファイルは権限昇格の足場として悪用されうる）
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_config_owner: bool,
+
+    /// `keys` で指定された鍵ファイルの所有者 uid / gid が許容リストに含まれない
+    /// 場合を検知（共有鍵の所有者改ざんは認証設定の書き換えを容易にする）
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_keys_file_owner: bool,
+
+    /// 所有者監査で許容する uid 一覧（デフォルトは `[0]` = root のみ）
+    /// Debian の chrony パッケージのように `_chrony` 所有が正常なディストリでは
+    /// 該当 uid を追加する
+    #[serde(default = "NtpConfigMonitorConfig::default_allowed_uids")]
+    pub allowed_owner_uids: Vec<u32>,
+
+    /// 所有者監査で許容する gid 一覧（デフォルトは `[0]` = root のみ）
+    #[serde(default = "NtpConfigMonitorConfig::default_allowed_gids")]
+    pub allowed_owner_gids: Vec<u32>,
+
     /// ファイルサイズ上限（バイト）
     #[serde(default = "NtpConfigMonitorConfig::default_max_file_size_bytes")]
     pub max_file_size_bytes: u64,
@@ -6187,6 +6207,14 @@ impl NtpConfigMonitorConfig {
 
     fn default_true() -> bool {
         true
+    }
+
+    fn default_allowed_uids() -> Vec<u32> {
+        vec![0]
+    }
+
+    fn default_allowed_gids() -> Vec<u32> {
+        vec![0]
     }
 
     fn default_max_file_size_bytes() -> u64 {
@@ -6211,6 +6239,10 @@ impl Default for NtpConfigMonitorConfig {
             check_keys_file_permissions: true,
             check_chrony_trustedkey: true,
             check_chrony_authselectmode: true,
+            check_config_owner: true,
+            check_keys_file_owner: true,
+            allowed_owner_uids: Self::default_allowed_uids(),
+            allowed_owner_gids: Self::default_allowed_gids(),
             max_file_size_bytes: Self::default_max_file_size_bytes(),
         }
     }
