@@ -16,6 +16,10 @@
 //!   - `chrony.conf`: `cmdport` / `port` が既定値（323 / 123）と異なる
 //!   - `chrony.conf`: `ntpsigndsocket` が world-writable な一時領域を指す
 //!   - `chrony.conf` / `ntp.conf`: `keys` で指定された鍵ファイルが存在しない
+//!   - `chrony.conf` / `ntp.conf`: `keys` で指定された鍵ファイルが
+//!     world-readable / world-writable な過剰パーミッション（共有鍵漏洩リスク）
+//!   - `chrony.conf`: `keys` を設定しているのに `trustedkey` 未設定
+//!   - `chrony.conf`: `keys` を設定しているのに `authselectmode require` 未使用
 //!
 //! 攻撃者は時刻同期を無効化しログのタイムスタンプを改ざんすることで、フォレンジック
 //! 調査を妨害することがあるため、設定ファイルの変更検知と危険設定の検知が重要である。
@@ -365,6 +369,39 @@ fn audit_ntpsigndsocket_public(content: &str) -> Vec<AuditFinding> {
     findings
 }
 
+/// `keys` ディレクティブの値（パス）を反復する
+///
+/// 相対パスは設定ファイルのディレクトリを基準に解決する。値が空の行はスキップする。
+fn iter_keys_paths<'a>(
+    content: &'a str,
+    config_path: &'a Path,
+) -> impl Iterator<Item = (String, std::path::PathBuf)> + 'a {
+    let base_dir = config_path.parent();
+    find_keyword_lines(content, "keys").filter_map(move |value| {
+        let trimmed = value.split_whitespace().next().unwrap_or("").trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let candidate = std::path::PathBuf::from(trimmed);
+        let resolved = if candidate.is_absolute() {
+            candidate
+        } else if let Some(dir) = base_dir {
+            dir.join(candidate)
+        } else {
+            candidate
+        };
+        Some((trimmed.to_string(), resolved))
+    })
+}
+
+fn kind_label(kind: NtpConfigKind) -> &'static str {
+    match kind {
+        NtpConfigKind::Chrony => "chrony.conf",
+        NtpConfigKind::Ntp => "ntp.conf",
+        _ => "NTP 設定",
+    }
+}
+
 /// `keys` ディレクティブが指すファイルの存在を監査する
 ///
 /// chrony.conf / ntp.conf で `keys` を指定しながら、指定ファイルが存在しない場合は
@@ -376,39 +413,135 @@ fn audit_keys_file_presence(
     config_path: &Path,
 ) -> Vec<AuditFinding> {
     let mut findings = Vec::new();
-    let base_dir = config_path.parent();
-
-    for value in find_keyword_lines(content, "keys") {
-        let trimmed = value.split_whitespace().next().unwrap_or("").trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let candidate = std::path::PathBuf::from(trimmed);
-        let resolved = if candidate.is_absolute() {
-            candidate
-        } else if let Some(dir) = base_dir {
-            dir.join(candidate)
-        } else {
-            candidate
-        };
-
+    for (raw, resolved) in iter_keys_paths(content, config_path) {
         if !resolved.exists() {
-            let kind_label = match kind {
-                NtpConfigKind::Chrony => "chrony.conf",
-                NtpConfigKind::Ntp => "ntp.conf",
-                _ => "NTP 設定",
-            };
             findings.push(AuditFinding {
                 kind: "ntp_keys_file_missing".to_string(),
                 severity: Severity::Warning,
                 message: format!(
                     "{} の `keys {}` が指定されていますが鍵ファイルが存在しません（NTP 認証が無効化されている可能性があります）",
-                    kind_label, trimmed
+                    kind_label(kind),
+                    raw
                 ),
             });
         }
     }
+    findings
+}
 
+/// `keys` で指定された鍵ファイルの過剰パーミッションを監査する
+///
+/// world-readable（`o+r`）または world-writable（`o+w`）は共有鍵漏洩・改ざんの
+/// リスクがあるため Warning を発行する。対象ファイルが存在しない場合や
+/// メタデータ取得に失敗した場合は検知しない（存在確認は `audit_keys_file_presence`
+/// が担当する）。
+fn audit_keys_file_permissions(
+    content: &str,
+    kind: NtpConfigKind,
+    config_path: &Path,
+) -> Vec<AuditFinding> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut findings = Vec::new();
+    for (raw, resolved) in iter_keys_paths(content, config_path) {
+        let metadata = match std::fs::metadata(&resolved) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let mode = metadata.permissions().mode() & 0o777;
+        let world_readable = mode & 0o004 != 0;
+        let world_writable = mode & 0o002 != 0;
+        if !world_readable && !world_writable {
+            continue;
+        }
+        let mut flags = Vec::new();
+        if world_readable {
+            flags.push("world-readable");
+        }
+        if world_writable {
+            flags.push("world-writable");
+        }
+        findings.push(AuditFinding {
+            kind: "ntp_keys_file_insecure_perms".to_string(),
+            severity: Severity::Warning,
+            message: format!(
+                "{} の `keys {}` が指す鍵ファイルのパーミッションが過剰です (mode=0o{:o}, {}): 共有鍵が他ユーザに漏洩する恐れがあります",
+                kind_label(kind),
+                raw,
+                mode,
+                flags.join(" / ")
+            ),
+        });
+    }
+    findings
+}
+
+/// chrony.conf で `keys` を設定しているのに `trustedkey` が未設定の場合を監査する
+///
+/// `trustedkey` は NTP サーバ認証で信頼する key ID を指定するディレクティブで、
+/// 設定されていないと鍵ファイルがあっても認証が実効的に機能しない。
+fn audit_chrony_trustedkey_missing(content: &str) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    let has_keys = find_keyword_lines(content, "keys")
+        .any(|v| !v.split_whitespace().next().unwrap_or("").trim().is_empty());
+    if !has_keys {
+        return findings;
+    }
+    let has_trustedkey = find_keyword_lines(content, "trustedkey").any(|v| !v.trim().is_empty());
+    if !has_trustedkey {
+        findings.push(AuditFinding {
+            kind: "chrony_no_trustedkey".to_string(),
+            severity: Severity::Warning,
+            message:
+                "chrony.conf で `keys` を設定していますが `trustedkey` が指定されていません（信頼する key ID が無いため NTP 認証が実効的に機能しません）"
+                    .to_string(),
+        });
+    }
+    findings
+}
+
+/// chrony.conf で `keys` を設定しているのに `authselectmode require` が
+/// 指定されていない場合を監査する
+///
+/// 既定の `prefer` モードでは認証失敗時に非認証同期へフォールバックしてしまうため、
+/// 認証運用時は `require` を明示するのが安全。未設定もしくは require 以外なら Info。
+fn audit_chrony_authselectmode_weak(content: &str) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    let has_keys = find_keyword_lines(content, "keys")
+        .any(|v| !v.split_whitespace().next().unwrap_or("").trim().is_empty());
+    if !has_keys {
+        return findings;
+    }
+
+    let mut authselectmode_value: Option<String> = None;
+    for value in find_keyword_lines(content, "authselectmode") {
+        let token = value.split_whitespace().next().unwrap_or("").trim();
+        if !token.is_empty() {
+            authselectmode_value = Some(token.to_ascii_lowercase());
+        }
+    }
+
+    match authselectmode_value.as_deref() {
+        Some("require") => {}
+        Some(other) => findings.push(AuditFinding {
+            kind: "chrony_authselectmode_weak".to_string(),
+            severity: Severity::Info,
+            message: format!(
+                "chrony.conf の `authselectmode {}` は認証失敗時に非認証同期へフォールバックします（認証運用時は `authselectmode require` を推奨）",
+                other
+            ),
+        }),
+        None => findings.push(AuditFinding {
+            kind: "chrony_authselectmode_weak".to_string(),
+            severity: Severity::Info,
+            message:
+                "chrony.conf に `authselectmode` が設定されていません（既定の `prefer` は認証失敗時に非認証同期へフォールバックするため、認証運用時は `authselectmode require` を推奨）"
+                    .to_string(),
+        }),
+    }
     findings
 }
 
@@ -444,6 +577,15 @@ fn audit_by_kind(
             if config.check_keys_file_presence {
                 findings.extend(audit_keys_file_presence(content, kind, config_path));
             }
+            if config.check_keys_file_permissions {
+                findings.extend(audit_keys_file_permissions(content, kind, config_path));
+            }
+            if config.check_chrony_trustedkey {
+                findings.extend(audit_chrony_trustedkey_missing(content));
+            }
+            if config.check_chrony_authselectmode {
+                findings.extend(audit_chrony_authselectmode_weak(content));
+            }
         }
         NtpConfigKind::Ntp => {
             findings.extend(audit_ntp_servers(content, kind));
@@ -455,6 +597,9 @@ fn audit_by_kind(
             }
             if config.check_keys_file_presence {
                 findings.extend(audit_keys_file_presence(content, kind, config_path));
+            }
+            if config.check_keys_file_permissions {
+                findings.extend(audit_keys_file_permissions(content, kind, config_path));
             }
         }
         NtpConfigKind::Unknown => {}
@@ -1261,6 +1406,9 @@ mod tests {
             check_chrony_cmdport_port: false,
             check_ntpsigndsocket: false,
             check_keys_file_presence: false,
+            check_keys_file_permissions: false,
+            check_chrony_trustedkey: false,
+            check_chrony_authselectmode: false,
             ..Default::default()
         };
         let findings = audit_by_kind(
@@ -1545,6 +1693,301 @@ mod tests {
             "expected no keys-missing finding, got: {:?}",
             findings
         );
+    }
+
+    // ------------------------------------------------------------------
+    // audit_keys_file_permissions
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_keys_file_permissions_world_readable_detects() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("chrony.keys");
+        std::fs::write(&keys, "1 MD5 secret\n").unwrap();
+        // 0o644 は world-readable
+        std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let content = format!("keys {}\n", keys.display());
+        let findings = audit_keys_file_permissions(
+            &content,
+            NtpConfigKind::Chrony,
+            Path::new("/etc/chrony/chrony.conf"),
+        );
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "ntp_keys_file_insecure_perms");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+        assert!(findings[0].message.contains("world-readable"));
+    }
+
+    #[test]
+    fn test_audit_keys_file_permissions_world_writable_detects() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("chrony.keys");
+        std::fs::write(&keys, "1 MD5 secret\n").unwrap();
+        // 0o622: owner rw / group w / other w — world-writable only
+        std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o622)).unwrap();
+
+        let content = format!("keys {}\n", keys.display());
+        let findings = audit_keys_file_permissions(
+            &content,
+            NtpConfigKind::Chrony,
+            Path::new("/etc/chrony/chrony.conf"),
+        );
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "ntp_keys_file_insecure_perms");
+        assert!(findings[0].message.contains("world-writable"));
+        assert!(!findings[0].message.contains("world-readable"));
+    }
+
+    #[test]
+    fn test_audit_keys_file_permissions_both_world_perms() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("chrony.keys");
+        std::fs::write(&keys, "1 MD5 secret\n").unwrap();
+        std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o666)).unwrap();
+
+        let content = format!("keys {}\n", keys.display());
+        let findings = audit_keys_file_permissions(
+            &content,
+            NtpConfigKind::Chrony,
+            Path::new("/etc/chrony/chrony.conf"),
+        );
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].message.contains("world-readable"));
+        assert!(findings[0].message.contains("world-writable"));
+    }
+
+    #[test]
+    fn test_audit_keys_file_permissions_safe_mode_no_finding() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("chrony.keys");
+        std::fs::write(&keys, "1 MD5 secret\n").unwrap();
+        // 0o600: owner のみ rw
+        std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let content = format!("keys {}\n", keys.display());
+        let findings = audit_keys_file_permissions(
+            &content,
+            NtpConfigKind::Chrony,
+            Path::new("/etc/chrony/chrony.conf"),
+        );
+        assert!(findings.is_empty());
+
+        std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let findings = audit_keys_file_permissions(
+            &content,
+            NtpConfigKind::Chrony,
+            Path::new("/etc/chrony/chrony.conf"),
+        );
+        assert!(findings.is_empty(), "group-read は許容されるべき");
+    }
+
+    #[test]
+    fn test_audit_keys_file_permissions_missing_file_no_finding() {
+        // ファイルが存在しない場合は permission チェックは検知しない
+        // (存在チェックは audit_keys_file_presence の責務)
+        let content = "keys /nonexistent/zettai/keys.file\n";
+        let findings = audit_keys_file_permissions(
+            content,
+            NtpConfigKind::Chrony,
+            Path::new("/etc/chrony/chrony.conf"),
+        );
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_keys_file_permissions_ntp_kind_label() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("ntp.keys");
+        std::fs::write(&keys, "1 MD5 secret\n").unwrap();
+        std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let content = format!("keys {}\n", keys.display());
+        let findings =
+            audit_keys_file_permissions(&content, NtpConfigKind::Ntp, Path::new("/etc/ntp.conf"));
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].message.contains("ntp.conf"));
+    }
+
+    // ------------------------------------------------------------------
+    // audit_chrony_trustedkey_missing
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_chrony_trustedkey_missing_when_keys_set() {
+        let content = "keys /etc/chrony.keys\nserver foo\n";
+        let findings = audit_chrony_trustedkey_missing(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_no_trustedkey");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+    }
+
+    #[test]
+    fn test_audit_chrony_trustedkey_present_no_finding() {
+        let content = "keys /etc/chrony.keys\ntrustedkey 1 2\n";
+        let findings = audit_chrony_trustedkey_missing(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_trustedkey_no_keys_no_finding() {
+        // keys が無ければ trustedkey 未設定でも検知しない
+        let content = "server foo\n";
+        let findings = audit_chrony_trustedkey_missing(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_trustedkey_empty_value_detects() {
+        // trustedkey が空白のみの値しか無ければ未設定扱い
+        let content = "keys /etc/chrony.keys\ntrustedkey    \n";
+        let findings = audit_chrony_trustedkey_missing(content);
+        assert_eq!(findings.len(), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // audit_chrony_authselectmode_weak
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_chrony_authselectmode_missing_when_keys_set() {
+        let content = "keys /etc/chrony.keys\ntrustedkey 1\n";
+        let findings = audit_chrony_authselectmode_weak(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_authselectmode_weak");
+        assert!(matches!(findings[0].severity, Severity::Info));
+        assert!(findings[0].message.contains("authselectmode"));
+    }
+
+    #[test]
+    fn test_audit_chrony_authselectmode_require_no_finding() {
+        let content = "keys /etc/chrony.keys\nauthselectmode require\n";
+        let findings = audit_chrony_authselectmode_weak(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_authselectmode_require_case_insensitive() {
+        let content = "keys /etc/chrony.keys\nauthselectmode REQUIRE\n";
+        let findings = audit_chrony_authselectmode_weak(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_authselectmode_prefer_detects() {
+        let content = "keys /etc/chrony.keys\nauthselectmode prefer\n";
+        let findings = audit_chrony_authselectmode_weak(content);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].message.contains("prefer"));
+    }
+
+    #[test]
+    fn test_audit_chrony_authselectmode_mix_detects() {
+        let content = "keys /etc/chrony.keys\nauthselectmode mix\n";
+        let findings = audit_chrony_authselectmode_weak(content);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].message.contains("mix"));
+    }
+
+    #[test]
+    fn test_audit_chrony_authselectmode_no_keys_no_finding() {
+        // keys 未指定なら authselectmode 設定が無くても検知しない
+        let content = "server foo\n";
+        let findings = audit_chrony_authselectmode_weak(content);
+        assert!(findings.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // audit_by_kind: 新フラグの切替
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_by_kind_chrony_auth_flags_toggle() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let keys_path = dir.path().join("chrony.keys");
+        std::fs::write(&keys_path, "1 MD5 secret\n").unwrap();
+        std::fs::set_permissions(&keys_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let config_path = dir.path().join("chrony.conf");
+
+        // pool + makestep で基本ルールは抑制、keys あり & world-readable、
+        // trustedkey / authselectmode 未設定
+        let content = format!(
+            "pool 2.pool.ntp.org iburst\nmakestep 1.0 3\nkeys {}\n",
+            keys_path.display()
+        );
+
+        let mut config = NtpConfigMonitorConfig::default();
+        let findings = audit_by_kind(NtpConfigKind::Chrony, &content, &config, &config_path);
+        let kinds: Vec<_> = findings.iter().map(|f| f.kind.as_str()).collect();
+        assert!(kinds.contains(&"ntp_keys_file_insecure_perms"));
+        assert!(kinds.contains(&"chrony_no_trustedkey"));
+        assert!(kinds.contains(&"chrony_authselectmode_weak"));
+
+        // 各フラグを順に無効化
+        config.check_keys_file_permissions = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, &content, &config, &config_path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "ntp_keys_file_insecure_perms")
+        );
+        assert!(findings.iter().any(|f| f.kind == "chrony_no_trustedkey"));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "chrony_authselectmode_weak")
+        );
+
+        config.check_chrony_trustedkey = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, &content, &config, &config_path);
+        assert!(findings.iter().all(|f| f.kind != "chrony_no_trustedkey"));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "chrony_authselectmode_weak")
+        );
+
+        config.check_chrony_authselectmode = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, &content, &config, &config_path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "ntp_keys_file_insecure_perms"
+                    && f.kind != "chrony_no_trustedkey"
+                    && f.kind != "chrony_authselectmode_weak")
+        );
+    }
+
+    #[test]
+    fn test_audit_by_kind_ntp_keys_permissions_flag() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let keys_path = dir.path().join("ntp.keys");
+        std::fs::write(&keys_path, "1 MD5 secret\n").unwrap();
+        std::fs::set_permissions(&keys_path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let config_path = dir.path().join("ntp.conf");
+
+        let content = format!(
+            "server 0.pool.ntp.org iburst\nrestrict default ignore\ndriftfile /var/ntp.drift\nkeys {}\n",
+            keys_path.display()
+        );
+
+        let mut config = NtpConfigMonitorConfig::default();
+        let findings = audit_by_kind(NtpConfigKind::Ntp, &content, &config, &config_path);
+        // ntp では trustedkey/authselectmode は検知しない
+        assert!(findings.iter().all(|f| f.kind != "chrony_no_trustedkey"
+            && f.kind != "chrony_authselectmode_weak"));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "ntp_keys_file_insecure_perms")
+        );
+
+        config.check_keys_file_permissions = false;
+        let findings = audit_by_kind(NtpConfigKind::Ntp, &content, &config, &config_path);
+        assert!(findings.is_empty());
     }
 
     #[tokio::test]
