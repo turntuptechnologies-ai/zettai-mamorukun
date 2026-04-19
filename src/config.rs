@@ -3949,6 +3949,12 @@ impl AppConfig {
                     .to_string(),
             );
         }
+        if !(10..=60000).contains(&self.modules.ntp_config_monitor.inotify_debounce_ms) {
+            errors.push(
+                "modules.ntp_config_monitor.inotify_debounce_ms: 10〜60000 の範囲で指定してください"
+                    .to_string(),
+            );
+        }
         Self::validate_interval(
             self.modules.user_account.scan_interval_secs,
             "modules.user_account.scan_interval_secs",
@@ -6204,6 +6210,14 @@ pub struct NtpConfigMonitorConfig {
     /// ファイルサイズ上限（バイト）
     #[serde(default = "NtpConfigMonitorConfig::default_max_file_size_bytes")]
     pub max_file_size_bytes: u64,
+
+    /// inotify によるリアルタイム検知の有効/無効
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub use_inotify: bool,
+
+    /// inotify デバウンス時間（ミリ秒）
+    #[serde(default = "NtpConfigMonitorConfig::default_inotify_debounce_ms")]
+    pub inotify_debounce_ms: u64,
 }
 
 impl NtpConfigMonitorConfig {
@@ -6239,6 +6253,10 @@ impl NtpConfigMonitorConfig {
     fn default_maxsamples_min_threshold() -> u32 {
         4
     }
+
+    fn default_inotify_debounce_ms() -> u64 {
+        500
+    }
 }
 
 impl Default for NtpConfigMonitorConfig {
@@ -6266,6 +6284,8 @@ impl Default for NtpConfigMonitorConfig {
             allowed_owner_uids: Self::default_allowed_uids(),
             allowed_owner_gids: Self::default_allowed_gids(),
             max_file_size_bytes: Self::default_max_file_size_bytes(),
+            use_inotify: Self::default_true(),
+            inotify_debounce_ms: Self::default_inotify_debounce_ms(),
         }
     }
 }
@@ -6967,6 +6987,69 @@ inotify_debounce_ms = 200
         assert_eq!(config.modules.cron_monitor.watch_paths.len(), 2);
         assert!(!config.modules.cron_monitor.use_inotify);
         assert_eq!(config.modules.cron_monitor.inotify_debounce_ms, 200);
+    }
+
+    #[test]
+    fn test_ntp_config_monitor_inotify_defaults() {
+        let config: AppConfig = toml::from_str("").unwrap();
+        assert!(config.modules.ntp_config_monitor.use_inotify);
+        assert_eq!(config.modules.ntp_config_monitor.inotify_debounce_ms, 500);
+    }
+
+    #[test]
+    fn test_ntp_config_monitor_inotify_custom() {
+        let toml_str = r#"
+[modules.ntp_config_monitor]
+use_inotify = false
+inotify_debounce_ms = 250
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.modules.ntp_config_monitor.use_inotify);
+        assert_eq!(config.modules.ntp_config_monitor.inotify_debounce_ms, 250);
+    }
+
+    #[test]
+    fn test_ntp_config_monitor_inotify_debounce_range_rejects_too_low() {
+        let toml_str = r#"
+[modules.ntp_config_monitor]
+inotify_debounce_ms = 5
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        let err = config.validate().expect_err("validation should fail");
+        match err {
+            AppError::ConfigValidation { errors, .. } => {
+                assert!(
+                    errors
+                        .iter()
+                        .any(|e| e.contains("modules.ntp_config_monitor.inotify_debounce_ms")),
+                    "errors must mention ntp_config_monitor.inotify_debounce_ms: {:?}",
+                    errors
+                );
+            }
+            other => panic!("expected ConfigValidation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ntp_config_monitor_inotify_debounce_range_rejects_too_high() {
+        let toml_str = r#"
+[modules.ntp_config_monitor]
+inotify_debounce_ms = 70000
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        let err = config.validate().expect_err("validation should fail");
+        match err {
+            AppError::ConfigValidation { errors, .. } => {
+                assert!(
+                    errors
+                        .iter()
+                        .any(|e| e.contains("modules.ntp_config_monitor.inotify_debounce_ms")),
+                    "errors must mention ntp_config_monitor.inotify_debounce_ms: {:?}",
+                    errors
+                );
+            }
+            other => panic!("expected ConfigValidation, got {:?}", other),
+        }
     }
 
     #[test]
