@@ -1529,6 +1529,14 @@ check_chrony_refclock = true
 # PTP / GPS / PPS を正規に使っている環境では該当ドライバを明示的に列挙する。
 # 例: allowed_refclock_drivers = ["PHC", "PPS", "SOCK"]
 allowed_refclock_drivers = []
+# chrony の `rtcsync` ディレクティブ未設定を検知（Linux では RTC への定期書き戻しが
+# 推奨設定であり、欠如するとサーバ再起動直後の時刻ずれによりログ不整合・
+# 証明書検証エラー・TOTP/Kerberos 認証失敗などの二次被害を招くため Warning を発行する）
+check_chrony_rtcsync = true
+# chrony の `rtcfile` ディレクティブが指定されているが絶対パスでない場合を検知（Info）
+# 相対パス指定では chronyd の作業ディレクトリ依存となり、RTC ドリフト情報が
+# 意図しない位置に保存される。`driftfile` と同じパターンで監査する。
+check_chrony_rtcfile = true
 # `maxsamples_too_low` 判定の下限閾値（既定: 4）
 # chrony の NTP フィルタアルゴリズムは通常 4 以上のサンプルで安定動作する
 # 0 に設定すると maxsamples 過少の検知を事実上無効化できる

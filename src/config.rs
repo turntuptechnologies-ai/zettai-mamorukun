@@ -6205,6 +6205,18 @@ pub struct NtpConfigMonitorConfig {
     #[serde(default)]
     pub allowed_refclock_drivers: Vec<String>,
 
+    /// chrony の `rtcsync` ディレクティブ未設定を検知（Linux では RTC への定期書き戻しが
+    /// 推奨設定であり、欠如するとサーバ再起動直後の時刻ずれによりログ不整合・
+    /// 証明書検証エラー・TOTP / Kerberos 失敗などの二次被害を招くため Warning を発行する）
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_chrony_rtcsync: bool,
+
+    /// chrony の `rtcfile` ディレクティブが指定されているが絶対パスでない場合を検知
+    /// （相対パス指定では chronyd の作業ディレクトリ依存となり、RTC ドリフト情報が
+    /// 意図しない位置に保存される。`driftfile` と同じパターンで監査）
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_chrony_rtcfile: bool,
+
     /// `maxsamples_too_low` 判定の下限閾値（既定: 4）
     /// chrony の NTP フィルタアルゴリズムは通常 4 以上のサンプルで安定動作する
     #[serde(default = "NtpConfigMonitorConfig::default_maxsamples_min_threshold")]
@@ -6310,6 +6322,8 @@ impl Default for NtpConfigMonitorConfig {
             check_chrony_sample_counts: true,
             check_chrony_refclock: true,
             allowed_refclock_drivers: Vec::new(),
+            check_chrony_rtcsync: true,
+            check_chrony_rtcfile: true,
             maxsamples_min_threshold: Self::default_maxsamples_min_threshold(),
             allowed_owner_uids: Self::default_allowed_uids(),
             allowed_owner_gids: Self::default_allowed_gids(),
