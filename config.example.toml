@@ -1513,6 +1513,17 @@ check_chrony_authselectmode = true
 check_config_owner = true
 # `keys` で指定された鍵ファイルの所有者 uid / gid が許容リストから外れている場合を検知
 check_keys_file_owner = true
+# chrony の `leapsectz` が未設定の場合を検知（閏秒情報ソースが未指定。Info）
+# 推奨: `leapsectz right/UTC` — tzdata ファイルから閏秒情報を取得する
+check_chrony_leapsectz = true
+# chrony の `maxsamples` / `minsamples` サンプル数設定の整合性を検知
+# - `0 < maxsamples < maxsamples_min_threshold` の過少設定 → Warning
+# - `minsamples > maxsamples`（maxsamples != 0）の設定矛盾 → Warning
+check_chrony_sample_counts = true
+# `maxsamples_too_low` 判定の下限閾値（既定: 4）
+# chrony の NTP フィルタアルゴリズムは通常 4 以上のサンプルで安定動作する
+# 0 に設定すると maxsamples 過少の検知を事実上無効化できる
+maxsamples_min_threshold = 4
 # 所有者監査で許容する uid 一覧（既定: root のみ）。
 # Debian の chrony パッケージのように `_chrony` 所有が正常なディストリでは該当 uid を追加する。
 # 空配列 `[]` を指定するとすべての uid を許容する（監査スキップと同等）
