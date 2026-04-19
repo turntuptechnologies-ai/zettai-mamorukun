@@ -1502,6 +1502,12 @@ check_chrony_cmdport_port = true
 check_ntpsigndsocket = true
 # chrony.conf / ntp.conf の `keys` 指定ファイルが存在しない場合（NTP 認証が無効化されている可能性）を検知
 check_keys_file_presence = true
+# `keys` で指定された鍵ファイルが world-readable / world-writable な過剰パーミッションを持つ場合を検知
+check_keys_file_permissions = true
+# chrony で `keys` を設定しているのに `trustedkey` が未設定の場合を検知（NTP 認証が形骸化）
+check_chrony_trustedkey = true
+# chrony で `keys` を設定しているのに `authselectmode require` が指定されていない場合を検知（認証失敗時のフォールバック）
+check_chrony_authselectmode = true
 # ファイルサイズ上限（バイト）
 max_file_size_bytes = 1048576
 

@@ -6151,6 +6151,21 @@ pub struct NtpConfigMonitorConfig {
     #[serde(default = "NtpConfigMonitorConfig::default_true")]
     pub check_keys_file_presence: bool,
 
+    /// `keys` で指定された鍵ファイルが world-readable / world-writable な
+    /// 過剰パーミッションを持つ場合を検知（共有鍵漏洩リスク）
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_keys_file_permissions: bool,
+
+    /// chrony で `keys` を設定しているのに `trustedkey` が未設定の場合を検知
+    /// （NTP 認証が形骸化している状態）
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_chrony_trustedkey: bool,
+
+    /// chrony で `keys` を設定しているのに `authselectmode require` が
+    /// 指定されていない場合を検知（認証失敗時に非認証同期へフォールバック可能）
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_chrony_authselectmode: bool,
+
     /// ファイルサイズ上限（バイト）
     #[serde(default = "NtpConfigMonitorConfig::default_max_file_size_bytes")]
     pub max_file_size_bytes: u64,
@@ -6193,6 +6208,9 @@ impl Default for NtpConfigMonitorConfig {
             check_chrony_cmdport_port: true,
             check_ntpsigndsocket: true,
             check_keys_file_presence: true,
+            check_keys_file_permissions: true,
+            check_chrony_trustedkey: true,
+            check_chrony_authselectmode: true,
             max_file_size_bytes: Self::default_max_file_size_bytes(),
         }
     }
