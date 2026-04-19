@@ -6218,6 +6218,17 @@ pub struct NtpConfigMonitorConfig {
     /// inotify デバウンス時間（ミリ秒）
     #[serde(default = "NtpConfigMonitorConfig::default_inotify_debounce_ms")]
     pub inotify_debounce_ms: u64,
+
+    /// chrony の `confdir` / `sourcedir` / `include` ディレクティブで参照される
+    /// ドロップインファイル（例: `/etc/chrony/conf.d/*.conf`）の監視を有効化する
+    /// 有効時はドロップインファイルもハッシュ監視対象に加わり、親ディレクトリも
+    /// inotify watch に登録される
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_chrony_dropin: bool,
+
+    /// ドロップイン監視で発見・追跡するファイル数の上限（暴走防止）
+    #[serde(default = "NtpConfigMonitorConfig::default_dropin_max_files")]
+    pub dropin_max_files: u32,
 }
 
 impl NtpConfigMonitorConfig {
@@ -6257,6 +6268,10 @@ impl NtpConfigMonitorConfig {
     fn default_inotify_debounce_ms() -> u64 {
         500
     }
+
+    fn default_dropin_max_files() -> u32 {
+        64
+    }
 }
 
 impl Default for NtpConfigMonitorConfig {
@@ -6286,6 +6301,8 @@ impl Default for NtpConfigMonitorConfig {
             max_file_size_bytes: Self::default_max_file_size_bytes(),
             use_inotify: Self::default_true(),
             inotify_debounce_ms: Self::default_inotify_debounce_ms(),
+            check_chrony_dropin: Self::default_true(),
+            dropin_max_files: Self::default_dropin_max_files(),
         }
     }
 }
