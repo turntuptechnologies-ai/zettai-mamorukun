@@ -173,14 +173,15 @@
 - [x] **ntp_config_monitor の追加監査ルール（cmdport/port・ntpsigndsocket・keys 不在）** — v1.67.0 (#341, PR #342)
 - [x] **ntp_config_monitor の NTP 認証強度監査（keys パーミッション・trustedkey 未設定・authselectmode require）** — v1.68.0 (#343, PR #344)
 - [x] **ntp_config_monitor の owner/group 監査（設定ファイル / keys ファイルの所有者が root 以外の場合に Warning）** — v1.69.0 (#345, PR #346)
+- [x] **ntp_config_monitor の maxsamples / minsamples / leapsectz 監査** — v1.70.0 (#347, PR #348)
 
 ## 候補
 
 1. **ntp_config_monitor の inotify 連携** — 定期ポーリングだけでなく inotify ベースでリアルタイムに改ざんを検知する。`cron_monitor` の inotify 実装パターンを参考にする
-2. **ntp_config_monitor の maxsamples / minsamples / leapsectz 監査** — chrony のサンプル数設定や閏秒ハンドリング設定を点検し、過度に小さなサンプル数や `leapsectz` 未設定を警告する
-3. **ntp_config_monitor の refclock / sourcedir 監査** — chrony の `refclock` エントリ（PHC/SOCK/SHM 等の外部時刻ソース）や `sourcedir` 経由のドロップイン追加を検知し、想定外のクロックソースが混入していないかを監査する
-4. **所有者監査パターンの他モジュールへの展開** — ntp_config_monitor で実装した `allowed_owner_uids / gids` によるオーナー監査を、sshd_config_monitor・pam_monitor・security_files_monitor・sudoers_monitor 等の設定ファイル系モジュールに共通パターンとして展開する（root 以外が所有する設定ファイルは権限昇格の足場となるため）
-5. **ntp_config_monitor の rtcsync / rtcfile 監査** — chrony の RTC 連動設定（`rtcsync`・`rtcfile`）が欠如している場合、BIOS 時刻補正が行われずシャットダウン後の時刻ずれを招くことを検知する
+2. **ntp_config_monitor の refclock / sourcedir 監査** — chrony の `refclock` エントリ（PHC/SOCK/SHM 等の外部時刻ソース）や `sourcedir` 経由のドロップイン追加を検知し、想定外のクロックソースが混入していないかを監査する
+3. **ntp_config_monitor の rtcsync / rtcfile 監査** — chrony の RTC 連動設定（`rtcsync`・`rtcfile`）が欠如している場合、BIOS 時刻補正が行われずシャットダウン後の時刻ずれを招くことを検知する
+4. **ntp_config_monitor の maxdistance / maxjitter 監査** — chrony の `maxdistance` / `maxjitter` 上限値を閾値監査し、極端に緩い設定による時刻偽装耐性の低下を検知する
+5. **所有者監査パターンの他モジュールへの展開** — ntp_config_monitor で実装した `allowed_owner_uids / gids` によるオーナー監査を、sshd_config_monitor・pam_monitor・security_files_monitor・sudoers_monitor 等の設定ファイル系モジュールに共通パターンとして展開する（root 以外が所有する設定ファイルは権限昇格の足場となるため）
 6. **CI ワークフローでの clippy -D warnings 強制化** — GitHub Actions で `cargo clippy --all-targets -- -D warnings` / `cargo fmt --check` を PR 時に自動実行する `.github/workflows/ci.yaml` を整備する（promtool.yaml と同様、PAT の workflow スコープ問題があれば README 記載にとどめる）
 7. **promtool ユニットテスト用の GitHub Actions ワークフロー追加** — PAT の workflow スコープ制約で v1.59.0 では README のサンプル掲載にとどめた `.github/workflows/promtool.yaml` を、適切な権限で追加し `grafana/alerts/**` の変更時に自動検証する
 8. **module-stats 履歴スナップショット機能** — `record_scan_duration` による最新 1024 サンプルに加え、1h/1d など時間粒度で集計したスナップショットを保持し、長期傾向（1日/1週間の P95 推移）を REST API で取得可能にする
