@@ -28,6 +28,9 @@
 //!     サンプル数不足による時刻精度・外れ値耐性低下）
 //!   - `chrony.conf`: `minsamples > maxsamples`（同期に必要なサンプル数が採取できない
 //!     設定矛盾）
+//!   - `chrony.conf`: `refclock` ディレクティブで `allowed_refclock_drivers` に
+//!     含まれないドライバが使われている（特に `SHM` は /dev/shm 経由の時刻注入攻撃
+//!     の足場となりうる）
 //! - **ドロップイン監視** — `chrony.conf` 内の `confdir` / `sourcedir` / `include`
 //!   ディレクティブで参照される追加設定ファイル（例: `/etc/chrony/conf.d/*.conf`、
 //!   `/etc/chrony/sources.d/*.sources`）も監視対象に加え、親ディレクトリも inotify
@@ -763,6 +766,53 @@ fn audit_chrony_sample_counts(content: &str, maxsamples_min_threshold: u32) -> V
     findings
 }
 
+/// chrony.conf の `refclock` ディレクティブを監査する
+///
+/// 各 `refclock <driver> <parameters>` 行からドライバ名を抽出し、
+/// `allowed_drivers`（大文字小文字無視）に含まれないドライバが使われていれば
+/// Warning を発行する。特に `SHM` ドライバは /dev/shm 配下の共有メモリセグメントを
+/// 時刻ソースとして参照するため、攻撃者が SHM セグメントへの書き込み権限を得ていれば
+/// 任意の時刻を注入可能になる。明示的に許可されていない場合は SHM 固有の
+/// 追加メッセージを付与する。
+fn audit_chrony_refclock(content: &str, allowed_drivers: &[String]) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    let allowed_upper: BTreeSet<String> = allowed_drivers
+        .iter()
+        .map(|d| d.trim().to_ascii_uppercase())
+        .filter(|d| !d.is_empty())
+        .collect();
+    let mut reported: BTreeSet<String> = BTreeSet::new();
+
+    for value in find_keyword_lines(content, "refclock") {
+        let driver = match value.split_whitespace().next() {
+            Some(d) if !d.is_empty() => d,
+            _ => continue,
+        };
+        let driver_upper = driver.to_ascii_uppercase();
+        if allowed_upper.contains(&driver_upper) {
+            continue;
+        }
+        if !reported.insert(driver_upper.clone()) {
+            continue;
+        }
+        let suffix = if driver_upper == "SHM" {
+            "（SHM refclock is a known time-injection attack vector — 書き込み可能な SHM セグメントを共有するプロセスから時刻を偽装される恐れがあります）"
+        } else {
+            ""
+        };
+        findings.push(AuditFinding {
+            kind: "chrony_refclock_unexpected".to_string(),
+            severity: Severity::Warning,
+            message: format!(
+                "chrony.conf に想定外の refclock ドライバ `{}` が設定されています。\
+                 `allowed_refclock_drivers` に明示的に追加されていないドライバは外部時刻ソース偽装の原因になりうるため確認してください{}",
+                driver, suffix
+            ),
+        });
+    }
+    findings
+}
+
 /// chrony のドロップイン取り込みディレクティブ
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ChronyDropinSpec {
@@ -1038,6 +1088,12 @@ fn audit_by_kind(
                 findings.extend(audit_chrony_sample_counts(
                     content,
                     config.maxsamples_min_threshold,
+                ));
+            }
+            if config.check_chrony_refclock {
+                findings.extend(audit_chrony_refclock(
+                    content,
+                    &config.allowed_refclock_drivers,
                 ));
             }
         }
@@ -3376,6 +3432,162 @@ mod tests {
                 .iter()
                 .all(|f| f.kind != "chrony_maxsamples_too_low"
                     && f.kind != "chrony_minsamples_exceeds_maxsamples")
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // audit_chrony_refclock
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_chrony_refclock_unexpected_driver_warns() {
+        let content = "pool foo\nrefclock SHM 0 refid SHM0\n";
+        let findings = audit_chrony_refclock(content, &[]);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_refclock_unexpected");
+        assert_eq!(findings[0].severity, Severity::Warning);
+        assert!(
+            findings[0].message.contains("SHM"),
+            "message should identify the driver: {}",
+            findings[0].message
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_refclock_shm_has_attack_vector_note() {
+        let content = "refclock SHM 0\n";
+        let findings = audit_chrony_refclock(content, &[]);
+        assert_eq!(findings.len(), 1);
+        assert!(
+            findings[0].message.contains("time-injection attack vector"),
+            "SHM should carry the explicit attack-vector note: {}",
+            findings[0].message
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_refclock_non_shm_omits_shm_note() {
+        let content = "refclock PHC /dev/ptp0 poll 0\n";
+        let findings = audit_chrony_refclock(content, &[]);
+        assert_eq!(findings.len(), 1);
+        assert!(
+            !findings[0].message.contains("time-injection"),
+            "non-SHM drivers should not include the SHM-specific note: {}",
+            findings[0].message
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_refclock_allowed_driver_not_reported() {
+        let content = "refclock PHC /dev/ptp0 poll 0\n";
+        let findings = audit_chrony_refclock(content, &["phc".to_string()]);
+        assert!(
+            findings.is_empty(),
+            "allowed driver match is case-insensitive"
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_refclock_allow_list_mixes_ok_and_bad() {
+        let content = "refclock PHC /dev/ptp0 poll 0\nrefclock SHM 0 refid SHM0\n";
+        let findings = audit_chrony_refclock(content, &["PHC".to_string()]);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].message.contains("SHM"));
+    }
+
+    #[test]
+    fn test_audit_chrony_refclock_deduplicates_same_driver() {
+        let content = "refclock SHM 0\nrefclock SHM 1\n";
+        let findings = audit_chrony_refclock(content, &[]);
+        assert_eq!(findings.len(), 1, "same driver reported only once per scan");
+    }
+
+    #[test]
+    fn test_audit_chrony_refclock_ignores_comments_and_empty_lines() {
+        let content = "# refclock SHM 0\n; refclock SHM 1\n\nrefclock\nrefclock  \n";
+        let findings = audit_chrony_refclock(content, &[]);
+        assert!(
+            findings.is_empty(),
+            "comments and empty driver tokens should be ignored: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_refclock_allow_list_empty_string_ignored() {
+        // 空文字列エントリ（TOML での `allowed_refclock_drivers = [""]` 等）は
+        // 許可リストに含まれないとして扱う
+        let content = "refclock SHM 0\n";
+        let findings = audit_chrony_refclock(content, &["".to_string(), "  ".to_string()]);
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn test_audit_by_kind_refclock_flag_toggle() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = "pool 2.pool.ntp.org iburst\nmakestep 1.0 3\nleapsectz right/UTC\nrefclock SHM 0 refid SHM0\n";
+
+        let mut config = NtpConfigMonitorConfig {
+            check_keys_file_owner: false,
+            check_config_owner: false,
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, &config_path);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "chrony_refclock_unexpected"),
+            "refclock audit should fire by default"
+        );
+
+        config.check_chrony_refclock = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, &config_path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_refclock_unexpected"),
+            "disabling check_chrony_refclock suppresses the finding"
+        );
+    }
+
+    #[test]
+    fn test_audit_by_kind_refclock_honors_allow_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = "pool 2.pool.ntp.org iburst\nmakestep 1.0 3\nleapsectz right/UTC\nrefclock PHC /dev/ptp0 poll 0\n";
+
+        let config = NtpConfigMonitorConfig {
+            check_keys_file_owner: false,
+            check_config_owner: false,
+            allowed_refclock_drivers: vec!["PHC".to_string()],
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, &config_path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_refclock_unexpected"),
+            "allowed drivers must not produce findings"
+        );
+    }
+
+    #[test]
+    fn test_audit_by_kind_ntp_does_not_trigger_chrony_refclock() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("ntp.conf");
+        let content = "server 0.pool.ntp.org iburst\nrestrict default ignore\ndriftfile /var/ntp.drift\nrefclock SHM 0\n";
+
+        let config = NtpConfigMonitorConfig {
+            check_keys_file_owner: false,
+            check_config_owner: false,
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Ntp, content, &config, &config_path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_refclock_unexpected"),
+            "ntp.conf path should not dispatch chrony-specific refclock audit"
         );
     }
 

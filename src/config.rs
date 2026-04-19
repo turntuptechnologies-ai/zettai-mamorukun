@@ -6192,6 +6192,19 @@ pub struct NtpConfigMonitorConfig {
     #[serde(default = "NtpConfigMonitorConfig::default_true")]
     pub check_chrony_sample_counts: bool,
 
+    /// chrony の `refclock` ディレクティブを監査し、`allowed_refclock_drivers` に
+    /// 含まれないドライバが使われていれば Warning を発行する
+    /// （特に `SHM` は共有メモリ経由の時刻注入攻撃の足場になりうるため、
+    /// 明示的に許可されていない限り必ず警告する）
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_chrony_refclock: bool,
+
+    /// `check_chrony_refclock` で許容する refclock ドライバ名一覧
+    /// （大文字小文字は無視して比較する。既定は空 = refclock の使用を一切許可しない）
+    /// 例: `["PHC", "PPS", "SOCK"]`
+    #[serde(default)]
+    pub allowed_refclock_drivers: Vec<String>,
+
     /// `maxsamples_too_low` 判定の下限閾値（既定: 4）
     /// chrony の NTP フィルタアルゴリズムは通常 4 以上のサンプルで安定動作する
     #[serde(default = "NtpConfigMonitorConfig::default_maxsamples_min_threshold")]
@@ -6295,6 +6308,8 @@ impl Default for NtpConfigMonitorConfig {
             check_keys_file_owner: true,
             check_chrony_leapsectz: true,
             check_chrony_sample_counts: true,
+            check_chrony_refclock: true,
+            allowed_refclock_drivers: Vec::new(),
             maxsamples_min_threshold: Self::default_maxsamples_min_threshold(),
             allowed_owner_uids: Self::default_allowed_uids(),
             allowed_owner_gids: Self::default_allowed_gids(),
