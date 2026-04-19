@@ -172,25 +172,28 @@
 - [x] **clippy ベースライン整備（Rust 1.95.0 新規 lint 対応）** — v1.66.0 (#339, PR #340)
 - [x] **ntp_config_monitor の追加監査ルール（cmdport/port・ntpsigndsocket・keys 不在）** — v1.67.0 (#341, PR #342)
 - [x] **ntp_config_monitor の NTP 認証強度監査（keys パーミッション・trustedkey 未設定・authselectmode require）** — v1.68.0 (#343, PR #344)
+- [x] **ntp_config_monitor の owner/group 監査（設定ファイル / keys ファイルの所有者が root 以外の場合に Warning）** — v1.69.0 (#345, PR #346)
 
 ## 候補
 
 1. **ntp_config_monitor の inotify 連携** — 定期ポーリングだけでなく inotify ベースでリアルタイムに改ざんを検知する。`cron_monitor` の inotify 実装パターンを参考にする
 2. **ntp_config_monitor の maxsamples / minsamples / leapsectz 監査** — chrony のサンプル数設定や閏秒ハンドリング設定を点検し、過度に小さなサンプル数や `leapsectz` 未設定を警告する
-3. **ntp_config_monitor の owner/group 監査** — chrony.conf / ntp.conf / keys ファイルの所有者が root 以外になっている場合を警告する（root 権限必須の設定ファイルの所有権改ざん検知）
-4. **CI ワークフローでの clippy -D warnings 強制化** — GitHub Actions で `cargo clippy --all-targets -- -D warnings` / `cargo fmt --check` を PR 時に自動実行する `.github/workflows/ci.yaml` を整備する（promtool.yaml と同様、PAT の workflow スコープ問題があれば README 記載にとどめる）
-5. **promtool ユニットテスト用の GitHub Actions ワークフロー追加** — PAT の workflow スコープ制約で v1.59.0 では README のサンプル掲載にとどめた `.github/workflows/promtool.yaml` を、適切な権限で追加し `grafana/alerts/**` の変更時に自動検証する
-6. **module-stats 履歴スナップショット機能** — `record_scan_duration` による最新 1024 サンプルに加え、1h/1d など時間粒度で集計したスナップショットを保持し、長期傾向（1日/1週間の P95 推移）を REST API で取得可能にする
-7. **module-stats --diff の定期比較スクリプト / cron ジョブサンプル** — v1.61.0 で `taken_at` 情報が埋め込まれるようになったので、スナップショットを自動ローテートし定期的に差分を Slack/Webhook に通知するユースケースのサンプル（README もしくは `examples/`）を追加する
-8. **module-stats --diff の JSON レポート schema ドキュメント化** — 返却 JSON（`ModuleStatsDiffReport` / `ModuleStatsDiffEntry`）の構造を CLAUDE.md もしくは README に明文化し、外部スクリプトからの利用を容易にする
-9. **Webhook 統合テスト強化** — wiremock を使った Webhook 送信の統合テスト（リトライ動作、4xx/5xx エラー処理、タイムアウト等）を追加する
-10. **module-stats CLI のテキスト出力改善** — `--diff` レポートのテキスト出力に色付き（赤=増加、緑=減少）と並び替えオプション（events_delta / module 名）を追加して可視性を向上する
-11. **モジュール依存関係管理** — モジュール間の依存関係を定義し、起動順序の制御やカスケード停止を可能にする仕組み
-12. **ダッシュボード機能拡張** — TUI ダッシュボードにイベント詳細表示、フィルタリング、イベント検索機能を追加する
-13. **プロセス起動リアルタイム監視強化** — proc connector（netlink）を使ったプロセス fork/exec のリアルタイム検知で、既存の定期スキャンを補完する
-14. **ネットワーク接続フィンガープリント** — プロセスごとの通常の接続先パターンを学習し、異常な通信先への接続を検知する
-15. **inotify ベースのリアルタイム監視の他モジュールへの展開** — cron_monitor で実装した inotify パターンを file_integrity、shell_config_monitor 等の他モジュールにも展開する
-16. **REST API RBAC（ロールベースアクセス制御）拡張** — 現在の read_only/admin の 2 ロールに加え、カスタムロールとエンドポイント単位の権限制御を追加する
+3. **ntp_config_monitor の refclock / sourcedir 監査** — chrony の `refclock` エントリ（PHC/SOCK/SHM 等の外部時刻ソース）や `sourcedir` 経由のドロップイン追加を検知し、想定外のクロックソースが混入していないかを監査する
+4. **所有者監査パターンの他モジュールへの展開** — ntp_config_monitor で実装した `allowed_owner_uids / gids` によるオーナー監査を、sshd_config_monitor・pam_monitor・security_files_monitor・sudoers_monitor 等の設定ファイル系モジュールに共通パターンとして展開する（root 以外が所有する設定ファイルは権限昇格の足場となるため）
+5. **ntp_config_monitor の rtcsync / rtcfile 監査** — chrony の RTC 連動設定（`rtcsync`・`rtcfile`）が欠如している場合、BIOS 時刻補正が行われずシャットダウン後の時刻ずれを招くことを検知する
+6. **CI ワークフローでの clippy -D warnings 強制化** — GitHub Actions で `cargo clippy --all-targets -- -D warnings` / `cargo fmt --check` を PR 時に自動実行する `.github/workflows/ci.yaml` を整備する（promtool.yaml と同様、PAT の workflow スコープ問題があれば README 記載にとどめる）
+7. **promtool ユニットテスト用の GitHub Actions ワークフロー追加** — PAT の workflow スコープ制約で v1.59.0 では README のサンプル掲載にとどめた `.github/workflows/promtool.yaml` を、適切な権限で追加し `grafana/alerts/**` の変更時に自動検証する
+8. **module-stats 履歴スナップショット機能** — `record_scan_duration` による最新 1024 サンプルに加え、1h/1d など時間粒度で集計したスナップショットを保持し、長期傾向（1日/1週間の P95 推移）を REST API で取得可能にする
+9. **module-stats --diff の定期比較スクリプト / cron ジョブサンプル** — v1.61.0 で `taken_at` 情報が埋め込まれるようになったので、スナップショットを自動ローテートし定期的に差分を Slack/Webhook に通知するユースケースのサンプル（README もしくは `examples/`）を追加する
+10. **module-stats --diff の JSON レポート schema ドキュメント化** — 返却 JSON（`ModuleStatsDiffReport` / `ModuleStatsDiffEntry`）の構造を CLAUDE.md もしくは README に明文化し、外部スクリプトからの利用を容易にする
+11. **Webhook 統合テスト強化** — wiremock を使った Webhook 送信の統合テスト（リトライ動作、4xx/5xx エラー処理、タイムアウト等）を追加する
+12. **module-stats CLI のテキスト出力改善** — `--diff` レポートのテキスト出力に色付き（赤=増加、緑=減少）と並び替えオプション（events_delta / module 名）を追加して可視性を向上する
+13. **モジュール依存関係管理** — モジュール間の依存関係を定義し、起動順序の制御やカスケード停止を可能にする仕組み
+14. **ダッシュボード機能拡張** — TUI ダッシュボードにイベント詳細表示、フィルタリング、イベント検索機能を追加する
+15. **プロセス起動リアルタイム監視強化** — proc connector（netlink）を使ったプロセス fork/exec のリアルタイム検知で、既存の定期スキャンを補完する
+16. **ネットワーク接続フィンガープリント** — プロセスごとの通常の接続先パターンを学習し、異常な通信先への接続を検知する
+17. **inotify ベースのリアルタイム監視の他モジュールへの展開** — cron_monitor で実装した inotify パターンを file_integrity、shell_config_monitor、ntp_config_monitor 等の他モジュールにも展開する
+18. **REST API RBAC（ロールベースアクセス制御）拡張** — 現在の read_only/admin の 2 ロールに加え、カスタムロールとエンドポイント単位の権限制御を追加する
 17. **REST API イベントタグ付け機能** — イベントにカスタムタグを付与し、タグによるフィルタリング・検索を可能にする
 18. **設定プロファイルのインポート・エクスポート** — REST API 経由で設定プロファイルのインポート・エクスポートを行い、複数サーバ間の設定同期を容易にする
 19. **REST API 設定変更エンドポイント** — REST API 経由で設定ファイルの値を変更可能にする（暗号化値の更新、モジュール設定の変更等）。バリデーション・dry-run 対応
