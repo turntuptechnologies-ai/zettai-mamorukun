@@ -31,6 +31,12 @@
 //!   - `chrony.conf`: `refclock` ディレクティブで `allowed_refclock_drivers` に
 //!     含まれないドライバが使われている（特に `SHM` は /dev/shm 経由の時刻注入攻撃
 //!     の足場となりうる）
+//!   - `chrony.conf`: `rtcsync` ディレクティブ未設定（Linux で推奨される RTC
+//!     定期書き戻しが無効化されており、サーバ再起動直後の時刻ずれによる
+//!     ログ不整合・証明書検証エラー・TOTP / Kerberos 失敗を招くリスク）
+//!   - `chrony.conf`: `rtcfile` が指定されているが絶対パスでない（`driftfile` と同様、
+//!     chronyd の作業ディレクトリ依存の書き込みとなり RTC ドリフト情報が
+//!     意図しない位置に保存される）
 //! - **ドロップイン監視** — `chrony.conf` 内の `confdir` / `sourcedir` / `include`
 //!   ディレクティブで参照される追加設定ファイル（例: `/etc/chrony/conf.d/*.conf`、
 //!   `/etc/chrony/sources.d/*.sources`）も監視対象に加え、親ディレクトリも inotify
@@ -813,6 +819,52 @@ fn audit_chrony_refclock(content: &str, allowed_drivers: &[String]) -> Vec<Audit
     findings
 }
 
+/// chrony.conf の `rtcsync` ディレクティブが設定されていない場合を監査する
+///
+/// `rtcsync` は Linux で system clock を RTC（ハードウェアクロック）に 11 分ごとに
+/// 書き戻す設定で、chrony 公式ドキュメントで有効化が推奨されている。欠如すると
+/// chronyd 停止中の RTC が補正されず、サーバ再起動直後に NTP 同期が確立するまでの間
+/// システム時刻が大きくずれる可能性がある。時刻ずれは TLS 証明書検証の誤動作・
+/// ログのタイムスタンプ不整合によるフォレンジック妨害・TOTP/Kerberos 認証の失敗
+/// 等の二次被害を招くため Warning を発行する。
+fn audit_chrony_rtcsync_missing(content: &str) -> Vec<AuditFinding> {
+    let has_rtcsync = find_keyword_lines(content, "rtcsync").next().is_some();
+    if has_rtcsync {
+        return Vec::new();
+    }
+    vec![AuditFinding {
+        kind: "chrony_rtcsync_missing".to_string(),
+        severity: Severity::Warning,
+        message:
+            "chrony.conf に `rtcsync` が設定されていません（Linux では RTC への定期書き戻しが推奨されます。欠如するとサーバ再起動直後の時刻ずれによりログ不整合・証明書検証エラー・TOTP/Kerberos 認証失敗などの二次被害を招く可能性があります）"
+                .to_string(),
+    }]
+}
+
+/// chrony.conf の `rtcfile` が指定されているときに絶対パスかを監査する
+///
+/// `rtcfile` は RTC ドリフト情報の保存先ファイルパス。相対パス指定の場合
+/// chronyd の作業ディレクトリ依存の書き込みとなり、意図しない位置に
+/// ドリフト情報が残留する恐れがある。`driftfile` と同じパターンで Info を発行する。
+fn audit_chrony_rtcfile_absolute(content: &str) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    for value in find_keyword_lines(content, "rtcfile") {
+        let trimmed = value.trim();
+        let path_value = trimmed.split_whitespace().next().unwrap_or("");
+        if path_value.is_empty() || !path_value.starts_with('/') {
+            findings.push(AuditFinding {
+                kind: "chrony_rtcfile_not_absolute".to_string(),
+                severity: Severity::Info,
+                message: format!(
+                    "chrony.conf の `rtcfile` が絶対パスではありません: `{}`（chronyd の作業ディレクトリに依存した書き込みを避けるため絶対パスを推奨）",
+                    trimmed
+                ),
+            });
+        }
+    }
+    findings
+}
+
 /// chrony のドロップイン取り込みディレクティブ
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ChronyDropinSpec {
@@ -1095,6 +1147,12 @@ fn audit_by_kind(
                     content,
                     &config.allowed_refclock_drivers,
                 ));
+            }
+            if config.check_chrony_rtcsync {
+                findings.extend(audit_chrony_rtcsync_missing(content));
+            }
+            if config.check_chrony_rtcfile {
+                findings.extend(audit_chrony_rtcfile_absolute(content));
             }
         }
         NtpConfigKind::Ntp => {
@@ -2050,7 +2108,7 @@ mod tests {
         let path = dir.path().join("chrony.conf");
         std::fs::write(
             &path,
-            "pool 2.pool.ntp.org iburst\nmakestep 1.0 3\nleapsectz right/UTC\n",
+            "pool 2.pool.ntp.org iburst\nmakestep 1.0 3\nleapsectz right/UTC\nrtcsync\n",
         )
         .unwrap();
         // owner 監査は既定有効だが、tempdir 配下は非 root 所有なので許容リストを空にして無効化
@@ -2118,9 +2176,10 @@ mod tests {
             // 所有者監査を無効化する
             check_config_owner: false,
             check_keys_file_owner: false,
-            // leapsectz 未設定 / sample_counts の新規監査は件数に影響するため無効化
+            // leapsectz 未設定 / sample_counts / rtcsync の新規監査は件数に影響するため無効化
             check_chrony_leapsectz: false,
             check_chrony_sample_counts: false,
+            check_chrony_rtcsync: false,
             ..Default::default()
         };
         let module = NtpConfigMonitorModule::new(config, None);
@@ -2293,8 +2352,8 @@ mod tests {
     #[test]
     fn test_audit_by_kind_chrony_flags_disable_individual_checks() {
         // chrony の allow/bindcmd をトリガーしつつ、サーバと makestep は設定済みにしておく
-        // leapsectz 設定済み & maxsamples/minsamples 未設定で新規ルールが発火しない content にする
-        let content = "pool foo\nmakestep 1.0 3\nallow all\nbindcmdaddress 0.0.0.0\ndriftfile drift\nleapsectz right/UTC\n";
+        // leapsectz / rtcsync 設定済み & maxsamples/minsamples 未設定で新規ルールが発火しない content にする
+        let content = "pool foo\nmakestep 1.0 3\nrtcsync\nallow all\nbindcmdaddress 0.0.0.0\ndriftfile drift\nleapsectz right/UTC\n";
         let path = Path::new("/etc/chrony/chrony.conf");
 
         // 全フラグ有効（デフォルト） → allow / bindcmd / driftfile の 3 件
@@ -3610,6 +3669,168 @@ mod tests {
                 .all(|f| f.kind != "chrony_maxsamples_too_low"
                     && f.kind != "chrony_minsamples_exceeds_maxsamples"
                     && f.kind != "chrony_leapsectz_missing")
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // audit_chrony_rtcsync_missing
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_chrony_rtcsync_missing_detects() {
+        let content = "pool 2.pool.ntp.org iburst\nmakestep 1.0 3\n";
+        let findings = audit_chrony_rtcsync_missing(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_rtcsync_missing");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+    }
+
+    #[test]
+    fn test_audit_chrony_rtcsync_set_no_finding() {
+        // 引数なしの `rtcsync` だけでも設定済みとして扱う
+        let content = "pool foo\nrtcsync\n";
+        let findings = audit_chrony_rtcsync_missing(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_rtcsync_with_trailing_content_set() {
+        // 行頭トークン一致なら `rtcsync` ディレクティブが見つかったとみなす
+        let content = "pool foo\nrtcsync # enable linux rtc sync\n";
+        let findings = audit_chrony_rtcsync_missing(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_rtcsync_comment_does_not_count() {
+        // コメント化された行は `find_keyword_lines` で無視される
+        let content = "# rtcsync\nserver foo\n";
+        let findings = audit_chrony_rtcsync_missing(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_rtcsync_missing");
+    }
+
+    // ------------------------------------------------------------------
+    // audit_chrony_rtcfile_absolute
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_chrony_rtcfile_absent_no_finding() {
+        let content = "server foo\n";
+        let findings = audit_chrony_rtcfile_absolute(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_rtcfile_absolute_ok() {
+        let content = "rtcfile /var/lib/chrony/rtc\n";
+        let findings = audit_chrony_rtcfile_absolute(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_rtcfile_relative_detects() {
+        let content = "rtcfile rtc.drift\n";
+        let findings = audit_chrony_rtcfile_absolute(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_rtcfile_not_absolute");
+        assert!(matches!(findings[0].severity, Severity::Info));
+        assert!(findings[0].message.contains("rtc.drift"));
+    }
+
+    #[test]
+    fn test_audit_chrony_rtcfile_empty_value_detects() {
+        let content = "rtcfile \n";
+        let findings = audit_chrony_rtcfile_absolute(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_rtcfile_not_absolute");
+    }
+
+    #[test]
+    fn test_audit_chrony_rtcfile_multiple_lines() {
+        // 複数行ある場合は各行を個別に評価する
+        let content = "rtcfile ./rel\nrtcfile /abs/ok\nrtcfile another_rel\n";
+        let findings = audit_chrony_rtcfile_absolute(content);
+        assert_eq!(findings.len(), 2);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind == "chrony_rtcfile_not_absolute")
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // audit_by_kind: rtcsync / rtcfile フラグの有効/無効切替
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_by_kind_rtcsync_flag_toggle() {
+        // rtcsync なし & その他の新規ルールを発火させない最小 chrony 設定
+        let content = "pool foo\nmakestep 1.0 3\nleapsectz right/UTC\n";
+        let path = Path::new("/etc/chrony/chrony.conf");
+
+        let mut config = NtpConfigMonitorConfig {
+            check_config_owner: false,
+            check_keys_file_owner: false,
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
+        assert!(
+            findings.iter().any(|f| f.kind == "chrony_rtcsync_missing"),
+            "rtcsync audit should fire by default"
+        );
+
+        config.check_chrony_rtcsync = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
+        assert!(
+            findings.iter().all(|f| f.kind != "chrony_rtcsync_missing"),
+            "disabling check_chrony_rtcsync suppresses the finding"
+        );
+    }
+
+    #[test]
+    fn test_audit_by_kind_rtcfile_flag_toggle() {
+        // rtcsync 設定済み (rtcsync missing を抑止) & rtcfile 相対パス
+        let content = "pool foo\nmakestep 1.0 3\nleapsectz right/UTC\nrtcsync\nrtcfile rel.rtc\n";
+        let path = Path::new("/etc/chrony/chrony.conf");
+
+        let mut config = NtpConfigMonitorConfig {
+            check_config_owner: false,
+            check_keys_file_owner: false,
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "chrony_rtcfile_not_absolute"),
+            "rtcfile audit should fire when path is relative"
+        );
+
+        config.check_chrony_rtcfile = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_rtcfile_not_absolute"),
+            "disabling check_chrony_rtcfile suppresses the finding"
+        );
+    }
+
+    #[test]
+    fn test_audit_by_kind_ntp_does_not_trigger_chrony_rtcsync_or_rtcfile() {
+        // NtpConfigKind::Ntp アームでは chrony 専用ルールはディスパッチされない
+        let content = "server 0.pool.ntp.org iburst\nrestrict default ignore\ndriftfile /var/ntp.drift\nrtcfile rel.rtc\n";
+        let path = Path::new("/etc/ntp.conf");
+        let config = NtpConfigMonitorConfig {
+            check_keys_file_owner: false,
+            check_config_owner: false,
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Ntp, content, &config, path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_rtcsync_missing"
+                    && f.kind != "chrony_rtcfile_not_absolute"),
+            "ntp.conf path should not dispatch chrony-specific rtc audits"
         );
     }
 
