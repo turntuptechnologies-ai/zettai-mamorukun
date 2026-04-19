@@ -1532,6 +1532,13 @@ allowed_owner_uids = [0]
 allowed_owner_gids = [0]
 # ファイルサイズ上限（バイト）
 max_file_size_bytes = 1048576
+# inotify によるリアルタイム改ざん検知を有効化（true 推奨）
+# 無効化すると scan_interval_secs 間隔での定期スキャンのみで動作する
+use_inotify = true
+# inotify イベントのデバウンス時間（ミリ秒）
+# エディタの書き込みなど短時間の連続イベントをまとめる
+# 範囲: 10〜60000 ms
+inotify_debounce_ms = 500
 
 [modules.package_verify]
 # パッケージ整合性検証モジュール

@@ -37,9 +37,11 @@ use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::core::module_stats::ModuleStatsHandle;
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
+use inotify::{Inotify, WatchDescriptor, WatchMask};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 /// モジュール識別子（`ModuleStats` に登録する統計上のモジュール名）
@@ -911,6 +913,191 @@ impl NtpConfigMonitorModule {
 
         Ok(Some((hash, findings)))
     }
+
+    /// inotify を初期化し、監視対象ファイルの親ディレクトリに watch を登録する
+    ///
+    /// chrony / ntpd / timesyncd の設定ファイルは親ディレクトリ（例: `/etc/chrony/`）の
+    /// 権限管理が基本であり、エディタによる書き込み・パッケージ更新時の置換
+    /// （MOVED_TO 含む）を捕捉するため親ディレクトリを watch する。
+    fn setup_inotify(
+        config_paths: &[String],
+    ) -> Result<(Inotify, HashMap<WatchDescriptor, PathBuf>), AppError> {
+        let inotify = Inotify::init().map_err(|e| AppError::ModuleConfig {
+            message: format!("inotify の初期化に失敗しました: {}", e),
+        })?;
+
+        let watch_mask =
+            WatchMask::CLOSE_WRITE | WatchMask::MOVED_TO | WatchMask::DELETE | WatchMask::CREATE;
+
+        let mut watch_map: HashMap<WatchDescriptor, PathBuf> = HashMap::new();
+
+        for path_str in config_paths {
+            let path = Path::new(path_str);
+            let Some(parent) = path.parent() else {
+                continue;
+            };
+            if !parent.is_dir() {
+                tracing::debug!(
+                    parent = %parent.display(),
+                    path = %path.display(),
+                    "NTP 設定ファイルの親ディレクトリが存在しないため inotify watch をスキップします"
+                );
+                continue;
+            }
+            if watch_map.values().any(|p| p == parent) {
+                continue;
+            }
+            match inotify.watches().add(parent, watch_mask) {
+                Ok(wd) => {
+                    watch_map.insert(wd, parent.to_path_buf());
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %parent.display(),
+                        error = %e,
+                        "inotify watch の登録に失敗しました"
+                    );
+                }
+            }
+        }
+
+        Ok((inotify, watch_map))
+    }
+
+    /// 1 つの設定ファイルをスキャンし、差分検知とイベント発行を行う
+    ///
+    /// `previous_hashes` を更新し、検出元（`periodic_scan` / `inotify`）を
+    /// `details` に `detection=...` として付加する。
+    fn scan_and_publish(
+        path_str: &str,
+        config: &NtpConfigMonitorConfig,
+        event_bus: &Option<EventBus>,
+        previous_hashes: &mut BTreeMap<String, Option<String>>,
+        detection: &str,
+    ) {
+        let path = Path::new(path_str);
+        match Self::scan_config_file(path, config) {
+            Ok(Some((hash, findings))) => {
+                let prev = previous_hashes.get(path_str).cloned();
+
+                match prev {
+                    Some(Some(ref p)) if p != &hash => {
+                        tracing::info!(
+                            path = %path.display(),
+                            detection = detection,
+                            "NTP 設定ファイルの変更を検知しました"
+                        );
+                        if let Some(bus) = event_bus {
+                            bus.publish(
+                                SecurityEvent::new(
+                                    "ntp_config_changed",
+                                    Severity::Warning,
+                                    "ntp_config_monitor",
+                                    format!(
+                                        "NTP 設定ファイルの変更を検知しました: {}",
+                                        path.display()
+                                    ),
+                                )
+                                .with_details(format!(
+                                    "path={}, hash={}, detection={}",
+                                    path.display(),
+                                    hash,
+                                    detection
+                                )),
+                            );
+                        }
+                    }
+                    Some(None) => {
+                        tracing::info!(
+                            path = %path.display(),
+                            detection = detection,
+                            "NTP 設定ファイルが新規に出現しました"
+                        );
+                        if let Some(bus) = event_bus {
+                            bus.publish(
+                                SecurityEvent::new(
+                                    "ntp_config_appeared",
+                                    Severity::Warning,
+                                    "ntp_config_monitor",
+                                    format!(
+                                        "NTP 設定ファイルが新規に作成されました: {}",
+                                        path.display()
+                                    ),
+                                )
+                                .with_details(format!(
+                                    "path={}, hash={}, detection={}",
+                                    path.display(),
+                                    hash,
+                                    detection
+                                )),
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+
+                previous_hashes.insert(path_str.to_string(), Some(hash));
+
+                for finding in &findings {
+                    tracing::warn!(
+                        kind = %finding.kind,
+                        severity = ?finding.severity,
+                        detection = detection,
+                        "{}", finding.message
+                    );
+                    if let Some(bus) = event_bus {
+                        bus.publish(
+                            SecurityEvent::new(
+                                "ntp_config_insecure_setting",
+                                finding.severity.clone(),
+                                "ntp_config_monitor",
+                                finding.message.clone(),
+                            )
+                            .with_details(format!(
+                                "path={}, kind={}, detection={}",
+                                path.display(),
+                                finding.kind,
+                                detection
+                            )),
+                        );
+                    }
+                }
+            }
+            Ok(None) => {
+                if let Some(Some(_)) = previous_hashes.get(path_str) {
+                    tracing::warn!(
+                        path = %path.display(),
+                        detection = detection,
+                        "NTP 設定ファイルの削除を検知しました"
+                    );
+                    if let Some(bus) = event_bus {
+                        bus.publish(
+                            SecurityEvent::new(
+                                "ntp_config_removed",
+                                Severity::Warning,
+                                "ntp_config_monitor",
+                                format!("NTP 設定ファイルが削除されました: {}", path.display()),
+                            )
+                            .with_details(format!(
+                                "path={}, detection={}",
+                                path.display(),
+                                detection
+                            )),
+                        );
+                    }
+                }
+                previous_hashes.insert(path_str.to_string(), None);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    detection = detection,
+                    "NTP 設定のスキャンに失敗しました"
+                );
+            }
+        }
+    }
 }
 
 impl Module for NtpConfigMonitorModule {
@@ -929,6 +1116,8 @@ impl Module for NtpConfigMonitorModule {
             scan_interval_secs = self.config.scan_interval_secs,
             config_paths = ?self.config.config_paths,
             audit_enabled = self.config.audit_enabled,
+            use_inotify = self.config.use_inotify,
+            inotify_debounce_ms = self.config.inotify_debounce_ms,
             "NTP / 時刻同期設定監視モジュールを初期化しました"
         );
 
@@ -936,18 +1125,21 @@ impl Module for NtpConfigMonitorModule {
     }
 
     async fn start(&mut self) -> Result<tokio::task::JoinHandle<()>, AppError> {
-        // 初回実行時の状態を記録
+        // 初回実行時の状態を記録し、後続の変更検知用ベースラインを構築する
         let mut issues_total = 0;
         let mut files_found = 0;
+        let mut initial_hashes: BTreeMap<String, Option<String>> = BTreeMap::new();
         for path_str in &self.config.config_paths {
             let path = Path::new(path_str);
             match Self::scan_config_file(path, &self.config) {
-                Ok(Some((_, findings))) => {
+                Ok(Some((hash, findings))) => {
                     files_found += 1;
                     issues_total += findings.len();
+                    initial_hashes.insert(path_str.clone(), Some(hash));
                 }
                 Ok(None) => {
                     tracing::debug!(path = %path.display(), "NTP 設定ファイルが存在しません（スキップ）");
+                    initial_hashes.insert(path_str.clone(), None);
                 }
                 Err(e) => {
                     tracing::warn!(path = %path.display(), error = %e, "初回 NTP 設定スキャンに失敗しました");
@@ -965,143 +1157,147 @@ impl Module for NtpConfigMonitorModule {
         let cancel_token = self.cancel_token.clone();
         let event_bus = self.event_bus.clone();
         let stats_handle = self.stats_handle.clone();
+        let use_inotify = self.config.use_inotify;
+        let inotify_debounce_ms = self.config.inotify_debounce_ms;
+
+        // inotify の初期化（有効時のみ）
+        let inotify_state = if use_inotify {
+            match Self::setup_inotify(&self.config.config_paths) {
+                Ok((inotify, watch_map)) => {
+                    tracing::info!(
+                        watch_count = watch_map.len(),
+                        "NTP 設定監視用の inotify watch を登録しました"
+                    );
+                    Some((inotify, watch_map))
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "inotify の初期化に失敗しました。定期スキャンのみで動作します"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let handle = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(scan_interval_secs));
             interval.tick().await;
 
-            let mut previous_hashes: BTreeMap<String, Option<String>> = BTreeMap::new();
+            let mut previous_hashes: BTreeMap<String, Option<String>> = initial_hashes;
 
-            loop {
-                tokio::select! {
-                    _ = cancel_token.cancelled() => {
-                        tracing::info!("NTP / 時刻同期設定監視モジュールを停止します");
-                        break;
-                    }
-                    _ = interval.tick() => {
-                        let scan_start = std::time::Instant::now();
-                        for path_str in &config.config_paths {
-                            let path = Path::new(path_str);
+            if let Some((mut inotify, watch_map)) = inotify_state {
+                let mut buffer = vec![0u8; 4096];
+                let mut debounce_map: HashMap<PathBuf, Instant> = HashMap::new();
+                let debounce_duration = Duration::from_millis(inotify_debounce_ms);
+                let mut poll_interval = tokio::time::interval(Duration::from_millis(100));
+                poll_interval.tick().await;
 
-                            match NtpConfigMonitorModule::scan_config_file(path, &config) {
-                                Ok(Some((hash, findings))) => {
-                                    let prev = previous_hashes.get(path_str.as_str()).cloned();
-
-                                    // ファイルが新規出現または内容変更
-                                    match prev {
-                                        Some(Some(ref p)) if p != &hash => {
-                                            tracing::info!(
-                                                path = %path.display(),
-                                                "NTP 設定ファイルの変更を検知しました"
-                                            );
-                                            if let Some(ref bus) = event_bus {
-                                                bus.publish(
-                                                    SecurityEvent::new(
-                                                        "ntp_config_changed",
-                                                        Severity::Warning,
-                                                        "ntp_config_monitor",
-                                                        format!(
-                                                            "NTP 設定ファイルの変更を検知しました: {}",
-                                                            path.display()
-                                                        ),
-                                                    )
-                                                    .with_details(format!(
-                                                        "path={}, hash={}",
-                                                        path.display(),
-                                                        hash
-                                                    )),
-                                                );
-                                            }
-                                        }
-                                        Some(None) => {
-                                            tracing::info!(
-                                                path = %path.display(),
-                                                "NTP 設定ファイルが新規に出現しました"
-                                            );
-                                            if let Some(ref bus) = event_bus {
-                                                bus.publish(
-                                                    SecurityEvent::new(
-                                                        "ntp_config_appeared",
-                                                        Severity::Warning,
-                                                        "ntp_config_monitor",
-                                                        format!(
-                                                            "NTP 設定ファイルが新規に作成されました: {}",
-                                                            path.display()
-                                                        ),
-                                                    )
-                                                    .with_details(format!(
-                                                        "path={}, hash={}",
-                                                        path.display(),
-                                                        hash
-                                                    )),
-                                                );
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-
-                                    previous_hashes.insert(path_str.clone(), Some(hash));
-
-                                    for finding in &findings {
-                                        tracing::warn!(
-                                            kind = %finding.kind,
-                                            severity = ?finding.severity,
-                                            "{}", finding.message
-                                        );
-                                        if let Some(ref bus) = event_bus {
-                                            bus.publish(
-                                                SecurityEvent::new(
-                                                    "ntp_config_insecure_setting",
-                                                    finding.severity.clone(),
-                                                    "ntp_config_monitor",
-                                                    finding.message.clone(),
-                                                )
-                                                .with_details(format!(
-                                                    "path={}, kind={}",
-                                                    path.display(),
-                                                    finding.kind
-                                                )),
-                                            );
-                                        }
-                                    }
-                                }
-                                Ok(None) => {
-                                    // ファイル不在。以前存在していた場合は削除イベント発行
-                                    if let Some(Some(_)) = previous_hashes.get(path_str.as_str()) {
-                                        tracing::warn!(
-                                            path = %path.display(),
-                                            "NTP 設定ファイルの削除を検知しました"
-                                        );
-                                        if let Some(ref bus) = event_bus {
-                                            bus.publish(
-                                                SecurityEvent::new(
-                                                    "ntp_config_removed",
-                                                    Severity::Warning,
-                                                    "ntp_config_monitor",
-                                                    format!(
-                                                        "NTP 設定ファイルが削除されました: {}",
-                                                        path.display()
-                                                    ),
-                                                )
-                                                .with_details(format!("path={}", path.display())),
-                                            );
-                                        }
-                                    }
-                                    previous_hashes.insert(path_str.clone(), None);
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        path = %path.display(),
-                                        error = %e,
-                                        "NTP 設定のスキャンに失敗しました"
-                                    );
-                                }
+                loop {
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => {
+                            tracing::info!("NTP / 時刻同期設定監視モジュールを停止します");
+                            break;
+                        }
+                        _ = interval.tick() => {
+                            let scan_start = Instant::now();
+                            for path_str in &config.config_paths {
+                                NtpConfigMonitorModule::scan_and_publish(
+                                    path_str,
+                                    &config,
+                                    &event_bus,
+                                    &mut previous_hashes,
+                                    "periodic_scan",
+                                );
+                            }
+                            let scan_elapsed = scan_start.elapsed();
+                            if let Some(ref handle) = stats_handle {
+                                handle.record_scan_duration(MODULE_STATS_NAME, scan_elapsed);
                             }
                         }
-                        let scan_elapsed = scan_start.elapsed();
-                        if let Some(ref handle) = stats_handle {
-                            handle.record_scan_duration(MODULE_STATS_NAME, scan_elapsed);
+                        _ = poll_interval.tick() => {
+                            let events = match inotify.read_events(&mut buffer) {
+                                Ok(events) => events,
+                                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                                Err(e) => {
+                                    tracing::error!(error = %e, "inotify イベントの読み取りに失敗しました");
+                                    continue;
+                                }
+                            };
+
+                            let now = Instant::now();
+                            let mut targets: Vec<String> = Vec::new();
+
+                            for event in events {
+                                let dir_path = match watch_map.get(&event.wd) {
+                                    Some(p) => p.clone(),
+                                    None => continue,
+                                };
+
+                                let file_path = match &event.name {
+                                    Some(name) => dir_path.join(name),
+                                    None => dir_path.clone(),
+                                };
+
+                                if let Some(last_time) = debounce_map.get(&file_path)
+                                    && now.duration_since(*last_time) < debounce_duration
+                                {
+                                    continue;
+                                }
+                                debounce_map.insert(file_path.clone(), now);
+
+                                // 監視対象の config_paths にマッチするもののみ再スキャン
+                                for path_str in &config.config_paths {
+                                    if Path::new(path_str) == file_path
+                                        && !targets.iter().any(|t| t == path_str)
+                                    {
+                                        targets.push(path_str.clone());
+                                    }
+                                }
+                            }
+
+                            for path_str in &targets {
+                                NtpConfigMonitorModule::scan_and_publish(
+                                    path_str,
+                                    &config,
+                                    &event_bus,
+                                    &mut previous_hashes,
+                                    "inotify",
+                                );
+                            }
+
+                            if debounce_map.len() > 10000 {
+                                let threshold = now - Duration::from_secs(60);
+                                debounce_map.retain(|_, t| *t > threshold);
+                            }
+                        }
+                    }
+                }
+            } else {
+                loop {
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => {
+                            tracing::info!("NTP / 時刻同期設定監視モジュールを停止します");
+                            break;
+                        }
+                        _ = interval.tick() => {
+                            let scan_start = Instant::now();
+                            for path_str in &config.config_paths {
+                                NtpConfigMonitorModule::scan_and_publish(
+                                    path_str,
+                                    &config,
+                                    &event_bus,
+                                    &mut previous_hashes,
+                                    "periodic_scan",
+                                );
+                            }
+                            let scan_elapsed = scan_start.elapsed();
+                            if let Some(ref handle) = stats_handle {
+                                handle.record_scan_duration(MODULE_STATS_NAME, scan_elapsed);
+                            }
                         }
                     }
                 }
@@ -2775,6 +2971,258 @@ mod tests {
             s.scan_count >= 1,
             "scan_count={} expected >= 1",
             s.scan_count
+        );
+    }
+
+    #[test]
+    fn test_inotify_config_enabled_by_default() {
+        let config = NtpConfigMonitorConfig::default();
+        assert!(config.use_inotify);
+        assert_eq!(config.inotify_debounce_ms, 500);
+    }
+
+    #[tokio::test]
+    async fn test_start_and_stop_with_inotify_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chrony.conf");
+        std::fs::write(&path, "pool 2.pool.ntp.org iburst\nmakestep 1.0 3\n").unwrap();
+
+        let config = NtpConfigMonitorConfig {
+            config_paths: vec![path.to_string_lossy().to_string()],
+            scan_interval_secs: 3600,
+            use_inotify: false,
+            ..Default::default()
+        };
+        let mut module = NtpConfigMonitorModule::new(config, None);
+        module.init().unwrap();
+
+        let cancel_token = module.cancel_token();
+        let handle = module.start().await.unwrap();
+        module.stop().await.unwrap();
+        let _ = handle.await;
+        assert!(cancel_token.is_cancelled());
+    }
+
+    #[test]
+    fn test_setup_inotify_registers_parent_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chrony.conf");
+        std::fs::write(&path, "pool 2.pool.ntp.org iburst\n").unwrap();
+
+        let config_paths = vec![path.to_string_lossy().to_string()];
+        let (_inotify, watch_map) = NtpConfigMonitorModule::setup_inotify(&config_paths).unwrap();
+
+        assert_eq!(watch_map.len(), 1);
+        assert!(watch_map.values().any(|p| p == dir.path()));
+    }
+
+    #[test]
+    fn test_setup_inotify_deduplicates_shared_parent() {
+        // 複数ファイルが同じ親ディレクトリに属する場合、watch は 1 つだけになる
+        let dir = tempfile::tempdir().unwrap();
+        let path1 = dir.path().join("chrony.conf");
+        let path2 = dir.path().join("ntp.conf");
+        std::fs::write(&path1, "pool 2.pool.ntp.org iburst\n").unwrap();
+        std::fs::write(&path2, "server pool.ntp.org\n").unwrap();
+
+        let config_paths = vec![
+            path1.to_string_lossy().to_string(),
+            path2.to_string_lossy().to_string(),
+        ];
+        let (_inotify, watch_map) = NtpConfigMonitorModule::setup_inotify(&config_paths).unwrap();
+
+        assert_eq!(watch_map.len(), 1);
+    }
+
+    #[test]
+    fn test_setup_inotify_skips_missing_parent() {
+        // 存在しない親ディレクトリは watch に登録されない
+        let config_paths = vec!["/nonexistent-xyz-zettai/ntp.conf".to_string()];
+        let (_inotify, watch_map) = NtpConfigMonitorModule::setup_inotify(&config_paths).unwrap();
+        assert!(watch_map.is_empty());
+    }
+
+    #[test]
+    fn test_debounce_logic_skips_within_window() {
+        let mut debounce_map: HashMap<PathBuf, Instant> = HashMap::new();
+        let debounce_duration = Duration::from_millis(500);
+        let path = PathBuf::from("/etc/chrony/chrony.conf");
+
+        let now = Instant::now();
+        debounce_map.insert(path.clone(), now);
+
+        let should_skip = debounce_map
+            .get(&path)
+            .is_some_and(|last_time| now.duration_since(*last_time) < debounce_duration);
+        assert!(should_skip);
+    }
+
+    #[test]
+    fn test_debounce_logic_allows_after_expiry() {
+        let mut debounce_map: HashMap<PathBuf, Instant> = HashMap::new();
+        let debounce_duration = Duration::from_millis(500);
+        let path = PathBuf::from("/etc/chrony/chrony.conf");
+
+        let past = Instant::now() - Duration::from_secs(1);
+        debounce_map.insert(path.clone(), past);
+
+        let now = Instant::now();
+        let should_skip = debounce_map
+            .get(&path)
+            .is_some_and(|last_time| now.duration_since(*last_time) < debounce_duration);
+        assert!(!should_skip);
+    }
+
+    #[test]
+    fn test_scan_and_publish_adds_detection_field_periodic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chrony.conf");
+        std::fs::write(&path, "pool 2.pool.ntp.org iburst\nmakestep 1.0 3\n").unwrap();
+        let path_str = path.to_string_lossy().to_string();
+
+        let config = NtpConfigMonitorConfig {
+            config_paths: vec![path_str.clone()],
+            ..Default::default()
+        };
+        let event_bus = EventBus::new(16);
+        let mut rx = event_bus.subscribe();
+        let mut previous: BTreeMap<String, Option<String>> = BTreeMap::new();
+        // ベースラインとして旧ハッシュを入れておく
+        previous.insert(path_str.clone(), Some("00".to_string()));
+
+        NtpConfigMonitorModule::scan_and_publish(
+            &path_str,
+            &config,
+            &Some(event_bus),
+            &mut previous,
+            "periodic_scan",
+        );
+
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.event_type, "ntp_config_changed");
+        assert!(
+            event
+                .details
+                .as_ref()
+                .unwrap()
+                .contains("detection=periodic_scan")
+        );
+    }
+
+    #[test]
+    fn test_scan_and_publish_adds_detection_field_inotify() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chrony.conf");
+        std::fs::write(&path, "pool 2.pool.ntp.org iburst\nmakestep 1.0 3\n").unwrap();
+        let path_str = path.to_string_lossy().to_string();
+
+        let config = NtpConfigMonitorConfig {
+            config_paths: vec![path_str.clone()],
+            ..Default::default()
+        };
+        let event_bus = EventBus::new(16);
+        let mut rx = event_bus.subscribe();
+        let mut previous: BTreeMap<String, Option<String>> = BTreeMap::new();
+        previous.insert(path_str.clone(), Some("00".to_string()));
+
+        NtpConfigMonitorModule::scan_and_publish(
+            &path_str,
+            &config,
+            &Some(event_bus),
+            &mut previous,
+            "inotify",
+        );
+
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.event_type, "ntp_config_changed");
+        assert!(
+            event
+                .details
+                .as_ref()
+                .unwrap()
+                .contains("detection=inotify")
+        );
+    }
+
+    #[test]
+    fn test_scan_and_publish_removal_detection_field() {
+        // 以前存在していたファイルが消失した場合は ntp_config_removed に detection が付く
+        let path_str = "/tmp/nonexistent-ntp-zettai-349.conf".to_string();
+        let config = NtpConfigMonitorConfig {
+            config_paths: vec![path_str.clone()],
+            ..Default::default()
+        };
+        let event_bus = EventBus::new(16);
+        let mut rx = event_bus.subscribe();
+        let mut previous: BTreeMap<String, Option<String>> = BTreeMap::new();
+        previous.insert(path_str.clone(), Some("aabb".to_string()));
+
+        NtpConfigMonitorModule::scan_and_publish(
+            &path_str,
+            &config,
+            &Some(event_bus),
+            &mut previous,
+            "inotify",
+        );
+
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.event_type, "ntp_config_removed");
+        assert!(
+            event
+                .details
+                .as_ref()
+                .unwrap()
+                .contains("detection=inotify")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inotify_detects_file_modification() {
+        // 実際に inotify 経由で変更検知イベントが発行されることを確認する統合テスト
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chrony.conf");
+        std::fs::write(&path, "pool 2.pool.ntp.org iburst\nmakestep 1.0 3\n").unwrap();
+
+        let config = NtpConfigMonitorConfig {
+            config_paths: vec![path.to_string_lossy().to_string()],
+            scan_interval_secs: 3600,
+            use_inotify: true,
+            inotify_debounce_ms: 10,
+            ..Default::default()
+        };
+        let event_bus = EventBus::new(64);
+        let mut rx = event_bus.subscribe();
+        let mut module = NtpConfigMonitorModule::new(config, Some(event_bus));
+        module.init().unwrap();
+        let handle = module.start().await.unwrap();
+
+        // inotify watch が確立するまで待つ
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // ファイルを書き換える（CLOSE_WRITE が発火）
+        std::fs::write(&path, "pool 1.pool.ntp.org iburst\nmakestep 1.0 3\n").unwrap();
+
+        // inotify イベント検知・scan_and_publish 完了まで待つ
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        module.stop().await.unwrap();
+        let _ = handle.await;
+
+        // detection=inotify を含む ntp_config_changed が発行されるはず
+        let mut found_inotify = false;
+        while let Ok(event) = rx.try_recv() {
+            if event.event_type == "ntp_config_changed"
+                && event
+                    .details
+                    .as_ref()
+                    .is_some_and(|d| d.contains("detection=inotify"))
+            {
+                found_inotify = true;
+                break;
+            }
+        }
+        assert!(
+            found_inotify,
+            "detection=inotify を含む ntp_config_changed イベントが発行されませんでした"
         );
     }
 }
