@@ -37,6 +37,12 @@
 //!   - `chrony.conf`: `rtcfile` が指定されているが絶対パスでない（`driftfile` と同様、
 //!     chronyd の作業ディレクトリ依存の書き込みとなり RTC ドリフト情報が
 //!     意図しない位置に保存される）
+//!   - `chrony.conf`: `maxdistance` が推奨上限を超えている（root distance の許容値が
+//!     緩すぎると劣化した時刻ソースが同期候補に残り、中間者攻撃や偽装 NTP サーバに
+//!     よる時刻偽装の余地が広がる）
+//!   - `chrony.conf`: `maxjitter` が推奨上限を超えている（jitter の許容値が緩すぎると
+//!     ジッターの大きい時刻ソースが同期候補に残り、時刻同期の安定性と偽装耐性が
+//!     低下する）
 //! - **ドロップイン監視** — `chrony.conf` 内の `confdir` / `sourcedir` / `include`
 //!   ディレクティブで参照される追加設定ファイル（例: `/etc/chrony/conf.d/*.conf`、
 //!   `/etc/chrony/sources.d/*.sources`）も監視対象に加え、親ディレクトリも inotify
@@ -729,6 +735,22 @@ fn parse_chrony_top_level_u32(content: &str, keyword: &str) -> Option<u32> {
     last
 }
 
+/// chrony.conf の top-level ディレクティブから f64 値をパースする
+///
+/// `find_keyword_lines` は行頭トークンが一致した行のみ返すため、
+/// `server ... maxdistance N` のような inline オプションには一致せず、top-level 設定だけを拾える。
+/// 複数行がある場合は後者が優先。値として数値でないトークンは無視する。
+fn parse_chrony_top_level_f64(content: &str, keyword: &str) -> Option<f64> {
+    let mut last: Option<f64> = None;
+    for value in find_keyword_lines(content, keyword) {
+        let token = value.split_whitespace().next().unwrap_or("").trim();
+        if let Ok(n) = token.parse::<f64>() {
+            last = Some(n);
+        }
+    }
+    last
+}
+
 /// chrony.conf の `maxsamples` / `minsamples` のサンプル数設定を監査する
 ///
 /// - `maxsamples` が 0（= 無制限）を除き閾値未満 → `chrony_maxsamples_too_low` (Warning)
@@ -769,6 +791,58 @@ fn audit_chrony_sample_counts(content: &str, maxsamples_min_threshold: u32) -> V
         });
     }
 
+    findings
+}
+
+/// chrony.conf の `maxdistance` が許容上限を超えている場合を監査する
+///
+/// `maxdistance` は時刻ソースの root distance の上限値（秒）。chrony の既定は 3.0 秒で、
+/// この閾値を超えた時刻ソースは同期候補から除外される。値を過度に緩めると劣化した
+/// NTP サーバ（中間者攻撃で遅延された応答、意図的に root distance を大きく返す偽装サーバ等）
+/// が候補に残り、時刻偽装耐性が低下する。
+///
+/// 0 以下の値は設定ミス扱いとし、本監査の対象外とする（chrony 側で拒否される値域）。
+fn audit_chrony_maxdistance(content: &str, max_threshold: f64) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    if let Some(v) = parse_chrony_top_level_f64(content, "maxdistance")
+        && v > 0.0
+        && v > max_threshold
+    {
+        findings.push(AuditFinding {
+            kind: "chrony_maxdistance_too_large".to_string(),
+            severity: Severity::Warning,
+            message: format!(
+                "chrony.conf の `maxdistance {}` は推奨上限（{} 秒）を超えています（root distance の許容値が緩すぎると劣化した時刻ソースが同期候補に残り、中間者攻撃や偽装 NTP サーバによる時刻偽装の余地が広がります）",
+                v, max_threshold
+            ),
+        });
+    }
+    findings
+}
+
+/// chrony.conf の `maxjitter` が許容上限を超えている場合を監査する
+///
+/// `maxjitter` は時刻ソースの推定ジッターの上限値（秒）。chrony の既定は 1.0 秒で、
+/// この閾値を超えた時刻ソースは候補から外される。値を過度に緩めるとジッターの大きい
+/// 時刻ソース（低品質ソース、攻撃者が意図的にジッターを増やしたソース）が候補に残り、
+/// 時刻同期の安定性と偽装耐性が低下する。
+///
+/// 0 以下の値は設定ミス扱いとし、本監査の対象外とする（chrony 側で拒否される値域）。
+fn audit_chrony_maxjitter(content: &str, max_threshold: f64) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    if let Some(v) = parse_chrony_top_level_f64(content, "maxjitter")
+        && v > 0.0
+        && v > max_threshold
+    {
+        findings.push(AuditFinding {
+            kind: "chrony_maxjitter_too_large".to_string(),
+            severity: Severity::Warning,
+            message: format!(
+                "chrony.conf の `maxjitter {}` は推奨上限（{} 秒）を超えています（jitter の許容値が緩すぎるとジッターの大きい時刻ソースが同期候補に残り、時刻同期の安定性と偽装耐性が低下します）",
+                v, max_threshold
+            ),
+        });
+    }
     findings
 }
 
@@ -1153,6 +1227,18 @@ fn audit_by_kind(
             }
             if config.check_chrony_rtcfile {
                 findings.extend(audit_chrony_rtcfile_absolute(content));
+            }
+            if config.check_chrony_maxdistance {
+                findings.extend(audit_chrony_maxdistance(
+                    content,
+                    config.maxdistance_max_threshold,
+                ));
+            }
+            if config.check_chrony_maxjitter {
+                findings.extend(audit_chrony_maxjitter(
+                    content,
+                    config.maxjitter_max_threshold,
+                ));
             }
         }
         NtpConfigKind::Ntp => {
@@ -3755,6 +3841,102 @@ mod tests {
                 .iter()
                 .all(|f| f.kind == "chrony_rtcfile_not_absolute")
         );
+    }
+
+    // ------------------------------------------------------------------
+    // audit_chrony_maxdistance
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_chrony_maxdistance_detects_over_threshold() {
+        let content = "maxdistance 10.0\n";
+        let findings = audit_chrony_maxdistance(content, 5.0);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_maxdistance_too_large");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+        assert!(findings[0].message.contains("maxdistance"));
+    }
+
+    #[test]
+    fn test_audit_chrony_maxdistance_respects_threshold() {
+        // 境界値: 閾値ちょうどは検知しない（strict greater-than）
+        let content = "maxdistance 5.0\n";
+        let findings = audit_chrony_maxdistance(content, 5.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxdistance_default_value_no_finding() {
+        // chrony の既定値 3.0 秒は閾値 5.0 秒以下なので検知しない
+        let content = "maxdistance 3.0\n";
+        let findings = audit_chrony_maxdistance(content, 5.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxdistance_unset_no_finding() {
+        let content = "server foo\nmakestep 1.0 3\n";
+        let findings = audit_chrony_maxdistance(content, 5.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxdistance_negative_no_finding() {
+        // 負値は設定ミス扱いで監査対象外
+        let content = "maxdistance -1.0\n";
+        let findings = audit_chrony_maxdistance(content, 5.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxdistance_inline_server_option_ignored() {
+        // server ディレクティブの inline オプションは top-level 監査では拾わない
+        let content = "server ntp.example.com maxdistance 100\n";
+        let findings = audit_chrony_maxdistance(content, 5.0);
+        assert!(findings.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // audit_chrony_maxjitter
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_chrony_maxjitter_detects_over_threshold() {
+        let content = "maxjitter 5.0\n";
+        let findings = audit_chrony_maxjitter(content, 2.0);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_maxjitter_too_large");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+        assert!(findings[0].message.contains("maxjitter"));
+    }
+
+    #[test]
+    fn test_audit_chrony_maxjitter_respects_threshold() {
+        // 境界値: 閾値ちょうどは検知しない
+        let content = "maxjitter 2.0\n";
+        let findings = audit_chrony_maxjitter(content, 2.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxjitter_default_value_no_finding() {
+        // chrony の既定値 1.0 秒は閾値 2.0 秒以下なので検知しない
+        let content = "maxjitter 1.0\n";
+        let findings = audit_chrony_maxjitter(content, 2.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxjitter_unset_no_finding() {
+        let content = "server foo\nmakestep 1.0 3\n";
+        let findings = audit_chrony_maxjitter(content, 2.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxjitter_inline_server_option_ignored() {
+        // server ディレクティブの inline オプションは top-level 監査では拾わない
+        let content = "server ntp.example.com maxjitter 100\n";
+        let findings = audit_chrony_maxjitter(content, 2.0);
+        assert!(findings.is_empty());
     }
 
     // ------------------------------------------------------------------

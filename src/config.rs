@@ -6217,6 +6217,28 @@ pub struct NtpConfigMonitorConfig {
     #[serde(default = "NtpConfigMonitorConfig::default_true")]
     pub check_chrony_rtcfile: bool,
 
+    /// chrony の `maxdistance` ディレクティブが許容上限を超えている場合を検知
+    /// （root distance の上限が緩すぎると劣化した時刻ソースが同期候補に残り、
+    /// 中間者攻撃や偽装 NTP サーバによる時刻偽装の余地が広がる）
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_chrony_maxdistance: bool,
+
+    /// chrony の `maxjitter` ディレクティブが許容上限を超えている場合を検知
+    /// （jitter の上限が緩すぎるとジッターの大きい時刻ソースが候補に残り、
+    /// 時刻偽装・不安定な時刻同期の原因となる）
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_chrony_maxjitter: bool,
+
+    /// `maxdistance` の許容上限（秒、既定 5.0）
+    /// chrony のデフォルトは 3.0 秒なので 5.0 秒超は明示的な緩和設定と判定する
+    #[serde(default = "NtpConfigMonitorConfig::default_maxdistance_max_threshold")]
+    pub maxdistance_max_threshold: f64,
+
+    /// `maxjitter` の許容上限（秒、既定 2.0）
+    /// chrony のデフォルトは 1.0 秒
+    #[serde(default = "NtpConfigMonitorConfig::default_maxjitter_max_threshold")]
+    pub maxjitter_max_threshold: f64,
+
     /// `maxsamples_too_low` 判定の下限閾値（既定: 4）
     /// chrony の NTP フィルタアルゴリズムは通常 4 以上のサンプルで安定動作する
     #[serde(default = "NtpConfigMonitorConfig::default_maxsamples_min_threshold")]
@@ -6290,6 +6312,14 @@ impl NtpConfigMonitorConfig {
         4
     }
 
+    fn default_maxdistance_max_threshold() -> f64 {
+        5.0
+    }
+
+    fn default_maxjitter_max_threshold() -> f64 {
+        2.0
+    }
+
     fn default_inotify_debounce_ms() -> u64 {
         500
     }
@@ -6324,6 +6354,10 @@ impl Default for NtpConfigMonitorConfig {
             allowed_refclock_drivers: Vec::new(),
             check_chrony_rtcsync: true,
             check_chrony_rtcfile: true,
+            check_chrony_maxdistance: true,
+            check_chrony_maxjitter: true,
+            maxdistance_max_threshold: Self::default_maxdistance_max_threshold(),
+            maxjitter_max_threshold: Self::default_maxjitter_max_threshold(),
             maxsamples_min_threshold: Self::default_maxsamples_min_threshold(),
             allowed_owner_uids: Self::default_allowed_uids(),
             allowed_owner_gids: Self::default_allowed_gids(),

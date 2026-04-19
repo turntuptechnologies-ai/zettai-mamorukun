@@ -1537,6 +1537,18 @@ check_chrony_rtcsync = true
 # 相対パス指定では chronyd の作業ディレクトリ依存となり、RTC ドリフト情報が
 # 意図しない位置に保存される。`driftfile` と同じパターンで監査する。
 check_chrony_rtcfile = true
+# chrony の `maxdistance` が許容上限を超えている場合を検知（Warning）
+# root distance の許容値が緩すぎると劣化した時刻ソースが同期候補に残り、
+# 中間者攻撃や偽装 NTP サーバによる時刻偽装の余地が広がる
+check_chrony_maxdistance = true
+# chrony の `maxjitter` が許容上限を超えている場合を検知（Warning）
+# jitter の許容値が緩すぎるとジッターの大きい時刻ソースが候補に残り、
+# 時刻同期の安定性と偽装耐性が低下する
+check_chrony_maxjitter = true
+# `maxdistance` 監査の許容上限（秒、既定 5.0）。chrony のデフォルトは 3.0 秒
+maxdistance_max_threshold = 5.0
+# `maxjitter` 監査の許容上限（秒、既定 2.0）。chrony のデフォルトは 1.0 秒
+maxjitter_max_threshold = 2.0
 # `maxsamples_too_low` 判定の下限閾値（既定: 4）
 # chrony の NTP フィルタアルゴリズムは通常 4 以上のサンプルで安定動作する
 # 0 に設定すると maxsamples 過少の検知を事実上無効化できる
