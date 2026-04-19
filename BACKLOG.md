@@ -177,11 +177,12 @@
 - [x] **ntp_config_monitor の inotify 連携によるリアルタイム改ざん検知** — v1.71.0 (#349, PR #350)
 - [x] **ntp_config_monitor の sourcedir / confdir / include 経由ドロップイン監視** — v1.72.0 (#351, PR #352)
 - [x] **ntp_config_monitor の refclock 監査** — v1.73.0 (#353, PR #354)
+- [x] **ntp_config_monitor の rtcsync / rtcfile 監査** — v1.74.0 (#355, PR #356)
 
 ## 候補
 
-1. **ntp_config_monitor の rtcsync / rtcfile 監査** — chrony の RTC 連動設定（`rtcsync`・`rtcfile`）が欠如している場合、BIOS 時刻補正が行われずシャットダウン後の時刻ずれを招くことを検知する
-2. **ntp_config_monitor の maxdistance / maxjitter 監査** — chrony の `maxdistance` / `maxjitter` 上限値を閾値監査し、極端に緩い設定による時刻偽装耐性の低下を検知する
+1. **ntp_config_monitor の maxdistance / maxjitter 監査** — chrony の `maxdistance` / `maxjitter` 上限値を閾値監査し、極端に緩い設定による時刻偽装耐性の低下を検知する
+2. **ntp_config_monitor の makestep / stepslew 絶対値監査** — `makestep <threshold> <limit>` の `threshold` が過大（例: 100 秒超）の場合、大幅な時刻ずれでも step を許容する脆弱設定として Warning を出す。攻撃者による意図的な時刻跳躍を緩和する。
 3. **ntp_config_monitor のドロップイン動的ホットリロード** — 稼働中に chrony.conf へ `confdir` / `include` が追加された場合、SIGHUP または再起動なしに inotify watch へディレクトリを追加する仕組みを整備する（現状は v1.72.0 で再起動まで反映されない制約あり）
 4. **ntp_config_monitor の refclock SHM セグメント実権限監査** — v1.73.0 で chrony.conf 上の `refclock SHM` 宣言を検知できるようになったため、次段として `SHM <id>` で参照される実 SysV SHM セグメント（`0x4e545030 + id`）の書き込み権限（`ipcs -m`）を検査し、非 root 書き込み可の場合を Critical 扱いにする
 5. **inotify リアルタイム検知の他モジュールへの展開** — cron_monitor / ntp_config_monitor で確立した inotify パターンを sshd_config_monitor / pam_monitor / sudoers_monitor / dns_monitor / security_files_monitor / shell_config_monitor など他の設定ファイル系モジュールに展開する
