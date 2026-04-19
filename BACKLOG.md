@@ -171,30 +171,32 @@
 - [x] **ntp_config_monitor の監査ルール拡充** — v1.65.0 (#337, PR #338)
 - [x] **clippy ベースライン整備（Rust 1.95.0 新規 lint 対応）** — v1.66.0 (#339, PR #340)
 - [x] **ntp_config_monitor の追加監査ルール（cmdport/port・ntpsigndsocket・keys 不在）** — v1.67.0 (#341, PR #342)
+- [x] **ntp_config_monitor の NTP 認証強度監査（keys パーミッション・trustedkey 未設定・authselectmode require）** — v1.68.0 (#343, PR #344)
 
 ## 候補
 
-1. **CI ワークフローでの clippy -D warnings 強制化** — v1.66.0 で現状の警告はゼロにしたので、GitHub Actions で `cargo clippy --all-targets -- -D warnings` / `cargo fmt --check` を PR 時に自動実行する `.github/workflows/ci.yaml` を整備する（promtool.yaml と同様、PAT の workflow スコープ問題があれば README 記載にとどめる）
-2. **ntp_config_monitor の inotify 連携** — 定期ポーリングだけでなく inotify ベースでリアルタイムに改ざんを検知する。`cron_monitor` の inotify 実装パターンを参考にする
-3. **ntp_config_monitor の `keyfile` / `trustedkey` / `authselectmode` 監査** — v1.67.0 で追加した `keys` ファイル存在チェックに続き、`keyfile` の過剰パーミッション（world-readable / world-writable）、`trustedkey` 未設定、chrony の `authselectmode require` 未使用など NTP 認証強度関連ルールを追加する
-4. **promtool ユニットテスト用の GitHub Actions ワークフロー追加** — PAT の workflow スコープ制約で v1.59.0 では README のサンプル掲載にとどめた `.github/workflows/promtool.yaml` を、適切な権限で追加し `grafana/alerts/**` の変更時に自動検証する
-5. **module-stats 履歴スナップショット機能** — `record_scan_duration` による最新 1024 サンプルに加え、1h/1d など時間粒度で集計したスナップショットを保持し、長期傾向（1日/1週間の P95 推移）を REST API で取得可能にする
-6. **module-stats --diff の定期比較スクリプト / cron ジョブサンプル** — v1.61.0 で `taken_at` 情報が埋め込まれるようになったので、スナップショットを自動ローテートし定期的に差分を Slack/Webhook に通知するユースケースのサンプル（README もしくは `examples/`）を追加する
-7. **module-stats --diff の JSON レポート schema ドキュメント化** — 返却 JSON（`ModuleStatsDiffReport` / `ModuleStatsDiffEntry`）の構造を CLAUDE.md もしくは README に明文化し、外部スクリプトからの利用を容易にする
-8. **Webhook 統合テスト強化** — wiremock を使った Webhook 送信の統合テスト（リトライ動作、4xx/5xx エラー処理、タイムアウト等）を追加する
-9. **module-stats CLI のテキスト出力改善** — `--diff` レポートのテキスト出力に色付き（赤=増加、緑=減少）と並び替えオプション（events_delta / module 名）を追加して可視性を向上する
-10. **モジュール依存関係管理** — モジュール間の依存関係を定義し、起動順序の制御やカスケード停止を可能にする仕組み
-11. **ダッシュボード機能拡張** — TUI ダッシュボードにイベント詳細表示、フィルタリング、イベント検索機能を追加する
-12. **プロセス起動リアルタイム監視強化** — proc connector（netlink）を使ったプロセス fork/exec のリアルタイム検知で、既存の定期スキャンを補完する
-13. **ネットワーク接続フィンガープリント** — プロセスごとの通常の接続先パターンを学習し、異常な通信先への接続を検知する
-14. **inotify ベースのリアルタイム監視の他モジュールへの展開** — cron_monitor で実装した inotify パターンを file_integrity、shell_config_monitor 等の他モジュールにも展開する
-15. **REST API RBAC（ロールベースアクセス制御）拡張** — 現在の read_only/admin の 2 ロールに加え、カスタムロールとエンドポイント単位の権限制御を追加する
-16. **REST API イベントタグ付け機能** — イベントにカスタムタグを付与し、タグによるフィルタリング・検索を可能にする
-17. **設定プロファイルのインポート・エクスポート** — REST API 経由で設定プロファイルのインポート・エクスポートを行い、複数サーバ間の設定同期を容易にする
-18. **REST API 設定変更エンドポイント** — REST API 経由で設定ファイルの値を変更可能にする（暗号化値の更新、モジュール設定の変更等）。バリデーション・dry-run 対応
-19. **ネットワークポリシー定義** — 許可/拒否する接続先をルールベースで定義し、ポリシー違反時にイベントを発行する仕組み
-20. **マルチインスタンス対応** — 複数の zettai-mamorukun インスタンスを同一ホスト上で異なる設定で実行可能にする（PID ファイル・ソケットパスの分離）
-21. **イベント通知テンプレート** — Webhook やアクションの通知メッセージをテンプレートでカスタマイズ可能にする（Handlebars/Tera 等）
-22. **設定マイグレーションツール** — バージョンアップ時に設定ファイルの破壊的変更を自動検出・マイグレーションする CLI コマンド
-23. **REST API Webhook 配信ログ** — Webhook 送信の成功/失敗履歴を記録し、REST API で取得可能にする（リトライ状況、レスポンスコード等）
-24. **イベント自動エスカレーション** — 設定した条件（Severity、件数閾値、時間帯等）に基づき、イベントを自動的にエスカレーションする仕組み
+1. **ntp_config_monitor の inotify 連携** — 定期ポーリングだけでなく inotify ベースでリアルタイムに改ざんを検知する。`cron_monitor` の inotify 実装パターンを参考にする
+2. **ntp_config_monitor の maxsamples / minsamples / leapsectz 監査** — chrony のサンプル数設定や閏秒ハンドリング設定を点検し、過度に小さなサンプル数や `leapsectz` 未設定を警告する
+3. **ntp_config_monitor の owner/group 監査** — chrony.conf / ntp.conf / keys ファイルの所有者が root 以外になっている場合を警告する（root 権限必須の設定ファイルの所有権改ざん検知）
+4. **CI ワークフローでの clippy -D warnings 強制化** — GitHub Actions で `cargo clippy --all-targets -- -D warnings` / `cargo fmt --check` を PR 時に自動実行する `.github/workflows/ci.yaml` を整備する（promtool.yaml と同様、PAT の workflow スコープ問題があれば README 記載にとどめる）
+5. **promtool ユニットテスト用の GitHub Actions ワークフロー追加** — PAT の workflow スコープ制約で v1.59.0 では README のサンプル掲載にとどめた `.github/workflows/promtool.yaml` を、適切な権限で追加し `grafana/alerts/**` の変更時に自動検証する
+6. **module-stats 履歴スナップショット機能** — `record_scan_duration` による最新 1024 サンプルに加え、1h/1d など時間粒度で集計したスナップショットを保持し、長期傾向（1日/1週間の P95 推移）を REST API で取得可能にする
+7. **module-stats --diff の定期比較スクリプト / cron ジョブサンプル** — v1.61.0 で `taken_at` 情報が埋め込まれるようになったので、スナップショットを自動ローテートし定期的に差分を Slack/Webhook に通知するユースケースのサンプル（README もしくは `examples/`）を追加する
+8. **module-stats --diff の JSON レポート schema ドキュメント化** — 返却 JSON（`ModuleStatsDiffReport` / `ModuleStatsDiffEntry`）の構造を CLAUDE.md もしくは README に明文化し、外部スクリプトからの利用を容易にする
+9. **Webhook 統合テスト強化** — wiremock を使った Webhook 送信の統合テスト（リトライ動作、4xx/5xx エラー処理、タイムアウト等）を追加する
+10. **module-stats CLI のテキスト出力改善** — `--diff` レポートのテキスト出力に色付き（赤=増加、緑=減少）と並び替えオプション（events_delta / module 名）を追加して可視性を向上する
+11. **モジュール依存関係管理** — モジュール間の依存関係を定義し、起動順序の制御やカスケード停止を可能にする仕組み
+12. **ダッシュボード機能拡張** — TUI ダッシュボードにイベント詳細表示、フィルタリング、イベント検索機能を追加する
+13. **プロセス起動リアルタイム監視強化** — proc connector（netlink）を使ったプロセス fork/exec のリアルタイム検知で、既存の定期スキャンを補完する
+14. **ネットワーク接続フィンガープリント** — プロセスごとの通常の接続先パターンを学習し、異常な通信先への接続を検知する
+15. **inotify ベースのリアルタイム監視の他モジュールへの展開** — cron_monitor で実装した inotify パターンを file_integrity、shell_config_monitor 等の他モジュールにも展開する
+16. **REST API RBAC（ロールベースアクセス制御）拡張** — 現在の read_only/admin の 2 ロールに加え、カスタムロールとエンドポイント単位の権限制御を追加する
+17. **REST API イベントタグ付け機能** — イベントにカスタムタグを付与し、タグによるフィルタリング・検索を可能にする
+18. **設定プロファイルのインポート・エクスポート** — REST API 経由で設定プロファイルのインポート・エクスポートを行い、複数サーバ間の設定同期を容易にする
+19. **REST API 設定変更エンドポイント** — REST API 経由で設定ファイルの値を変更可能にする（暗号化値の更新、モジュール設定の変更等）。バリデーション・dry-run 対応
+20. **ネットワークポリシー定義** — 許可/拒否する接続先をルールベースで定義し、ポリシー違反時にイベントを発行する仕組み
+21. **マルチインスタンス対応** — 複数の zettai-mamorukun インスタンスを同一ホスト上で異なる設定で実行可能にする（PID ファイル・ソケットパスの分離）
+22. **イベント通知テンプレート** — Webhook やアクションの通知メッセージをテンプレートでカスタマイズ可能にする（Handlebars/Tera 等）
+23. **設定マイグレーションツール** — バージョンアップ時に設定ファイルの破壊的変更を自動検出・マイグレーションする CLI コマンド
+24. **REST API Webhook 配信ログ** — Webhook 送信の成功/失敗履歴を記録し、REST API で取得可能にする（リトライ状況、レスポンスコード等）
+25. **イベント自動エスカレーション** — 設定した条件（Severity、件数閾値、時間帯等）に基づき、イベントを自動的にエスカレーションする仕組み
