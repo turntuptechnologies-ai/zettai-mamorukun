@@ -1539,6 +1539,15 @@ use_inotify = true
 # エディタの書き込みなど短時間の連続イベントをまとめる
 # 範囲: 10〜60000 ms
 inotify_debounce_ms = 500
+# chrony の `confdir` / `sourcedir` / `include` ディレクティブで参照される
+# ドロップインファイル（例: /etc/chrony/conf.d/*.conf、/etc/chrony/sources.d/*.sources）
+# の監視を有効化する。
+# 有効時はドロップインファイルもハッシュ監視対象に加わり、親ディレクトリも
+# inotify watch に登録される（攻撃者が chrony.conf を書き換えずに conf.d 配下に
+# ドロップインを設置して NTP サーバ偽装や同期停止を行うシナリオに対応）
+check_chrony_dropin = true
+# chrony ドロップイン監視で発見・追跡するファイル数の上限（暴走防止）
+dropin_max_files = 64
 
 [modules.package_verify]
 # パッケージ整合性検証モジュール

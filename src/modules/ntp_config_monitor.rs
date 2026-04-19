@@ -28,6 +28,11 @@
 //!     サンプル数不足による時刻精度・外れ値耐性低下）
 //!   - `chrony.conf`: `minsamples > maxsamples`（同期に必要なサンプル数が採取できない
 //!     設定矛盾）
+//! - **ドロップイン監視** — `chrony.conf` 内の `confdir` / `sourcedir` / `include`
+//!   ディレクティブで参照される追加設定ファイル（例: `/etc/chrony/conf.d/*.conf`、
+//!   `/etc/chrony/sources.d/*.sources`）も監視対象に加え、親ディレクトリも inotify
+//!   watch に登録することで、メインの `chrony.conf` を書き換えずにドロップイン経由で
+//!   NTP サーバ偽装や同期停止を行う攻撃を検知する。
 //!
 //! 攻撃者は時刻同期を無効化しログのタイムスタンプを改ざんすることで、フォレンジック
 //! 調査を妨害することがあるため、設定ファイルの変更検知と危険設定の検知が重要である。
@@ -37,9 +42,10 @@ use crate::core::event::{EventBus, SecurityEvent, Severity};
 use crate::core::module_stats::ModuleStatsHandle;
 use crate::error::AppError;
 use crate::modules::{InitialScanResult, Module};
+use glob::glob;
 use inotify::{Inotify, WatchDescriptor, WatchMask};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -757,6 +763,230 @@ fn audit_chrony_sample_counts(content: &str, maxsamples_min_threshold: u32) -> V
     findings
 }
 
+/// chrony のドロップイン取り込みディレクティブ
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChronyDropinSpec {
+    /// `confdir <dir>` — 指定ディレクトリ直下の `*.conf` を取り込む
+    ConfDir(PathBuf),
+    /// `sourcedir <dir>` — 指定ディレクトリ直下の `*.sources` を取り込む
+    SourceDir(PathBuf),
+    /// `include <glob>` — glob パターンに一致するファイルを取り込む
+    Include(PathBuf),
+}
+
+/// 相対パスを `base_dir` 基準で絶対パスに解決する
+///
+/// 絶対パスの場合はそのまま返す。`base_dir` は `chrony.conf` のあるディレクトリ。
+fn resolve_chrony_path(raw: &str, base_dir: &Path) -> PathBuf {
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base_dir.join(path)
+    }
+}
+
+/// `chrony.conf` の `confdir` / `sourcedir` / `include` ディレクティブを抽出する
+///
+/// `base_dir` は chrony.conf のあるディレクトリ。相対パス指定の解決に使う。
+/// 複数引数（`confdir /a /b`）や空行は chrony 側でも単一引数として扱われるため、
+/// 先頭トークンのみを採用する。
+fn parse_chrony_dropin_specs(content: &str, base_dir: &Path) -> Vec<ChronyDropinSpec> {
+    let mut specs = Vec::new();
+    for (keyword, ctor) in [
+        (
+            "confdir",
+            &(ChronyDropinSpec::ConfDir as fn(PathBuf) -> ChronyDropinSpec),
+        ),
+        (
+            "sourcedir",
+            &(ChronyDropinSpec::SourceDir as fn(PathBuf) -> ChronyDropinSpec),
+        ),
+        (
+            "include",
+            &(ChronyDropinSpec::Include as fn(PathBuf) -> ChronyDropinSpec),
+        ),
+    ] {
+        for value in find_keyword_lines(content, keyword) {
+            let token = value.split_whitespace().next().unwrap_or("");
+            if token.is_empty() {
+                continue;
+            }
+            let resolved = resolve_chrony_path(token, base_dir);
+            specs.push((ctor)(resolved));
+        }
+    }
+    specs
+}
+
+/// 1 つの `ChronyDropinSpec` からドロップインファイルを列挙する
+///
+/// 戻り値は `(dropin_files, watch_dirs)`:
+/// - `dropin_files` — 実在する取り込み対象のファイル
+/// - `watch_dirs` — inotify で監視すべきディレクトリ（新規ドロップイン検知のため）
+///
+/// `max_remaining` が 0 の場合は何も追加せずに戻る（暴走防止）。
+fn expand_dropin_spec(
+    spec: &ChronyDropinSpec,
+    max_remaining: &mut usize,
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    if *max_remaining == 0 {
+        return (Vec::new(), Vec::new());
+    }
+
+    match spec {
+        ChronyDropinSpec::ConfDir(dir) | ChronyDropinSpec::SourceDir(dir) => {
+            let ext = match spec {
+                ChronyDropinSpec::SourceDir(_) => "sources",
+                _ => "conf",
+            };
+            let watch_dirs = if dir.is_dir() {
+                vec![dir.clone()]
+            } else {
+                Vec::new()
+            };
+            let mut files = Vec::new();
+            let entries = match std::fs::read_dir(dir) {
+                Ok(e) => e,
+                Err(_) => return (files, watch_dirs),
+            };
+            for entry in entries.flatten() {
+                if *max_remaining == 0 {
+                    break;
+                }
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                if path.extension().and_then(|s| s.to_str()) == Some(ext) {
+                    files.push(path);
+                    *max_remaining = max_remaining.saturating_sub(1);
+                }
+            }
+            (files, watch_dirs)
+        }
+        ChronyDropinSpec::Include(pattern) => {
+            let pattern_str = pattern.to_string_lossy();
+            let mut files = Vec::new();
+            let mut watch_dirs: BTreeSet<PathBuf> = BTreeSet::new();
+
+            // `include` は glob も使えるが、固定パスも多い。固定パスならファイル/ディレクトリをそのまま扱う
+            if !pattern_str.contains('*')
+                && !pattern_str.contains('?')
+                && !pattern_str.contains('[')
+            {
+                if pattern.is_file() {
+                    if *max_remaining > 0 {
+                        files.push(pattern.clone());
+                        *max_remaining = max_remaining.saturating_sub(1);
+                    }
+                    if let Some(parent) = pattern.parent()
+                        && parent.is_dir()
+                    {
+                        watch_dirs.insert(parent.to_path_buf());
+                    }
+                } else if pattern.is_dir() {
+                    watch_dirs.insert(pattern.clone());
+                }
+                return (files, watch_dirs.into_iter().collect());
+            }
+
+            // glob 展開
+            let iter = match glob(&pattern_str) {
+                Ok(it) => it,
+                Err(e) => {
+                    tracing::warn!(
+                        pattern = %pattern_str,
+                        error = %e,
+                        "chrony include の glob パターンが不正です"
+                    );
+                    return (files, Vec::new());
+                }
+            };
+            for entry in iter {
+                if *max_remaining == 0 {
+                    break;
+                }
+                match entry {
+                    Ok(path) => {
+                        if path.is_file() {
+                            if let Some(parent) = path.parent()
+                                && parent.is_dir()
+                            {
+                                watch_dirs.insert(parent.to_path_buf());
+                            }
+                            files.push(path);
+                            *max_remaining = max_remaining.saturating_sub(1);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            pattern = %pattern_str,
+                            error = %e,
+                            "chrony include の glob 要素でエラーが発生しました"
+                        );
+                    }
+                }
+            }
+            (files, watch_dirs.into_iter().collect())
+        }
+    }
+}
+
+/// 複数の chrony 設定ファイルからドロップインを発見する
+///
+/// 戻り値は `(dropin_files, watch_dirs)`:
+/// - `dropin_files` — 監視対象として追加すべきドロップインファイル（重複排除済み）
+/// - `watch_dirs` — inotify で watch すべき追加ディレクトリ（重複排除済み）
+///
+/// 発見するファイル数は `max_files` で打ち切る。chrony.conf 以外は対象外。
+fn discover_chrony_dropins(
+    chrony_configs: &[&Path],
+    max_files: u32,
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut file_set: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut dir_set: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut remaining = max_files as usize;
+
+    for config_path in chrony_configs {
+        if NtpConfigKind::from_path(config_path) != NtpConfigKind::Chrony {
+            continue;
+        }
+        let Some(base_dir) = config_path.parent() else {
+            continue;
+        };
+        let content = match std::fs::read_to_string(config_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let specs = parse_chrony_dropin_specs(&content, base_dir);
+        for spec in &specs {
+            let (files, dirs) = expand_dropin_spec(spec, &mut remaining);
+            for f in files {
+                file_set.insert(f);
+            }
+            for d in dirs {
+                dir_set.insert(d);
+            }
+            if remaining == 0 {
+                tracing::warn!(
+                    max_files,
+                    "chrony ドロップインの発見数が上限に達したため、以降のファイル列挙を打ち切ります"
+                );
+                break;
+            }
+        }
+        if remaining == 0 {
+            break;
+        }
+    }
+
+    (
+        file_set.into_iter().collect(),
+        dir_set.into_iter().collect(),
+    )
+}
+
 /// 種別に応じた監査関数をディスパッチする
 fn audit_by_kind(
     kind: NtpConfigKind,
@@ -861,8 +1091,12 @@ impl NtpConfigMonitorModule {
     /// 指定ファイルをスキャンし、`(ハッシュ, 監査結果)` を返す
     ///
     /// ファイルが存在しない場合は `Ok(None)`（警告不要）、読み取り不可やサイズ超過なら `Err`。
+    ///
+    /// `kind_override` が `Some` の場合はその種別で監査する（chrony ドロップインのように
+    /// パス名からは `Unknown` に分類されるが chrony フォーマットとして扱いたいケース向け）。
     fn scan_config_file(
         path: &Path,
+        kind_override: Option<NtpConfigKind>,
         config: &NtpConfigMonitorConfig,
     ) -> Result<Option<(String, Vec<AuditFinding>)>, String> {
         let metadata = match std::fs::metadata(path) {
@@ -901,7 +1135,7 @@ impl NtpConfigMonitorModule {
         })?;
 
         let hash = compute_sha256(content.as_bytes());
-        let kind = NtpConfigKind::from_path(path);
+        let kind = kind_override.unwrap_or_else(|| NtpConfigKind::from_path(path));
         let mut findings = if config.audit_enabled {
             audit_by_kind(kind, &content, config, path)
         } else {
@@ -919,8 +1153,12 @@ impl NtpConfigMonitorModule {
     /// chrony / ntpd / timesyncd の設定ファイルは親ディレクトリ（例: `/etc/chrony/`）の
     /// 権限管理が基本であり、エディタによる書き込み・パッケージ更新時の置換
     /// （MOVED_TO 含む）を捕捉するため親ディレクトリを watch する。
+    ///
+    /// `extra_dirs` には chrony ドロップインディレクトリ（`/etc/chrony/conf.d/` 等）を
+    /// 指定し、親ディレクトリだけではカバーできない別ディレクトリの変更も捕捉する。
     fn setup_inotify(
         config_paths: &[String],
+        extra_dirs: &[PathBuf],
     ) -> Result<(Inotify, HashMap<WatchDescriptor, PathBuf>), AppError> {
         let inotify = Inotify::init().map_err(|e| AppError::ModuleConfig {
             message: format!("inotify の初期化に失敗しました: {}", e),
@@ -931,34 +1169,41 @@ impl NtpConfigMonitorModule {
 
         let mut watch_map: HashMap<WatchDescriptor, PathBuf> = HashMap::new();
 
-        for path_str in config_paths {
-            let path = Path::new(path_str);
-            let Some(parent) = path.parent() else {
-                continue;
-            };
-            if !parent.is_dir() {
+        let register_dir = |dir: &Path, map: &mut HashMap<WatchDescriptor, PathBuf>| {
+            if !dir.is_dir() {
                 tracing::debug!(
-                    parent = %parent.display(),
-                    path = %path.display(),
-                    "NTP 設定ファイルの親ディレクトリが存在しないため inotify watch をスキップします"
+                    dir = %dir.display(),
+                    "NTP 設定の監視ディレクトリが存在しないため inotify watch をスキップします"
                 );
-                continue;
+                return;
             }
-            if watch_map.values().any(|p| p == parent) {
-                continue;
+            if map.values().any(|p| p == dir) {
+                return;
             }
-            match inotify.watches().add(parent, watch_mask) {
+            match inotify.watches().add(dir, watch_mask) {
                 Ok(wd) => {
-                    watch_map.insert(wd, parent.to_path_buf());
+                    map.insert(wd, dir.to_path_buf());
                 }
                 Err(e) => {
                     tracing::warn!(
-                        path = %parent.display(),
+                        path = %dir.display(),
                         error = %e,
                         "inotify watch の登録に失敗しました"
                     );
                 }
             }
+        };
+
+        for path_str in config_paths {
+            let path = Path::new(path_str);
+            let Some(parent) = path.parent() else {
+                continue;
+            };
+            register_dir(parent, &mut watch_map);
+        }
+
+        for dir in extra_dirs {
+            register_dir(dir, &mut watch_map);
         }
 
         Ok((inotify, watch_map))
@@ -967,16 +1212,21 @@ impl NtpConfigMonitorModule {
     /// 1 つの設定ファイルをスキャンし、差分検知とイベント発行を行う
     ///
     /// `previous_hashes` を更新し、検出元（`periodic_scan` / `inotify`）を
-    /// `details` に `detection=...` として付加する。
+    /// `details` に `detection=...`、`source=main|dropin` として付加する。
+    ///
+    /// `kind_override` は chrony ドロップイン（拡張子 `.conf` 等）のように `from_path`
+    /// では `Unknown` に分類されるが chrony フォーマットとして監査すべきケースで指定する。
     fn scan_and_publish(
         path_str: &str,
+        kind_override: Option<NtpConfigKind>,
+        source: &'static str,
         config: &NtpConfigMonitorConfig,
         event_bus: &Option<EventBus>,
         previous_hashes: &mut BTreeMap<String, Option<String>>,
         detection: &str,
     ) {
         let path = Path::new(path_str);
-        match Self::scan_config_file(path, config) {
+        match Self::scan_config_file(path, kind_override, config) {
             Ok(Some((hash, findings))) => {
                 let prev = previous_hashes.get(path_str).cloned();
 
@@ -985,6 +1235,7 @@ impl NtpConfigMonitorModule {
                         tracing::info!(
                             path = %path.display(),
                             detection = detection,
+                            source = source,
                             "NTP 設定ファイルの変更を検知しました"
                         );
                         if let Some(bus) = event_bus {
@@ -999,10 +1250,11 @@ impl NtpConfigMonitorModule {
                                     ),
                                 )
                                 .with_details(format!(
-                                    "path={}, hash={}, detection={}",
+                                    "path={}, hash={}, detection={}, source={}",
                                     path.display(),
                                     hash,
-                                    detection
+                                    detection,
+                                    source
                                 )),
                             );
                         }
@@ -1011,6 +1263,7 @@ impl NtpConfigMonitorModule {
                         tracing::info!(
                             path = %path.display(),
                             detection = detection,
+                            source = source,
                             "NTP 設定ファイルが新規に出現しました"
                         );
                         if let Some(bus) = event_bus {
@@ -1025,10 +1278,11 @@ impl NtpConfigMonitorModule {
                                     ),
                                 )
                                 .with_details(format!(
-                                    "path={}, hash={}, detection={}",
+                                    "path={}, hash={}, detection={}, source={}",
                                     path.display(),
                                     hash,
-                                    detection
+                                    detection,
+                                    source
                                 )),
                             );
                         }
@@ -1043,6 +1297,7 @@ impl NtpConfigMonitorModule {
                         kind = %finding.kind,
                         severity = ?finding.severity,
                         detection = detection,
+                        source = source,
                         "{}", finding.message
                     );
                     if let Some(bus) = event_bus {
@@ -1054,10 +1309,11 @@ impl NtpConfigMonitorModule {
                                 finding.message.clone(),
                             )
                             .with_details(format!(
-                                "path={}, kind={}, detection={}",
+                                "path={}, kind={}, detection={}, source={}",
                                 path.display(),
                                 finding.kind,
-                                detection
+                                detection,
+                                source
                             )),
                         );
                     }
@@ -1068,6 +1324,7 @@ impl NtpConfigMonitorModule {
                     tracing::warn!(
                         path = %path.display(),
                         detection = detection,
+                        source = source,
                         "NTP 設定ファイルの削除を検知しました"
                     );
                     if let Some(bus) = event_bus {
@@ -1079,9 +1336,10 @@ impl NtpConfigMonitorModule {
                                 format!("NTP 設定ファイルが削除されました: {}", path.display()),
                             )
                             .with_details(format!(
-                                "path={}, detection={}",
+                                "path={}, detection={}, source={}",
                                 path.display(),
-                                detection
+                                detection,
+                                source
                             )),
                         );
                     }
@@ -1093,8 +1351,125 @@ impl NtpConfigMonitorModule {
                     path = %path.display(),
                     error = %e,
                     detection = detection,
+                    source = source,
                     "NTP 設定のスキャンに失敗しました"
                 );
+            }
+        }
+    }
+
+    /// 現在の chrony 設定から dropin ファイル一覧と watch 対象ディレクトリを発見する
+    ///
+    /// `check_chrony_dropin` が無効ならば空の `(Vec, Vec)` を返す。
+    fn discover_dropins_for(config: &NtpConfigMonitorConfig) -> (Vec<PathBuf>, Vec<PathBuf>) {
+        if !config.check_chrony_dropin {
+            return (Vec::new(), Vec::new());
+        }
+        let chrony_paths: Vec<&Path> = config
+            .config_paths
+            .iter()
+            .map(|s| Path::new(s.as_str()))
+            .filter(|p| NtpConfigKind::from_path(p) == NtpConfigKind::Chrony && p.is_file())
+            .collect();
+        if chrony_paths.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        discover_chrony_dropins(&chrony_paths, config.dropin_max_files)
+    }
+
+    /// 全監視対象（main + dropin）をスキャンする
+    ///
+    /// 定期スキャンや完全再スキャン時に呼び出される。dropin は毎回フル再発見され、
+    /// 前回見えていたが今回存在しないパスも走査することで削除検知を行う。
+    fn scan_all_targets(
+        config: &NtpConfigMonitorConfig,
+        event_bus: &Option<EventBus>,
+        previous_hashes: &mut BTreeMap<String, Option<String>>,
+        dropin_paths_seen: &mut BTreeSet<String>,
+        detection: &str,
+    ) {
+        // main config
+        for path_str in &config.config_paths {
+            Self::scan_and_publish(
+                path_str,
+                None,
+                "main",
+                config,
+                event_bus,
+                previous_hashes,
+                detection,
+            );
+        }
+        Self::rescan_dropins(
+            config,
+            event_bus,
+            previous_hashes,
+            dropin_paths_seen,
+            detection,
+        );
+    }
+
+    /// chrony ドロップインのみを再発見・再スキャンする
+    ///
+    /// 新しいドロップインを発見したら tracked に加え、前回見えていて今回消えているものは
+    /// 削除検知用に明示的にスキャンする。
+    fn rescan_dropins(
+        config: &NtpConfigMonitorConfig,
+        event_bus: &Option<EventBus>,
+        previous_hashes: &mut BTreeMap<String, Option<String>>,
+        dropin_paths_seen: &mut BTreeSet<String>,
+        detection: &str,
+    ) {
+        if !config.check_chrony_dropin {
+            return;
+        }
+
+        let (current_dropins, _) = Self::discover_dropins_for(config);
+        let current_set: BTreeSet<String> = current_dropins
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+
+        // 今回発見されたドロップインをスキャン
+        for p in &current_dropins {
+            let s = p.to_string_lossy().to_string();
+            // 初めて見たドロップインは `previous_hashes` に未登録なので、そのままだと
+            // `scan_and_publish` の遷移判定で `_ => {}` に落ちてイベントが発行されない。
+            // `Some(None)` を挿入しておき、初回スキャンで `ntp_config_appeared` を発火させる。
+            if !previous_hashes.contains_key(&s) {
+                previous_hashes.insert(s.clone(), None);
+            }
+            Self::scan_and_publish(
+                &s,
+                Some(NtpConfigKind::Chrony),
+                "dropin",
+                config,
+                event_bus,
+                previous_hashes,
+                detection,
+            );
+            dropin_paths_seen.insert(s);
+        }
+
+        // 前回まで見えていたが今回消えたドロップインをスキャン（削除イベントを発行させる）
+        let lost: Vec<String> = dropin_paths_seen
+            .iter()
+            .filter(|p| !current_set.contains(*p))
+            .cloned()
+            .collect();
+        for s in &lost {
+            Self::scan_and_publish(
+                s,
+                Some(NtpConfigKind::Chrony),
+                "dropin",
+                config,
+                event_bus,
+                previous_hashes,
+                detection,
+            );
+            // 削除が確定した（previous_hashes[s] が None）場合のみ tracking から外す
+            if matches!(previous_hashes.get(s), Some(None)) {
+                dropin_paths_seen.remove(s);
             }
         }
     }
@@ -1118,6 +1493,8 @@ impl Module for NtpConfigMonitorModule {
             audit_enabled = self.config.audit_enabled,
             use_inotify = self.config.use_inotify,
             inotify_debounce_ms = self.config.inotify_debounce_ms,
+            check_chrony_dropin = self.config.check_chrony_dropin,
+            dropin_max_files = self.config.dropin_max_files,
             "NTP / 時刻同期設定監視モジュールを初期化しました"
         );
 
@@ -1131,7 +1508,7 @@ impl Module for NtpConfigMonitorModule {
         let mut initial_hashes: BTreeMap<String, Option<String>> = BTreeMap::new();
         for path_str in &self.config.config_paths {
             let path = Path::new(path_str);
-            match Self::scan_config_file(path, &self.config) {
+            match Self::scan_config_file(path, None, &self.config) {
                 Ok(Some((hash, findings))) => {
                     files_found += 1;
                     issues_total += findings.len();
@@ -1146,9 +1523,40 @@ impl Module for NtpConfigMonitorModule {
                 }
             }
         }
+
+        // chrony ドロップインの初回発見と inotify watch 用のディレクトリ収集
+        let (initial_dropins, dropin_watch_dirs) = Self::discover_dropins_for(&self.config);
+        let mut dropin_paths_seen: BTreeSet<String> = BTreeSet::new();
+        for p in &initial_dropins {
+            let s = p.to_string_lossy().to_string();
+            match Self::scan_config_file(p, Some(NtpConfigKind::Chrony), &self.config) {
+                Ok(Some((hash, findings))) => {
+                    files_found += 1;
+                    issues_total += findings.len();
+                    initial_hashes.insert(s.clone(), Some(hash));
+                    dropin_paths_seen.insert(s);
+                }
+                Ok(None) => {
+                    tracing::debug!(
+                        path = %p.display(),
+                        "chrony ドロップインが存在しません（初回スキップ）"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %p.display(),
+                        error = %e,
+                        "初回 chrony ドロップインスキャンに失敗しました"
+                    );
+                }
+            }
+        }
+
         tracing::info!(
             files_found,
             total_issues = issues_total,
+            dropin_count = initial_dropins.len(),
+            dropin_watch_dir_count = dropin_watch_dirs.len(),
             "NTP 設定の初回スキャン完了"
         );
 
@@ -1162,7 +1570,7 @@ impl Module for NtpConfigMonitorModule {
 
         // inotify の初期化（有効時のみ）
         let inotify_state = if use_inotify {
-            match Self::setup_inotify(&self.config.config_paths) {
+            match Self::setup_inotify(&self.config.config_paths, &dropin_watch_dirs) {
                 Ok((inotify, watch_map)) => {
                     tracing::info!(
                         watch_count = watch_map.len(),
@@ -1188,6 +1596,7 @@ impl Module for NtpConfigMonitorModule {
             interval.tick().await;
 
             let mut previous_hashes: BTreeMap<String, Option<String>> = initial_hashes;
+            let mut dropin_paths_seen = dropin_paths_seen;
 
             if let Some((mut inotify, watch_map)) = inotify_state {
                 let mut buffer = vec![0u8; 4096];
@@ -1204,15 +1613,13 @@ impl Module for NtpConfigMonitorModule {
                         }
                         _ = interval.tick() => {
                             let scan_start = Instant::now();
-                            for path_str in &config.config_paths {
-                                NtpConfigMonitorModule::scan_and_publish(
-                                    path_str,
-                                    &config,
-                                    &event_bus,
-                                    &mut previous_hashes,
-                                    "periodic_scan",
-                                );
-                            }
+                            Self::scan_all_targets(
+                                &config,
+                                &event_bus,
+                                &mut previous_hashes,
+                                &mut dropin_paths_seen,
+                                "periodic_scan",
+                            );
                             let scan_elapsed = scan_start.elapsed();
                             if let Some(ref handle) = stats_handle {
                                 handle.record_scan_duration(MODULE_STATS_NAME, scan_elapsed);
@@ -1229,7 +1636,8 @@ impl Module for NtpConfigMonitorModule {
                             };
 
                             let now = Instant::now();
-                            let mut targets: Vec<String> = Vec::new();
+                            let mut main_targets: Vec<String> = Vec::new();
+                            let mut dropin_dir_touched = false;
 
                             for event in events {
                                 let dir_path = match watch_map.get(&event.wd) {
@@ -1250,21 +1658,49 @@ impl Module for NtpConfigMonitorModule {
                                 debounce_map.insert(file_path.clone(), now);
 
                                 // 監視対象の config_paths にマッチするもののみ再スキャン
+                                let mut matched_main = false;
                                 for path_str in &config.config_paths {
                                     if Path::new(path_str) == file_path
-                                        && !targets.iter().any(|t| t == path_str)
+                                        && !main_targets.iter().any(|t| t == path_str)
                                     {
-                                        targets.push(path_str.clone());
+                                        main_targets.push(path_str.clone());
+                                        matched_main = true;
                                     }
+                                }
+
+                                // ドロップイン watch dir 配下の変更はフル再スキャンでドロップイン
+                                // 発見・削除両方を処理する
+                                if !matched_main
+                                    && dropin_watch_dirs.iter().any(|d| d == &dir_path)
+                                {
+                                    dropin_dir_touched = true;
                                 }
                             }
 
-                            for path_str in &targets {
+                            // main config のスキャン
+                            for path_str in &main_targets {
                                 NtpConfigMonitorModule::scan_and_publish(
                                     path_str,
+                                    None,
+                                    "main",
                                     &config,
                                     &event_bus,
                                     &mut previous_hashes,
+                                    "inotify",
+                                );
+                            }
+
+                            // chrony.conf 自体の変更、または dropin ディレクトリ配下の変更があれば
+                            // ドロップインをフル再発見する（include/confdir の書き換えにも追随）
+                            let chrony_main_changed = main_targets.iter().any(|p| {
+                                NtpConfigKind::from_path(Path::new(p)) == NtpConfigKind::Chrony
+                            });
+                            if chrony_main_changed || dropin_dir_touched {
+                                Self::rescan_dropins(
+                                    &config,
+                                    &event_bus,
+                                    &mut previous_hashes,
+                                    &mut dropin_paths_seen,
                                     "inotify",
                                 );
                             }
@@ -1285,15 +1721,13 @@ impl Module for NtpConfigMonitorModule {
                         }
                         _ = interval.tick() => {
                             let scan_start = Instant::now();
-                            for path_str in &config.config_paths {
-                                NtpConfigMonitorModule::scan_and_publish(
-                                    path_str,
-                                    &config,
-                                    &event_bus,
-                                    &mut previous_hashes,
-                                    "periodic_scan",
-                                );
-                            }
+                            Self::scan_all_targets(
+                                &config,
+                                &event_bus,
+                                &mut previous_hashes,
+                                &mut dropin_paths_seen,
+                                "periodic_scan",
+                            );
                             let scan_elapsed = scan_start.elapsed();
                             if let Some(ref handle) = stats_handle {
                                 handle.record_scan_duration(MODULE_STATS_NAME, scan_elapsed);
@@ -1324,7 +1758,7 @@ impl Module for NtpConfigMonitorModule {
 
         for path_str in &self.config.config_paths {
             let path = Path::new(path_str);
-            match Self::scan_config_file(path, &self.config) {
+            match Self::scan_config_file(path, None, &self.config) {
                 Ok(Some((hash, findings))) => {
                     items_scanned += 1;
                     issues_found += findings.len();
@@ -1339,6 +1773,28 @@ impl Module for NtpConfigMonitorModule {
             }
         }
 
+        // chrony ドロップインも initial_scan のスナップショットに含める
+        let (dropins, _) = Self::discover_dropins_for(&self.config);
+        let mut dropin_scanned = 0;
+        for p in &dropins {
+            match Self::scan_config_file(p, Some(NtpConfigKind::Chrony), &self.config) {
+                Ok(Some((hash, findings))) => {
+                    items_scanned += 1;
+                    dropin_scanned += 1;
+                    issues_found += findings.len();
+                    snapshot.insert(p.to_string_lossy().to_string(), hash);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        path = %p.display(),
+                        error = %e,
+                        "initial_scan: chrony ドロップインのスキャンに失敗しました"
+                    );
+                }
+            }
+        }
+
         let duration = start.elapsed();
 
         Ok(InitialScanResult {
@@ -1346,8 +1802,8 @@ impl Module for NtpConfigMonitorModule {
             issues_found,
             duration,
             summary: format!(
-                "NTP 設定ファイル {}件をスキャンしました（問題: {}件）",
-                items_scanned, issues_found
+                "NTP 設定ファイル {}件をスキャンしました（うちドロップイン: {}件、問題: {}件）",
+                items_scanned, dropin_scanned, issues_found
             ),
             snapshot,
         })
@@ -1512,6 +1968,7 @@ mod tests {
         let config = NtpConfigMonitorConfig::default();
         let result = NtpConfigMonitorModule::scan_config_file(
             Path::new("/tmp/zettai-mamorukun-ntp-monitor-test-does-not-exist"),
+            None,
             &config,
         )
         .expect("scan should succeed for missing file");
@@ -1527,7 +1984,7 @@ mod tests {
             max_file_size_bytes: 5,
             ..Default::default()
         };
-        let result = NtpConfigMonitorModule::scan_config_file(&path, &config);
+        let result = NtpConfigMonitorModule::scan_config_file(&path, None, &config);
         assert!(result.is_err());
     }
 
@@ -1546,7 +2003,7 @@ mod tests {
             allowed_owner_gids: Vec::new(),
             ..Default::default()
         };
-        let (_, findings) = NtpConfigMonitorModule::scan_config_file(&path, &config)
+        let (_, findings) = NtpConfigMonitorModule::scan_config_file(&path, None, &config)
             .expect("scan ok")
             .expect("file present");
         assert!(findings.is_empty());
@@ -1561,7 +2018,7 @@ mod tests {
             audit_enabled: false,
             ..Default::default()
         };
-        let (_, findings) = NtpConfigMonitorModule::scan_config_file(&path, &config)
+        let (_, findings) = NtpConfigMonitorModule::scan_config_file(&path, None, &config)
             .expect("scan ok")
             .expect("file present");
         assert!(findings.is_empty());
@@ -1573,11 +2030,11 @@ mod tests {
         let path = dir.path().join("chrony.conf");
         std::fs::write(&path, "server a\nmakestep 1.0 3\n").unwrap();
         let config = NtpConfigMonitorConfig::default();
-        let (hash1, _) = NtpConfigMonitorModule::scan_config_file(&path, &config)
+        let (hash1, _) = NtpConfigMonitorModule::scan_config_file(&path, None, &config)
             .expect("scan ok")
             .expect("file present");
         std::fs::write(&path, "server b\nmakestep 1.0 3\n").unwrap();
-        let (hash2, _) = NtpConfigMonitorModule::scan_config_file(&path, &config)
+        let (hash2, _) = NtpConfigMonitorModule::scan_config_file(&path, None, &config)
             .expect("scan ok")
             .expect("file present");
         assert_ne!(hash1, hash2);
@@ -2125,7 +2582,7 @@ mod tests {
         .unwrap();
 
         let config = NtpConfigMonitorConfig::default();
-        let (_, findings) = NtpConfigMonitorModule::scan_config_file(&path, &config)
+        let (_, findings) = NtpConfigMonitorModule::scan_config_file(&path, None, &config)
             .expect("scan ok")
             .expect("file present");
         assert!(
@@ -2634,7 +3091,7 @@ mod tests {
 
         // 既定（owner = true）: 非 root 所有 → ntp_config_insecure_owner 発生
         let config = NtpConfigMonitorConfig::default();
-        let (_, findings) = NtpConfigMonitorModule::scan_config_file(&path, &config)
+        let (_, findings) = NtpConfigMonitorModule::scan_config_file(&path, None, &config)
             .expect("scan ok")
             .expect("file present");
         assert!(
@@ -2648,7 +3105,7 @@ mod tests {
             audit_enabled: false,
             ..Default::default()
         };
-        let (_, findings) = NtpConfigMonitorModule::scan_config_file(&path, &config)
+        let (_, findings) = NtpConfigMonitorModule::scan_config_file(&path, None, &config)
             .expect("scan ok")
             .expect("file present");
         assert!(
@@ -2662,7 +3119,7 @@ mod tests {
             check_config_owner: false,
             ..Default::default()
         };
-        let (_, findings) = NtpConfigMonitorModule::scan_config_file(&path, &config)
+        let (_, findings) = NtpConfigMonitorModule::scan_config_file(&path, None, &config)
             .expect("scan ok")
             .expect("file present");
         assert!(
@@ -3010,7 +3467,8 @@ mod tests {
         std::fs::write(&path, "pool 2.pool.ntp.org iburst\n").unwrap();
 
         let config_paths = vec![path.to_string_lossy().to_string()];
-        let (_inotify, watch_map) = NtpConfigMonitorModule::setup_inotify(&config_paths).unwrap();
+        let (_inotify, watch_map) =
+            NtpConfigMonitorModule::setup_inotify(&config_paths, &[]).unwrap();
 
         assert_eq!(watch_map.len(), 1);
         assert!(watch_map.values().any(|p| p == dir.path()));
@@ -3029,7 +3487,8 @@ mod tests {
             path1.to_string_lossy().to_string(),
             path2.to_string_lossy().to_string(),
         ];
-        let (_inotify, watch_map) = NtpConfigMonitorModule::setup_inotify(&config_paths).unwrap();
+        let (_inotify, watch_map) =
+            NtpConfigMonitorModule::setup_inotify(&config_paths, &[]).unwrap();
 
         assert_eq!(watch_map.len(), 1);
     }
@@ -3038,7 +3497,8 @@ mod tests {
     fn test_setup_inotify_skips_missing_parent() {
         // 存在しない親ディレクトリは watch に登録されない
         let config_paths = vec!["/nonexistent-xyz-zettai/ntp.conf".to_string()];
-        let (_inotify, watch_map) = NtpConfigMonitorModule::setup_inotify(&config_paths).unwrap();
+        let (_inotify, watch_map) =
+            NtpConfigMonitorModule::setup_inotify(&config_paths, &[]).unwrap();
         assert!(watch_map.is_empty());
     }
 
@@ -3092,6 +3552,8 @@ mod tests {
 
         NtpConfigMonitorModule::scan_and_publish(
             &path_str,
+            None,
+            "main",
             &config,
             &Some(event_bus),
             &mut previous,
@@ -3100,13 +3562,9 @@ mod tests {
 
         let event = rx.try_recv().unwrap();
         assert_eq!(event.event_type, "ntp_config_changed");
-        assert!(
-            event
-                .details
-                .as_ref()
-                .unwrap()
-                .contains("detection=periodic_scan")
-        );
+        let details = event.details.as_ref().unwrap();
+        assert!(details.contains("detection=periodic_scan"));
+        assert!(details.contains("source=main"));
     }
 
     #[test]
@@ -3127,6 +3585,8 @@ mod tests {
 
         NtpConfigMonitorModule::scan_and_publish(
             &path_str,
+            None,
+            "main",
             &config,
             &Some(event_bus),
             &mut previous,
@@ -3135,13 +3595,9 @@ mod tests {
 
         let event = rx.try_recv().unwrap();
         assert_eq!(event.event_type, "ntp_config_changed");
-        assert!(
-            event
-                .details
-                .as_ref()
-                .unwrap()
-                .contains("detection=inotify")
-        );
+        let details = event.details.as_ref().unwrap();
+        assert!(details.contains("detection=inotify"));
+        assert!(details.contains("source=main"));
     }
 
     #[test]
@@ -3159,6 +3615,8 @@ mod tests {
 
         NtpConfigMonitorModule::scan_and_publish(
             &path_str,
+            None,
+            "main",
             &config,
             &Some(event_bus),
             &mut previous,
@@ -3167,13 +3625,9 @@ mod tests {
 
         let event = rx.try_recv().unwrap();
         assert_eq!(event.event_type, "ntp_config_removed");
-        assert!(
-            event
-                .details
-                .as_ref()
-                .unwrap()
-                .contains("detection=inotify")
-        );
+        let details = event.details.as_ref().unwrap();
+        assert!(details.contains("detection=inotify"));
+        assert!(details.contains("source=main"));
     }
 
     #[tokio::test]
@@ -3224,5 +3678,337 @@ mod tests {
             found_inotify,
             "detection=inotify を含む ntp_config_changed イベントが発行されませんでした"
         );
+    }
+
+    #[test]
+    fn test_parse_chrony_dropin_specs_confdir_absolute() {
+        let content = "confdir /etc/chrony/conf.d\n";
+        let specs = parse_chrony_dropin_specs(content, Path::new("/etc/chrony"));
+        assert_eq!(specs.len(), 1);
+        assert!(
+            matches!(&specs[0], ChronyDropinSpec::ConfDir(p) if p == Path::new("/etc/chrony/conf.d"))
+        );
+    }
+
+    #[test]
+    fn test_parse_chrony_dropin_specs_sourcedir_absolute() {
+        let content = "sourcedir /etc/chrony/sources.d\n";
+        let specs = parse_chrony_dropin_specs(content, Path::new("/etc/chrony"));
+        assert_eq!(specs.len(), 1);
+        assert!(
+            matches!(&specs[0], ChronyDropinSpec::SourceDir(p) if p == Path::new("/etc/chrony/sources.d"))
+        );
+    }
+
+    #[test]
+    fn test_parse_chrony_dropin_specs_include_glob() {
+        let content = "include /etc/chrony/conf.d/*.conf\n";
+        let specs = parse_chrony_dropin_specs(content, Path::new("/etc/chrony"));
+        assert_eq!(specs.len(), 1);
+        assert!(
+            matches!(&specs[0], ChronyDropinSpec::Include(p) if p == Path::new("/etc/chrony/conf.d/*.conf"))
+        );
+    }
+
+    #[test]
+    fn test_parse_chrony_dropin_specs_relative_path_resolved() {
+        let content = "confdir conf.d\n";
+        let specs = parse_chrony_dropin_specs(content, Path::new("/etc/chrony"));
+        assert_eq!(specs.len(), 1);
+        assert!(
+            matches!(&specs[0], ChronyDropinSpec::ConfDir(p) if p == Path::new("/etc/chrony/conf.d"))
+        );
+    }
+
+    #[test]
+    fn test_parse_chrony_dropin_specs_ignores_comments_and_keywords() {
+        // `keys` や他のキーワードは無視し、`include` などのみ拾う
+        let content =
+            "# confdir commented\nkeys /etc/chrony/keys\ninclude /etc/chrony/extra.conf\n";
+        let specs = parse_chrony_dropin_specs(content, Path::new("/etc/chrony"));
+        assert_eq!(specs.len(), 1);
+        assert!(
+            matches!(&specs[0], ChronyDropinSpec::Include(p) if p == Path::new("/etc/chrony/extra.conf"))
+        );
+    }
+
+    #[test]
+    fn test_parse_chrony_dropin_specs_multiple_directives() {
+        let content = "confdir /a\nsourcedir /b\ninclude /c/*.conf\n";
+        let specs = parse_chrony_dropin_specs(content, Path::new("/etc/chrony"));
+        assert_eq!(specs.len(), 3);
+    }
+
+    #[test]
+    fn test_expand_dropin_spec_confdir_lists_conf_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("10-pool.conf"), "pool a.pool.ntp.org\n").unwrap();
+        std::fs::write(dir.path().join("20-other.conf"), "server b.example.org\n").unwrap();
+        // *.conf 以外は無視される
+        std::fs::write(dir.path().join("ignored.sources"), "pool c\n").unwrap();
+        std::fs::write(dir.path().join("README"), "readme\n").unwrap();
+
+        let spec = ChronyDropinSpec::ConfDir(dir.path().to_path_buf());
+        let mut remaining = 10usize;
+        let (files, dirs) = expand_dropin_spec(&spec, &mut remaining);
+        assert_eq!(files.len(), 2, "expected 2 *.conf files, got {:?}", files);
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0], dir.path());
+        assert!(
+            files
+                .iter()
+                .all(|p| p.extension().and_then(|s| s.to_str()) == Some("conf"))
+        );
+    }
+
+    #[test]
+    fn test_expand_dropin_spec_sourcedir_lists_sources_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("upstream.sources"), "pool a\n").unwrap();
+        std::fs::write(dir.path().join("skip.conf"), "server b\n").unwrap();
+
+        let spec = ChronyDropinSpec::SourceDir(dir.path().to_path_buf());
+        let mut remaining = 10usize;
+        let (files, _) = expand_dropin_spec(&spec, &mut remaining);
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            files[0].extension().and_then(|s| s.to_str()),
+            Some("sources")
+        );
+    }
+
+    #[test]
+    fn test_expand_dropin_spec_confdir_respects_remaining_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            std::fs::write(dir.path().join(format!("{}-test.conf", i)), "server a\n").unwrap();
+        }
+        let spec = ChronyDropinSpec::ConfDir(dir.path().to_path_buf());
+        let mut remaining = 2usize;
+        let (files, _) = expand_dropin_spec(&spec, &mut remaining);
+        assert!(files.len() <= 2);
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn test_expand_dropin_spec_include_glob_expands() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.conf"), "server a\n").unwrap();
+        std::fs::write(dir.path().join("b.conf"), "server b\n").unwrap();
+
+        let pattern = dir.path().join("*.conf");
+        let spec = ChronyDropinSpec::Include(pattern);
+        let mut remaining = 10usize;
+        let (files, dirs) = expand_dropin_spec(&spec, &mut remaining);
+        assert_eq!(files.len(), 2);
+        assert!(dirs.iter().any(|d| d == dir.path()));
+    }
+
+    #[test]
+    fn test_expand_dropin_spec_include_fixed_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("local.conf");
+        std::fs::write(&file, "server a\n").unwrap();
+
+        let spec = ChronyDropinSpec::Include(file.clone());
+        let mut remaining = 10usize;
+        let (files, dirs) = expand_dropin_spec(&spec, &mut remaining);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0], file);
+        assert!(dirs.iter().any(|d| d == dir.path()));
+    }
+
+    #[test]
+    fn test_expand_dropin_spec_confdir_missing_returns_empty() {
+        let spec = ChronyDropinSpec::ConfDir(PathBuf::from("/nonexistent-zettai-ntp-351"));
+        let mut remaining = 10usize;
+        let (files, dirs) = expand_dropin_spec(&spec, &mut remaining);
+        assert!(files.is_empty());
+        assert!(dirs.is_empty());
+    }
+
+    #[test]
+    fn test_discover_chrony_dropins_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let dropin_dir = dir.path().join("conf.d");
+        std::fs::create_dir(&dropin_dir).unwrap();
+        std::fs::write(dropin_dir.join("10-pool.conf"), "pool a.pool.ntp.org\n").unwrap();
+
+        let main = dir.path().join("chrony.conf");
+        std::fs::write(
+            &main,
+            format!(
+                "pool b.pool.ntp.org iburst\nmakestep 1.0 3\nconfdir {}\n",
+                dropin_dir.display()
+            ),
+        )
+        .unwrap();
+
+        let (files, watch_dirs) = discover_chrony_dropins(&[main.as_path()], 64);
+        assert_eq!(files.len(), 1);
+        assert!(files[0].ends_with("10-pool.conf"));
+        assert!(watch_dirs.iter().any(|d| d == &dropin_dir));
+    }
+
+    #[test]
+    fn test_discover_chrony_dropins_honors_max_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let dropin_dir = dir.path().join("conf.d");
+        std::fs::create_dir(&dropin_dir).unwrap();
+        for i in 0..10 {
+            std::fs::write(
+                dropin_dir.join(format!("{}-p.conf", i)),
+                "pool a.pool.ntp.org\n",
+            )
+            .unwrap();
+        }
+        let main = dir.path().join("chrony.conf");
+        std::fs::write(&main, format!("confdir {}\n", dropin_dir.display())).unwrap();
+
+        let (files, _) = discover_chrony_dropins(&[main.as_path()], 3);
+        assert!(
+            files.len() <= 3,
+            "expected at most 3 files, got {}",
+            files.len()
+        );
+    }
+
+    #[test]
+    fn test_discover_chrony_dropins_skips_non_chrony_configs() {
+        // ntp.conf / timesyncd.conf は confdir ディレクティブを持たないので発見されない
+        let dir = tempfile::tempdir().unwrap();
+        let ntp = dir.path().join("ntp.conf");
+        std::fs::write(&ntp, "server a\nincludefile /etc/ntp/ntp.conf.local\n").unwrap();
+        let (files, dirs) = discover_chrony_dropins(&[ntp.as_path()], 64);
+        assert!(files.is_empty());
+        assert!(dirs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_discover_dropins_for_disabled_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("chrony.conf");
+        let dropin_dir = dir.path().join("conf.d");
+        std::fs::create_dir(&dropin_dir).unwrap();
+        std::fs::write(dropin_dir.join("x.conf"), "server a\n").unwrap();
+        std::fs::write(&main, format!("confdir {}\n", dropin_dir.display())).unwrap();
+
+        let config = NtpConfigMonitorConfig {
+            config_paths: vec![main.to_string_lossy().to_string()],
+            check_chrony_dropin: false,
+            ..Default::default()
+        };
+        let (files, dirs) = NtpConfigMonitorModule::discover_dropins_for(&config);
+        assert!(files.is_empty());
+        assert!(dirs.is_empty());
+    }
+
+    #[test]
+    fn test_scan_and_publish_dropin_source_tagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("10-pool.conf");
+        std::fs::write(&path, "pool a.pool.ntp.org iburst\n").unwrap();
+        let path_str = path.to_string_lossy().to_string();
+
+        let config = NtpConfigMonitorConfig::default();
+        let event_bus = EventBus::new(16);
+        let mut rx = event_bus.subscribe();
+        let mut previous: BTreeMap<String, Option<String>> = BTreeMap::new();
+        previous.insert(path_str.clone(), Some("dead".to_string()));
+
+        NtpConfigMonitorModule::scan_and_publish(
+            &path_str,
+            Some(NtpConfigKind::Chrony),
+            "dropin",
+            &config,
+            &Some(event_bus),
+            &mut previous,
+            "inotify",
+        );
+
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.event_type, "ntp_config_changed");
+        let details = event.details.as_ref().unwrap();
+        assert!(details.contains("source=dropin"));
+    }
+
+    #[tokio::test]
+    async fn test_inotify_detects_new_dropin_creation() {
+        // chrony.conf に confdir を記述しておき、後から新規ドロップインを作成した際に
+        // ntp_config_appeared / insecure_setting が発行されることを検証する
+        let dir = tempfile::tempdir().unwrap();
+        let dropin_dir = dir.path().join("conf.d");
+        std::fs::create_dir(&dropin_dir).unwrap();
+        let main = dir.path().join("chrony.conf");
+        std::fs::write(
+            &main,
+            format!(
+                "pool b.pool.ntp.org iburst\nmakestep 1.0 3\nconfdir {}\n",
+                dropin_dir.display()
+            ),
+        )
+        .unwrap();
+
+        let config = NtpConfigMonitorConfig {
+            config_paths: vec![main.to_string_lossy().to_string()],
+            scan_interval_secs: 3600,
+            use_inotify: true,
+            inotify_debounce_ms: 10,
+            check_chrony_dropin: true,
+            ..Default::default()
+        };
+        let event_bus = EventBus::new(64);
+        let mut rx = event_bus.subscribe();
+        let mut module = NtpConfigMonitorModule::new(config, Some(event_bus));
+        module.init().unwrap();
+        let handle = module.start().await.unwrap();
+
+        // inotify watch が確立するまで待つ
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // 新規ドロップインを作成
+        let new_dropin = dropin_dir.join("99-attacker.conf");
+        std::fs::write(&new_dropin, "pool evil.example.com\n").unwrap();
+
+        // 検知まで待つ
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        module.stop().await.unwrap();
+        let _ = handle.await;
+
+        // ntp_config_appeared イベントで source=dropin を期待する
+        let mut found = false;
+        while let Ok(event) = rx.try_recv() {
+            if event.event_type == "ntp_config_appeared"
+                && event
+                    .details
+                    .as_ref()
+                    .is_some_and(|d| d.contains("source=dropin") && d.contains("99-attacker.conf"))
+            {
+                found = true;
+                break;
+            }
+        }
+        assert!(
+            found,
+            "新規 chrony ドロップイン作成時に source=dropin の ntp_config_appeared イベントが発行されませんでした"
+        );
+    }
+
+    #[test]
+    fn test_setup_inotify_with_extra_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf_d = dir.path().join("conf.d");
+        std::fs::create_dir(&conf_d).unwrap();
+        let main = dir.path().join("chrony.conf");
+        std::fs::write(&main, "pool a\n").unwrap();
+
+        let config_paths = vec![main.to_string_lossy().to_string()];
+        let extra_dirs = vec![conf_d.clone()];
+        let (_inotify, watch_map) =
+            NtpConfigMonitorModule::setup_inotify(&config_paths, &extra_dirs).unwrap();
+
+        assert_eq!(watch_map.len(), 2);
+        assert!(watch_map.values().any(|p| p == dir.path()));
+        assert!(watch_map.values().any(|p| p == &conf_d));
     }
 }
