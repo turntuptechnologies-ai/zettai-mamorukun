@@ -182,12 +182,13 @@
 - [x] **ntp_config_monitor の makestep threshold 絶対値監査** — v1.76.0 (#359, PR #360)
 - [x] **ntp_config_monitor の maxchange 監査** — v1.77.0 (#361, PR #362)
 - [x] **ntp_config_monitor の corrtimeratio / maxclockerror 閾値監査** — v1.78.0 (#363, PR #364)
+- [x] **ntp_config_monitor の maxchange `<max>` 上限なし（-1）監査** — v1.79.0 (#365, PR #366)
 
 ## 候補
 
-1. **chrony 閾値監査のパターン共通化リファクタ** — v1.70.0 (maxsamples)・v1.75.0 (maxdistance/maxjitter)・v1.76.0 (makestep)・v1.77.0 (maxchange)・v1.78.0 (corrtimeratio/maxclockerror) で増えた「top-level 整数/浮動小数ディレクティブの閾値超過検知」パターンを汎用ヘルパー（例: `audit_threshold_too_large<T>`）に抽出し、今後の同種監査追加時の重複を抑える
-2. **ntp_config_monitor の maxchange `max` フィールド監査** — v1.77.0 で offset の上限を検知できるようになったため、第三引数 `<max>` が `-1`（上限なし）の場合を Warning として検知する。`maxchange 1000 1 -1` は連続オフセット超過でも chronyd が終了しないため、持続的な時刻偽装を見逃すリスクがある
-3. **ntp_config_monitor の `logbanner` / `logchange` 監査** — chrony のログ設定系ディレクティブを監査し、攻撃者が時刻ずれをログ出力から隠蔽するために `logchange` を極端に大きな値に設定していないか（推奨は 0.5 秒前後、1000 秒超は警告）、および `logbanner 0` でバナー出力を無効化していないかを検知する
+1. **chrony 閾値監査のパターン共通化リファクタ** — v1.70.0 (maxsamples)・v1.75.0 (maxdistance/maxjitter)・v1.76.0 (makestep)・v1.77.0 (maxchange)・v1.78.0 (corrtimeratio/maxclockerror)・v1.79.0 (maxchange max=-1) で増えた「top-level 整数/浮動小数ディレクティブの閾値超過検知」パターンを汎用ヘルパー（例: `audit_threshold_too_large<T>`）に抽出し、今後の同種監査追加時の重複を抑える
+2. **ntp_config_monitor の `logbanner` / `logchange` 監査** — chrony のログ設定系ディレクティブを監査し、攻撃者が時刻ずれをログ出力から隠蔽するために `logchange` を極端に大きな値に設定していないか（推奨は 0.5 秒前後、1000 秒超は警告）、および `logbanner 0` でバナー出力を無効化していないかを検知する
+3. **ntp_config_monitor の maxchange `<start>` フィールド監査** — v1.79.0 で第三引数 `<max>` の監査が入ったため、第二引数 `<start>`（大きなステップ補正の適用開始回数）が過大（例: 10 以上）に設定されている場合を Warning として検知する。`start` が大きいと初期の偽装時刻攻撃が検知されずに受け入れられるリスクがある
 4. **ntp_config_monitor のドロップイン動的ホットリロード** — 稼働中に chrony.conf へ `confdir` / `include` が追加された場合、SIGHUP または再起動なしに inotify watch へディレクトリを追加する仕組みを整備する（現状は v1.72.0 で再起動まで反映されない制約あり）
 5. **ntp_config_monitor の refclock SHM セグメント実権限監査** — v1.73.0 で chrony.conf 上の `refclock SHM` 宣言を検知できるようになったため、次段として `SHM <id>` で参照される実 SysV SHM セグメント（`0x4e545030 + id`）の書き込み権限（`ipcs -m`）を検査し、非 root 書き込み可の場合を Critical 扱いにする
 6. **inotify リアルタイム検知の他モジュールへの展開** — cron_monitor / ntp_config_monitor で確立した inotify パターンを sshd_config_monitor / pam_monitor / sudoers_monitor / dns_monitor / security_files_monitor / shell_config_monitor など他の設定ファイル系モジュールに展開する
