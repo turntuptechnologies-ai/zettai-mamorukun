@@ -43,6 +43,10 @@
 //!   - `chrony.conf`: `maxjitter` が推奨上限を超えている（jitter の許容値が緩すぎると
 //!     ジッターの大きい時刻ソースが同期候補に残り、時刻同期の安定性と偽装耐性が
 //!     低下する）
+//!   - `chrony.conf`: `makestep <threshold> <limit>` の threshold が推奨上限を超える
+//!     （step 許容閾値が緩すぎると、攻撃者が NTP ソースに大きなオフセットを注入した際に
+//!     システム時刻が大きく跳ぶため、ログ跳躍・証明書有効期限判定の回避・Kerberos /
+//!     TOTP の時刻窓操作などのリスクが高まる）
 //! - **ドロップイン監視** — `chrony.conf` 内の `confdir` / `sourcedir` / `include`
 //!   ディレクティブで参照される追加設定ファイル（例: `/etc/chrony/conf.d/*.conf`、
 //!   `/etc/chrony/sources.d/*.sources`）も監視対象に加え、親ディレクトリも inotify
@@ -846,6 +850,39 @@ fn audit_chrony_maxjitter(content: &str, max_threshold: f64) -> Vec<AuditFinding
     findings
 }
 
+/// chrony.conf の `makestep <threshold> <limit>` の第一引数（threshold）が過大な場合を監査する
+///
+/// `makestep` はオフセットが `threshold` 秒を超えた場合に限りクロックを step（瞬時修正）
+/// する chrony のディレクティブ。推奨は `makestep 1.0 3` のように「小さな閾値・限定回数」。
+/// threshold を過大に緩めると、通常運用ではあり得ない大きな時刻ずれ（例: 100 秒超、
+/// 数時間相当）でも step 修正が適用されてしまい、攻撃者が NTP ソースや `refclock SHM`
+/// 経由で大きなオフセットを注入した際に以下のリスクが高まる:
+///
+/// - ログタイムスタンプの跳躍による調査妨害
+/// - TLS 証明書有効期限判定の回避・Kerberos / TOTP の時刻窓操作
+/// - `maxchange` 未設定と組み合わさると step 量に上限がなくなる
+///
+/// `max_threshold`（秒）を超える threshold を Warning として報告する。
+/// 0 以下・パースできないトークンは無視する（`makestep` 未設定は既存の
+/// `chrony_no_makestep` Info で扱うため本監査の対象外）。
+fn audit_chrony_makestep_threshold(content: &str, max_threshold: f64) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    if let Some(v) = parse_chrony_top_level_f64(content, "makestep")
+        && v > 0.0
+        && v > max_threshold
+    {
+        findings.push(AuditFinding {
+            kind: "chrony_makestep_threshold_too_large".to_string(),
+            severity: Severity::Warning,
+            message: format!(
+                "chrony.conf の `makestep {}` は推奨上限（{} 秒）を超えています（step 許容閾値が緩すぎると、攻撃者が NTP ソースに大きなオフセットを注入した際にシステム時刻が大きく跳ぶため、ログ跳躍・証明書有効期限判定の回避・Kerberos/TOTP 時刻窓操作などのリスクが高まります）",
+                v, max_threshold
+            ),
+        });
+    }
+    findings
+}
+
 /// chrony.conf の `refclock` ディレクティブを監査する
 ///
 /// 各 `refclock <driver> <parameters>` 行からドライバ名を抽出し、
@@ -1238,6 +1275,12 @@ fn audit_by_kind(
                 findings.extend(audit_chrony_maxjitter(
                     content,
                     config.maxjitter_max_threshold,
+                ));
+            }
+            if config.check_chrony_makestep_threshold {
+                findings.extend(audit_chrony_makestep_threshold(
+                    content,
+                    config.makestep_threshold_max,
                 ));
             }
         }
@@ -3937,6 +3980,85 @@ mod tests {
         let content = "server ntp.example.com maxjitter 100\n";
         let findings = audit_chrony_maxjitter(content, 2.0);
         assert!(findings.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // audit_chrony_makestep_threshold
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_chrony_makestep_threshold_detects_over_threshold() {
+        // threshold 3600 秒 (1 時間) は 100 秒上限を大幅超過
+        let content = "makestep 3600 -1\n";
+        let findings = audit_chrony_makestep_threshold(content, 100.0);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_makestep_threshold_too_large");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+        assert!(findings[0].message.contains("makestep"));
+    }
+
+    #[test]
+    fn test_audit_chrony_makestep_threshold_boundary_equal_no_finding() {
+        // 境界値: 閾値ちょうどは検知しない（strict greater-than）
+        let content = "makestep 100.0 3\n";
+        let findings = audit_chrony_makestep_threshold(content, 100.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_makestep_threshold_recommended_value_no_finding() {
+        // 推奨値 `makestep 1.0 3` は 100 秒上限以下なので検知しない
+        let content = "makestep 1.0 3\n";
+        let findings = audit_chrony_makestep_threshold(content, 100.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_makestep_threshold_unset_no_finding() {
+        // makestep 未設定は既存の chrony_no_makestep ルール側で扱うため本監査は無反応
+        let content = "server foo\n";
+        let findings = audit_chrony_makestep_threshold(content, 100.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_makestep_threshold_zero_no_finding() {
+        let content = "makestep 0 3\n";
+        let findings = audit_chrony_makestep_threshold(content, 100.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_makestep_threshold_negative_no_finding() {
+        // 負値は設定ミス扱いで監査対象外
+        let content = "makestep -1.0 3\n";
+        let findings = audit_chrony_makestep_threshold(content, 100.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_makestep_threshold_non_numeric_no_finding() {
+        // パース不能なトークンは無視
+        let content = "makestep abc 3\n";
+        let findings = audit_chrony_makestep_threshold(content, 100.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_makestep_threshold_inline_option_ignored() {
+        // inline トークンは top-level 監査では拾わない（makestep は本来 inline オプションにならないが
+        // top-level 限定であることを確認する）
+        let content = "server ntp.example.com makestep 9999\n";
+        let findings = audit_chrony_makestep_threshold(content, 100.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_makestep_threshold_multiple_last_wins() {
+        // 複数行ある場合は後者の値が採用される（parse_chrony_top_level_f64 の仕様）
+        let content = "makestep 1.0 3\nmakestep 500 -1\n";
+        let findings = audit_chrony_makestep_threshold(content, 100.0);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].message.contains("500"));
     }
 
     // ------------------------------------------------------------------
