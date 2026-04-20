@@ -6236,6 +6236,13 @@ pub struct NtpConfigMonitorConfig {
     #[serde(default = "NtpConfigMonitorConfig::default_true")]
     pub check_chrony_makestep_threshold: bool,
 
+    /// chrony の `maxchange <offset> <start> <max>` 監査を有効化する
+    /// （`maxchange` は `makestep` で step される時刻量に上限を与える安全装置。
+    /// 未設定だと `makestep` と組み合わさって攻撃者が任意の大きなオフセットを注入可能。
+    /// 第一引数の offset が過大な場合も step 量の上限がほぼ無制限になる）
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_chrony_maxchange: bool,
+
     /// `maxdistance` の許容上限（秒、既定 5.0）
     /// chrony のデフォルトは 3.0 秒なので 5.0 秒超は明示的な緩和設定と判定する
     #[serde(default = "NtpConfigMonitorConfig::default_maxdistance_max_threshold")]
@@ -6250,6 +6257,12 @@ pub struct NtpConfigMonitorConfig {
     /// 推奨は `makestep 1.0 3` のような小さな閾値であり、100 秒超は明示的な緩和設定
     #[serde(default = "NtpConfigMonitorConfig::default_makestep_threshold_max")]
     pub makestep_threshold_max: f64,
+
+    /// `maxchange` の offset 許容上限（秒、既定 1000.0）
+    /// 推奨は `maxchange 1000 1 2` 相当。1000 秒を超える値は step 量上限が
+    /// 実質的に無制限となり、攻撃者による大幅な時刻偽装を許容してしまう
+    #[serde(default = "NtpConfigMonitorConfig::default_maxchange_offset_max_threshold")]
+    pub maxchange_offset_max_threshold: f64,
 
     /// `maxsamples_too_low` 判定の下限閾値（既定: 4）
     /// chrony の NTP フィルタアルゴリズムは通常 4 以上のサンプルで安定動作する
@@ -6336,6 +6349,10 @@ impl NtpConfigMonitorConfig {
         100.0
     }
 
+    fn default_maxchange_offset_max_threshold() -> f64 {
+        1000.0
+    }
+
     fn default_inotify_debounce_ms() -> u64 {
         500
     }
@@ -6373,9 +6390,11 @@ impl Default for NtpConfigMonitorConfig {
             check_chrony_maxdistance: true,
             check_chrony_maxjitter: true,
             check_chrony_makestep_threshold: true,
+            check_chrony_maxchange: true,
             maxdistance_max_threshold: Self::default_maxdistance_max_threshold(),
             maxjitter_max_threshold: Self::default_maxjitter_max_threshold(),
             makestep_threshold_max: Self::default_makestep_threshold_max(),
+            maxchange_offset_max_threshold: Self::default_maxchange_offset_max_threshold(),
             maxsamples_min_threshold: Self::default_maxsamples_min_threshold(),
             allowed_owner_uids: Self::default_allowed_uids(),
             allowed_owner_gids: Self::default_allowed_gids(),
