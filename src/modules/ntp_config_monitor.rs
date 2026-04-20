@@ -47,6 +47,10 @@
 //!     （step 許容閾値が緩すぎると、攻撃者が NTP ソースに大きなオフセットを注入した際に
 //!     システム時刻が大きく跳ぶため、ログ跳躍・証明書有効期限判定の回避・Kerberos /
 //!     TOTP の時刻窓操作などのリスクが高まる）
+//!   - `chrony.conf`: `maxchange <offset> <start> <max>` 未設定、または offset が
+//!     推奨上限を超える（`maxchange` は step される時刻量の上限と連続許容回数を定める
+//!     安全装置。未設定または offset が過大だと、`makestep` と組み合わさって攻撃者による
+//!     大幅な時刻偽装を許容する）
 //! - **ドロップイン監視** — `chrony.conf` 内の `confdir` / `sourcedir` / `include`
 //!   ディレクティブで参照される追加設定ファイル（例: `/etc/chrony/conf.d/*.conf`、
 //!   `/etc/chrony/sources.d/*.sources`）も監視対象に加え、親ディレクトリも inotify
@@ -850,6 +854,55 @@ fn audit_chrony_maxjitter(content: &str, max_threshold: f64) -> Vec<AuditFinding
     findings
 }
 
+/// chrony.conf の `maxchange <offset> <start> <max>` ディレクティブを監査する
+///
+/// `maxchange` は chrony の安全装置で「`<start>` 回目以降のクロック更新で `<offset>` 秒を
+/// 超える補正が検出された場合、`<max>` 回まで許容し、それを超えたら chronyd を終了する」
+/// 動作を制御する。未設定の場合、`makestep` で step される時刻量に上限がなくなり、
+/// 攻撃者が NTP ソース経由で任意の大きなオフセットを注入した際にシステム時刻が
+/// 任意の値へ跳ばされる恐れがある（推奨: `maxchange 1000 1 2`）。
+///
+/// 検知ルール:
+///
+/// - `chrony_maxchange_unset` (Warning) — `maxchange` 未設定
+/// - `chrony_maxchange_offset_too_large` (Warning) — 第一引数の offset が `offset_max_threshold`
+///   （秒）を超えている（step 量上限が実質無制限となり `makestep` と組み合わさって大幅な
+///   時刻偽装を許容する）
+///
+/// 0 以下・パースできない offset トークンは `offset_too_large` 側では無視する
+/// （`unset` 検知とは独立。`unset` は maxchange 行自体の有無で判定）。
+fn audit_chrony_maxchange(content: &str, offset_max_threshold: f64) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+
+    let maxchange_present = find_keyword_lines(content, "maxchange").next().is_some();
+    if !maxchange_present {
+        findings.push(AuditFinding {
+            kind: "chrony_maxchange_unset".to_string(),
+            severity: Severity::Warning,
+            message:
+                "chrony.conf に `maxchange` が設定されていません（`maxchange` は step される時刻量の上限と連続許容回数を定義する安全装置。未設定だと `makestep` と組み合わさって攻撃者が任意の大きなオフセットを注入した際にシステム時刻が大きく跳ぶ恐れがあります。推奨: `maxchange 1000 1 2`）"
+                    .to_string(),
+        });
+        return findings;
+    }
+
+    if let Some(v) = parse_chrony_top_level_f64(content, "maxchange")
+        && v > 0.0
+        && v > offset_max_threshold
+    {
+        findings.push(AuditFinding {
+            kind: "chrony_maxchange_offset_too_large".to_string(),
+            severity: Severity::Warning,
+            message: format!(
+                "chrony.conf の `maxchange {}` の offset は推奨上限（{} 秒）を超えています（step 量の上限が実質無制限となり、`makestep` と組み合わさって攻撃者による大幅な時刻偽装を許容するリスクがあります）",
+                v, offset_max_threshold
+            ),
+        });
+    }
+
+    findings
+}
+
 /// chrony.conf の `makestep <threshold> <limit>` の第一引数（threshold）が過大な場合を監査する
 ///
 /// `makestep` はオフセットが `threshold` 秒を超えた場合に限りクロックを step（瞬時修正）
@@ -1281,6 +1334,12 @@ fn audit_by_kind(
                 findings.extend(audit_chrony_makestep_threshold(
                     content,
                     config.makestep_threshold_max,
+                ));
+            }
+            if config.check_chrony_maxchange {
+                findings.extend(audit_chrony_maxchange(
+                    content,
+                    config.maxchange_offset_max_threshold,
                 ));
             }
         }
@@ -2237,7 +2296,7 @@ mod tests {
         let path = dir.path().join("chrony.conf");
         std::fs::write(
             &path,
-            "pool 2.pool.ntp.org iburst\nmakestep 1.0 3\nleapsectz right/UTC\nrtcsync\n",
+            "pool 2.pool.ntp.org iburst\nmakestep 1.0 3\nmaxchange 1000 1 2\nleapsectz right/UTC\nrtcsync\n",
         )
         .unwrap();
         // owner 監査は既定有効だが、tempdir 配下は非 root 所有なので許容リストを空にして無効化
@@ -2305,10 +2364,11 @@ mod tests {
             // 所有者監査を無効化する
             check_config_owner: false,
             check_keys_file_owner: false,
-            // leapsectz 未設定 / sample_counts / rtcsync の新規監査は件数に影響するため無効化
+            // leapsectz 未設定 / sample_counts / rtcsync / maxchange の新規監査は件数に影響するため無効化
             check_chrony_leapsectz: false,
             check_chrony_sample_counts: false,
             check_chrony_rtcsync: false,
+            check_chrony_maxchange: false,
             ..Default::default()
         };
         let module = NtpConfigMonitorModule::new(config, None);
@@ -2481,8 +2541,9 @@ mod tests {
     #[test]
     fn test_audit_by_kind_chrony_flags_disable_individual_checks() {
         // chrony の allow/bindcmd をトリガーしつつ、サーバと makestep は設定済みにしておく
-        // leapsectz / rtcsync 設定済み & maxsamples/minsamples 未設定で新規ルールが発火しない content にする
-        let content = "pool foo\nmakestep 1.0 3\nrtcsync\nallow all\nbindcmdaddress 0.0.0.0\ndriftfile drift\nleapsectz right/UTC\n";
+        // leapsectz / rtcsync / maxchange 設定済み & maxsamples/minsamples 未設定で
+        // 新規ルールが発火しない content にする
+        let content = "pool foo\nmakestep 1.0 3\nrtcsync\nmaxchange 1000 1 2\nallow all\nbindcmdaddress 0.0.0.0\ndriftfile drift\nleapsectz right/UTC\n";
         let path = Path::new("/etc/chrony/chrony.conf");
 
         // 全フラグ有効（デフォルト） → allow / bindcmd / driftfile の 3 件
@@ -2742,9 +2803,9 @@ mod tests {
     // ------------------------------------------------------------------
     #[test]
     fn test_audit_by_kind_chrony_new_flags_toggle() {
-        // pool + makestep は正常。cmdport/port 非既定、ntpsigndsocket を /tmp/ に配置、
+        // pool + makestep + maxchange は正常。cmdport/port 非既定、ntpsigndsocket を /tmp/ に配置、
         // keys に不在ファイルを指定 → 新ルール 4 件（cmdport + port + ntpsigndsocket + keys）
-        let content = "pool foo\nmakestep 1.0 3\ncmdport 5000\nport 6000\nntpsigndsocket /tmp/s\nkeys /nope/keys\n";
+        let content = "pool foo\nmakestep 1.0 3\nmaxchange 1000 1 2\ncmdport 5000\nport 6000\nntpsigndsocket /tmp/s\nkeys /nope/keys\n";
         let path = Path::new("/etc/chrony/chrony.conf");
 
         let mut config = NtpConfigMonitorConfig::default();
@@ -4059,6 +4120,157 @@ mod tests {
         let findings = audit_chrony_makestep_threshold(content, 100.0);
         assert_eq!(findings.len(), 1);
         assert!(findings[0].message.contains("500"));
+    }
+
+    // ------------------------------------------------------------------
+    // audit_chrony_maxchange
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_chrony_maxchange_unset_detects() {
+        // maxchange が設定されていない場合 → Warning
+        let content = "pool foo\nmakestep 1.0 3\n";
+        let findings = audit_chrony_maxchange(content, 1000.0);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_maxchange_unset");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+        assert!(findings[0].message.contains("maxchange"));
+    }
+
+    #[test]
+    fn test_audit_chrony_maxchange_recommended_no_finding() {
+        // 推奨値 `maxchange 1000 1 2` は 1000 秒上限以下なので検知しない
+        let content = "maxchange 1000 1 2\n";
+        let findings = audit_chrony_maxchange(content, 1000.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxchange_small_offset_no_finding() {
+        // 推奨値より小さな offset は正常扱い
+        let content = "maxchange 500 1 2\n";
+        let findings = audit_chrony_maxchange(content, 1000.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxchange_offset_too_large_detects() {
+        // 2000 秒 offset は 1000 秒上限を大幅超過 → Warning
+        let content = "maxchange 2000 1 2\n";
+        let findings = audit_chrony_maxchange(content, 1000.0);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_maxchange_offset_too_large");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+        assert!(findings[0].message.contains("2000"));
+    }
+
+    #[test]
+    fn test_audit_chrony_maxchange_boundary_equal_no_finding() {
+        // 境界値: 閾値ちょうどは検知しない（strict greater-than）
+        let content = "maxchange 1000.0 1 2\n";
+        let findings = audit_chrony_maxchange(content, 1000.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxchange_non_numeric_suppresses_offset_rule() {
+        // offset のパース不能トークンは offset_too_large 側では無視するが、
+        // maxchange 行は存在するため unset は発火しない
+        let content = "maxchange abc 1 2\n";
+        let findings = audit_chrony_maxchange(content, 1000.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxchange_zero_no_finding() {
+        // 0 以下は設定ミス扱いで offset_too_large の対象外。
+        // maxchange 行自体は存在するため unset も発火しない
+        let content = "maxchange 0 1 2\n";
+        let findings = audit_chrony_maxchange(content, 1000.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxchange_negative_no_finding() {
+        // 負値は設定ミス扱いで offset_too_large の対象外
+        let content = "maxchange -1 1 2\n";
+        let findings = audit_chrony_maxchange(content, 1000.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxchange_inline_option_ignored_triggers_unset() {
+        // server ディレクティブの inline トークンは top-level として認識されないため
+        // maxchange 未設定扱い → chrony_maxchange_unset が発火
+        let content = "server ntp.example.com maxchange 2000\n";
+        let findings = audit_chrony_maxchange(content, 1000.0);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_maxchange_unset");
+    }
+
+    #[test]
+    fn test_audit_chrony_maxchange_multiple_last_wins() {
+        // 複数行ある場合は後者の値が採用される
+        let content = "maxchange 500 1 2\nmaxchange 5000 1 -1\n";
+        let findings = audit_chrony_maxchange(content, 1000.0);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_maxchange_offset_too_large");
+        assert!(findings[0].message.contains("5000"));
+    }
+
+    #[test]
+    fn test_audit_chrony_maxchange_comment_does_not_count() {
+        // コメント行は未設定と同等に扱われる
+        let content = "# maxchange 1000 1 2\n";
+        let findings = audit_chrony_maxchange(content, 1000.0);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_maxchange_unset");
+    }
+
+    // ------------------------------------------------------------------
+    // audit_by_kind: maxchange フラグの有効/無効切替
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_by_kind_maxchange_flag_toggle() {
+        // 他の新規ルールを発火させない最小 chrony 設定（maxchange のみ未設定）
+        let content = "pool foo\nmakestep 1.0 3\nleapsectz right/UTC\nrtcsync\n";
+        let path = Path::new("/etc/chrony/chrony.conf");
+
+        let mut config = NtpConfigMonitorConfig {
+            check_config_owner: false,
+            check_keys_file_owner: false,
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
+        assert!(
+            findings.iter().any(|f| f.kind == "chrony_maxchange_unset"),
+            "maxchange audit should fire by default when unset"
+        );
+
+        config.check_chrony_maxchange = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
+        assert!(
+            findings.iter().all(|f| f.kind != "chrony_maxchange_unset"),
+            "disabling check_chrony_maxchange suppresses the finding"
+        );
+    }
+
+    #[test]
+    fn test_audit_by_kind_ntp_does_not_trigger_chrony_maxchange() {
+        // NtpConfigKind::Ntp アームでは chrony 専用の maxchange 監査はディスパッチされない
+        let content =
+            "server 0.pool.ntp.org iburst\nrestrict default ignore\ndriftfile /var/ntp.drift\n";
+        let path = Path::new("/etc/ntp.conf");
+        let config = NtpConfigMonitorConfig {
+            check_keys_file_owner: false,
+            check_config_owner: false,
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Ntp, content, &config, path);
+        assert!(
+            findings.iter().all(|f| f.kind != "chrony_maxchange_unset"
+                && f.kind != "chrony_maxchange_offset_too_large"),
+            "ntp.conf path should not dispatch chrony-specific maxchange audits"
+        );
     }
 
     // ------------------------------------------------------------------
