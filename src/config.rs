@@ -6243,6 +6243,12 @@ pub struct NtpConfigMonitorConfig {
     #[serde(default = "NtpConfigMonitorConfig::default_true")]
     pub check_chrony_maxchange: bool,
 
+    /// chrony の `maxchange <offset> <start> <max>` の第三引数 `<max>` が `-1`
+    /// （上限なし）に設定されている場合を検知する。連続で閾値を超えるオフセットを
+    /// 受けても chronyd が panic-exit しないため、持続的な時刻偽装攻撃が素通りする
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_chrony_maxchange_max_unlimited: bool,
+
     /// chrony の `corrtimeratio` が許容上限を超えている場合を検知
     /// （slew 補正に割く時間比率の過大な緩和は周波数補正フェーズの長期化を招き、
     /// 時刻精度が劣化して TLS 有効期限判定・Kerberos/TOTP 時刻窓に影響する）
@@ -6423,6 +6429,7 @@ impl Default for NtpConfigMonitorConfig {
             check_chrony_maxjitter: true,
             check_chrony_makestep_threshold: true,
             check_chrony_maxchange: true,
+            check_chrony_maxchange_max_unlimited: true,
             check_chrony_corrtimeratio: true,
             check_chrony_maxclockerror: true,
             maxdistance_max_threshold: Self::default_maxdistance_max_threshold(),
