@@ -1554,6 +1554,10 @@ check_chrony_makestep_threshold = true
 # 未設定だと `makestep` と組み合わさって攻撃者が任意の大きなオフセットを注入可能。
 # 推奨値は `maxchange 1000 1 2`。
 check_chrony_maxchange = true
+# chrony の `maxchange <offset> <start> <max>` の第三引数 `<max>` が -1（上限なし）の場合を検知（Warning）
+# `<max>` が -1 に設定されていると、連続で閾値を超えるオフセットを受けても chronyd が
+# panic-exit しないため、持続的な時刻偽装攻撃を検知できなくなる。
+check_chrony_maxchange_max_unlimited = true
 # chrony の `corrtimeratio` が推奨上限を超えている場合を検知（Warning）
 # slew 補正に割く時間比率が過大に緩められると周波数補正フェーズが長引き、時刻精度が劣化して
 # TLS 有効期限判定・Kerberos/TOTP 時刻窓・ログ整合性に悪影響を与える
