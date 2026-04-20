@@ -179,16 +179,17 @@
 - [x] **ntp_config_monitor の refclock 監査** — v1.73.0 (#353, PR #354)
 - [x] **ntp_config_monitor の rtcsync / rtcfile 監査** — v1.74.0 (#355, PR #356)
 - [x] **ntp_config_monitor の maxdistance / maxjitter 監査** — v1.75.0 (#357, PR #358)
+- [x] **ntp_config_monitor の makestep threshold 絶対値監査** — v1.76.0 (#359, PR #360)
 
 ## 候補
 
-1. **ntp_config_monitor の makestep / stepslew 絶対値監査** — `makestep <threshold> <limit>` の `threshold` が過大（例: 100 秒超）の場合、大幅な時刻ずれでも step を許容する脆弱設定として Warning を出す。攻撃者による意図的な時刻跳躍を緩和する。
+1. **ntp_config_monitor の maxchange 監査** — chrony の `maxchange <offset> <start> <max>` が未設定の場合、`makestep` で step される時刻量に上限がなく、攻撃者が任意の大きなオフセットを注入可能。未設定を Warning、`offset` が閾値超（例: 1000 秒超）を Warning として検知する。`makestep` 監査（v1.76.0）の補完として step 量自体の上限をチェックする。
 2. **ntp_config_monitor の corrtimeratio / maxclockerror 閾値監査** — chrony の周波数補正・クロック誤差推定の上限ディレクティブ（`corrtimeratio` と `maxclockerror`）が極端に緩められている設定を検知し、時刻精度の過度な劣化を防ぐ
-3. **ntp_config_monitor のドロップイン動的ホットリロード** — 稼働中に chrony.conf へ `confdir` / `include` が追加された場合、SIGHUP または再起動なしに inotify watch へディレクトリを追加する仕組みを整備する（現状は v1.72.0 で再起動まで反映されない制約あり）
-4. **ntp_config_monitor の refclock SHM セグメント実権限監査** — v1.73.0 で chrony.conf 上の `refclock SHM` 宣言を検知できるようになったため、次段として `SHM <id>` で参照される実 SysV SHM セグメント（`0x4e545030 + id`）の書き込み権限（`ipcs -m`）を検査し、非 root 書き込み可の場合を Critical 扱いにする
-5. **inotify リアルタイム検知の他モジュールへの展開** — cron_monitor / ntp_config_monitor で確立した inotify パターンを sshd_config_monitor / pam_monitor / sudoers_monitor / dns_monitor / security_files_monitor / shell_config_monitor など他の設定ファイル系モジュールに展開する
-6. **所有者監査パターンの他モジュールへの展開** — ntp_config_monitor で実装した `allowed_owner_uids / gids` によるオーナー監査を、sshd_config_monitor・pam_monitor・security_files_monitor・sudoers_monitor 等の設定ファイル系モジュールに共通パターンとして展開する（root 以外が所有する設定ファイルは権限昇格の足場となるため）
-7. **chrony 閾値監査のパターン共通化リファクタ** — v1.70.0 (maxsamples)・v1.75.0 (maxdistance/maxjitter) で増えた「top-level 整数/浮動小数ディレクティブの閾値超過検知」パターンを汎用ヘルパーに抽出し、将来の同種監査追加時に重複を抑える
+3. **chrony 閾値監査のパターン共通化リファクタ** — v1.70.0 (maxsamples)・v1.75.0 (maxdistance/maxjitter)・v1.76.0 (makestep) で増えた「top-level 整数/浮動小数ディレクティブの閾値超過検知」パターンを汎用ヘルパー（例: `audit_threshold_too_large<T>`）に抽出し、今後の同種監査追加時の重複を抑える
+4. **ntp_config_monitor のドロップイン動的ホットリロード** — 稼働中に chrony.conf へ `confdir` / `include` が追加された場合、SIGHUP または再起動なしに inotify watch へディレクトリを追加する仕組みを整備する（現状は v1.72.0 で再起動まで反映されない制約あり）
+5. **ntp_config_monitor の refclock SHM セグメント実権限監査** — v1.73.0 で chrony.conf 上の `refclock SHM` 宣言を検知できるようになったため、次段として `SHM <id>` で参照される実 SysV SHM セグメント（`0x4e545030 + id`）の書き込み権限（`ipcs -m`）を検査し、非 root 書き込み可の場合を Critical 扱いにする
+6. **inotify リアルタイム検知の他モジュールへの展開** — cron_monitor / ntp_config_monitor で確立した inotify パターンを sshd_config_monitor / pam_monitor / sudoers_monitor / dns_monitor / security_files_monitor / shell_config_monitor など他の設定ファイル系モジュールに展開する
+7. **所有者監査パターンの他モジュールへの展開** — ntp_config_monitor で実装した `allowed_owner_uids / gids` によるオーナー監査を、sshd_config_monitor・pam_monitor・security_files_monitor・sudoers_monitor 等の設定ファイル系モジュールに共通パターンとして展開する（root 以外が所有する設定ファイルは権限昇格の足場となるため）
 8. **CI ワークフローでの clippy -D warnings 強制化** — GitHub Actions で `cargo clippy --all-targets -- -D warnings` / `cargo fmt --check` を PR 時に自動実行する `.github/workflows/ci.yaml` を整備する（promtool.yaml と同様、PAT の workflow スコープ問題があれば README 記載にとどめる）
 9. **promtool ユニットテスト用の GitHub Actions ワークフロー追加** — PAT の workflow スコープ制約で v1.59.0 では README のサンプル掲載にとどめた `.github/workflows/promtool.yaml` を、適切な権限で追加し `grafana/alerts/**` の変更時に自動検証する
 10. **module-stats 履歴スナップショット機能** — `record_scan_duration` による最新 1024 サンプルに加え、1h/1d など時間粒度で集計したスナップショットを保持し、長期傾向（1日/1週間の P95 推移）を REST API で取得可能にする
