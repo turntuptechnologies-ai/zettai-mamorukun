@@ -58,6 +58,12 @@
 //!     誤差率 ppm が過大に緩められると、外部時刻ソースとの差分を「ローカルクロックの
 //!     ドリフトで説明できる」と判定しやすくなり、偽装 NTP サーバへの追従が緩慢になって
 //!     中間者攻撃の緩衝材として働く）
+//!   - `chrony.conf`: `logchange` が推奨上限を超える（時刻ステップ補正ログを
+//!     トリガーする閾値が過大に緩められると、偽装 NTP による時刻改竄が監査ログに
+//!     記録されなくなり、時刻ずれの可観測性が低下する）
+//!   - `chrony.conf`: `logbanner 0` 等でバナー出力が無効化されている（ログローテーション
+//!     後に列ヘッダが欠如することで攻撃者の時刻改竄イベントの文脈復元が困難になり、
+//!     フォレンジック妨害につながる）
 //! - **ドロップイン監視** — `chrony.conf` 内の `confdir` / `sourcedir` / `include`
 //!   ディレクティブで参照される追加設定ファイル（例: `/etc/chrony/conf.d/*.conf`、
 //!   `/etc/chrony/sources.d/*.sources`）も監視対象に加え、親ディレクトリも inotify
@@ -766,6 +772,23 @@ fn parse_chrony_top_level_f64(content: &str, keyword: &str) -> Option<f64> {
     last
 }
 
+/// chrony.conf の top-level ディレクティブから i64 値をパースする
+///
+/// `find_keyword_lines` は行頭トークンが一致した行のみ返すため、
+/// `server ... logbanner N` のような inline オプションには一致せず、top-level 設定だけを拾える。
+/// 複数行がある場合は後者が優先。値として整数でないトークンは無視する。
+/// 負の値（例: `logbanner -1`）を扱う必要があるため u32 ではなく i64 を返す。
+fn parse_chrony_top_level_i64(content: &str, keyword: &str) -> Option<i64> {
+    let mut last: Option<i64> = None;
+    for value in find_keyword_lines(content, keyword) {
+        let token = value.split_whitespace().next().unwrap_or("").trim();
+        if let Ok(n) = token.parse::<i64>() {
+            last = Some(n);
+        }
+    }
+    last
+}
+
 /// chrony.conf の `maxsamples` / `minsamples` のサンプル数設定を監査する
 ///
 /// - `maxsamples` が 0（= 無制限）を除き閾値未満 → `chrony_maxsamples_too_low` (Warning)
@@ -1005,6 +1028,64 @@ fn audit_chrony_maxclockerror(content: &str, max_threshold: f64) -> Vec<AuditFin
             message: format!(
                 "chrony.conf の `maxclockerror {}` は推奨上限（{} ppm）を超えています（ローカルクロックの誤差許容が過大だと、外部時刻ソースとの差分を「自クロックのドリフト」と誤認しやすくなり、偽装 NTP サーバへの追従が緩慢になって中間者攻撃の緩衝材として働きます）",
                 v, max_threshold
+            ),
+        });
+    }
+    findings
+}
+
+/// chrony.conf の `logchange` が許容上限を超えている場合を監査する
+///
+/// `logchange` は chrony がシステム時刻の補正量を syslog へ記録する際の閾値（秒）を
+/// 指定するディレクティブ。chrony のデフォルトは 1.0 秒で、絶対値でこれを超える時刻
+/// ステップ補正が検出されたときに警告ログが出る。値を極端に大きく設定されていると、
+/// 攻撃者が偽装 NTP サーバや refclock 経由でシステム時刻を改竄しても補正ログに
+/// 記録されなくなり、時刻ずれの可観測性が著しく低下する（フォレンジック妨害）。
+///
+/// `max_threshold`（秒）を超える値を Warning として報告する。
+/// 0 以下・パースできないトークンは無視する（未設定は chrony デフォルトの 1.0 秒で
+/// 動作するため検知対象外）。
+fn audit_chrony_logchange(content: &str, max_threshold: f64) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    if let Some(v) = parse_chrony_top_level_f64(content, "logchange")
+        && v > 0.0
+        && v > max_threshold
+    {
+        findings.push(AuditFinding {
+            kind: "chrony_logchange_too_large".to_string(),
+            severity: Severity::Warning,
+            message: format!(
+                "chrony.conf の `logchange {}` は推奨上限（{} 秒）を超えています（攻撃者が時刻ステップ補正ログをトリガーする閾値を極端に大きく設定することで、偽装 NTP による時刻改竄が監査ログに記録されなくなり、時刻ずれの可観測性が低下します）",
+                v, max_threshold
+            ),
+        });
+    }
+    findings
+}
+
+/// chrony.conf の `logbanner` がバナー出力無効化（0 以下）に設定されている場合を監査する
+///
+/// `logbanner` は chrony がログファイルに列ヘッダ（バナー）を再出力する行数間隔を
+/// 指定するディレクティブ（chrony のデフォルトは 32）。`logbanner 0`（または負値）に
+/// 設定するとバナー出力が実質的に無効化される。ログローテーション後に列ヘッダが
+/// 欠如するため、後日フォレンジック調査で各列の意味（時刻・オフセット・遅延・推定
+/// 誤差等）を復元することが困難になり、攻撃者による時刻改竄イベントの文脈解析が
+/// 妨害される。
+///
+/// `logbanner` が `0` 以下に明示設定されている場合のみ Warning として報告する。
+/// 未設定・正の整数値・パースできないトークンは無視する（chrony デフォルトの 32 で
+/// 動作するため検知対象外）。
+fn audit_chrony_logbanner(content: &str) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    if let Some(v) = parse_chrony_top_level_i64(content, "logbanner")
+        && v <= 0
+    {
+        findings.push(AuditFinding {
+            kind: "chrony_logbanner_disabled".to_string(),
+            severity: Severity::Warning,
+            message: format!(
+                "chrony.conf の `logbanner {}` はバナー（列ヘッダ）出力を無効化しています（ログローテーション後に列ヘッダが欠如することで攻撃者の時刻改竄イベントの文脈復元が困難になり、フォレンジック妨害につながります。推奨: 既定値 32 以上の正の整数）",
+                v
             ),
         });
     }
@@ -1462,6 +1543,15 @@ fn audit_by_kind(
                     content,
                     config.maxclockerror_max_threshold,
                 ));
+            }
+            if config.check_chrony_logchange {
+                findings.extend(audit_chrony_logchange(
+                    content,
+                    config.logchange_max_threshold,
+                ));
+            }
+            if config.check_chrony_logbanner {
+                findings.extend(audit_chrony_logbanner(content));
             }
         }
         NtpConfigKind::Ntp => {
@@ -4621,6 +4711,163 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // audit_chrony_logchange
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_chrony_logchange_unset_no_finding() {
+        // 未設定は chrony デフォルト 1.0 秒で動作するため検知対象外
+        let content = "pool foo\nmakestep 1.0 3\n";
+        let findings = audit_chrony_logchange(content, 10.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_logchange_default_no_finding() {
+        // chrony デフォルト値 1.0 秒は 10.0 上限以下なので検知しない
+        let content = "logchange 1.0\n";
+        let findings = audit_chrony_logchange(content, 10.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_logchange_too_large_detects() {
+        // 1000 秒は 10 秒上限を超過 → Warning
+        let content = "logchange 1000\n";
+        let findings = audit_chrony_logchange(content, 10.0);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_logchange_too_large");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+        assert!(findings[0].message.contains("1000"));
+    }
+
+    #[test]
+    fn test_audit_chrony_logchange_boundary_equal_no_finding() {
+        let content = "logchange 10.0\n";
+        let findings = audit_chrony_logchange(content, 10.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_logchange_non_numeric_no_finding() {
+        let content = "logchange abc\n";
+        let findings = audit_chrony_logchange(content, 10.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_logchange_zero_no_finding() {
+        let content = "logchange 0\n";
+        let findings = audit_chrony_logchange(content, 10.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_logchange_negative_no_finding() {
+        let content = "logchange -5\n";
+        let findings = audit_chrony_logchange(content, 10.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_logchange_inline_option_ignored() {
+        let content = "server ntp.example.com logchange 1000\n";
+        let findings = audit_chrony_logchange(content, 10.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_logchange_multiple_last_wins() {
+        let content = "logchange 1.0\nlogchange 1000\n";
+        let findings = audit_chrony_logchange(content, 10.0);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_logchange_too_large");
+        assert!(findings[0].message.contains("1000"));
+    }
+
+    #[test]
+    fn test_audit_chrony_logchange_comment_does_not_count() {
+        let content = "# logchange 1000\n";
+        let findings = audit_chrony_logchange(content, 10.0);
+        assert!(findings.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // audit_chrony_logbanner
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_chrony_logbanner_unset_no_finding() {
+        // 未設定は chrony デフォルト 32 で動作するため検知対象外
+        let content = "pool foo\nmakestep 1.0 3\n";
+        let findings = audit_chrony_logbanner(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_logbanner_default_positive_no_finding() {
+        // chrony デフォルト値 32 は正の整数なので検知しない
+        let content = "logbanner 32\n";
+        let findings = audit_chrony_logbanner(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_logbanner_zero_detects() {
+        // logbanner 0 はバナー出力無効化 → Warning
+        let content = "logbanner 0\n";
+        let findings = audit_chrony_logbanner(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_logbanner_disabled");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+        assert!(findings[0].message.contains("0"));
+    }
+
+    #[test]
+    fn test_audit_chrony_logbanner_negative_detects() {
+        // logbanner -1 もバナー無効化扱いとして Warning
+        let content = "logbanner -1\n";
+        let findings = audit_chrony_logbanner(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_logbanner_disabled");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+        assert!(findings[0].message.contains("-1"));
+    }
+
+    #[test]
+    fn test_audit_chrony_logbanner_non_numeric_no_finding() {
+        let content = "logbanner abc\n";
+        let findings = audit_chrony_logbanner(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_logbanner_inline_option_ignored() {
+        let content = "server ntp.example.com logbanner 0\n";
+        let findings = audit_chrony_logbanner(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_logbanner_multiple_last_wins() {
+        // 最後の値 0 が採用され Warning
+        let content = "logbanner 32\nlogbanner 0\n";
+        let findings = audit_chrony_logbanner(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_logbanner_disabled");
+
+        // 逆順（最後が 32）は検知しない
+        let content = "logbanner 0\nlogbanner 32\n";
+        let findings = audit_chrony_logbanner(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_logbanner_comment_does_not_count() {
+        let content = "# logbanner 0\n";
+        let findings = audit_chrony_logbanner(content);
+        assert!(findings.is_empty());
+    }
+
+    // ------------------------------------------------------------------
     // audit_by_kind: corrtimeratio / maxclockerror フラグの有効/無効切替
     // ------------------------------------------------------------------
     #[test]
@@ -4697,6 +4944,86 @@ mod tests {
                 .all(|f| f.kind != "chrony_corrtimeratio_too_large"
                     && f.kind != "chrony_maxclockerror_too_large"),
             "ntp.conf path should not dispatch chrony-specific audits"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // audit_by_kind: logchange / logbanner フラグの有効/無効切替
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_by_kind_logchange_flag_toggle() {
+        // 新規ルールだけを発火させる最小 chrony 設定
+        let content = "pool foo\nmakestep 1.0 3\nleapsectz right/UTC\nrtcsync\nmaxchange 1000 1 2\nlogchange 1000\n";
+        let path = Path::new("/etc/chrony/chrony.conf");
+
+        let mut config = NtpConfigMonitorConfig {
+            check_config_owner: false,
+            check_keys_file_owner: false,
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "chrony_logchange_too_large"),
+            "logchange audit should fire by default when above threshold"
+        );
+
+        config.check_chrony_logchange = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_logchange_too_large"),
+            "disabling check_chrony_logchange suppresses the finding"
+        );
+    }
+
+    #[test]
+    fn test_audit_by_kind_logbanner_flag_toggle() {
+        let content = "pool foo\nmakestep 1.0 3\nleapsectz right/UTC\nrtcsync\nmaxchange 1000 1 2\nlogbanner 0\n";
+        let path = Path::new("/etc/chrony/chrony.conf");
+
+        let mut config = NtpConfigMonitorConfig {
+            check_config_owner: false,
+            check_keys_file_owner: false,
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "chrony_logbanner_disabled"),
+            "logbanner audit should fire by default when set to 0"
+        );
+
+        config.check_chrony_logbanner = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_logbanner_disabled"),
+            "disabling check_chrony_logbanner suppresses the finding"
+        );
+    }
+
+    #[test]
+    fn test_audit_by_kind_ntp_does_not_trigger_chrony_logchange_or_logbanner() {
+        // NtpConfigKind::Ntp アームでは chrony 専用の両監査はディスパッチされない
+        let content = "server 0.pool.ntp.org iburst\nrestrict default ignore\ndriftfile /var/ntp.drift\nlogchange 1000\nlogbanner 0\n";
+        let path = Path::new("/etc/ntp.conf");
+        let config = NtpConfigMonitorConfig {
+            check_keys_file_owner: false,
+            check_config_owner: false,
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Ntp, content, &config, path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_logchange_too_large"
+                    && f.kind != "chrony_logbanner_disabled"),
+            "ntp.conf path should not dispatch chrony-specific logchange/logbanner audits"
         );
     }
 

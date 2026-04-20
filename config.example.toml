@@ -1566,6 +1566,14 @@ check_chrony_corrtimeratio = true
 # ローカルクロックの誤差許容が過大だと外部時刻ソースとの差分を「自クロックのドリフト」と
 # 誤認しやすくなり、偽装 NTP サーバへの追従が緩慢になって中間者攻撃の緩衝材として働く
 check_chrony_maxclockerror = true
+# chrony の `logchange` が推奨上限を超えている場合を検知（Warning）
+# 時刻ステップ補正ログのトリガー閾値が過大に緩められると、偽装 NTP による時刻改竄が
+# 監査ログに記録されなくなり、時刻ずれの可観測性が低下する
+check_chrony_logchange = true
+# chrony の `logbanner` が 0 以下に設定されバナー出力が無効化されている場合を検知（Warning）
+# ログローテーション後に列ヘッダが欠如することで攻撃者の時刻改竄イベントの文脈復元が
+# 困難になり、フォレンジック妨害につながる
+check_chrony_logbanner = true
 # `maxdistance` 監査の許容上限（秒、既定 5.0）。chrony のデフォルトは 3.0 秒
 maxdistance_max_threshold = 5.0
 # `maxjitter` 監査の許容上限（秒、既定 2.0）。chrony のデフォルトは 1.0 秒
@@ -1585,6 +1593,10 @@ corrtimeratio_max_threshold = 10.0
 # chrony のデフォルトは 1.0 ppm。通常運用で 10 ppm を超える値を設定する必要はなく、
 # 超過値は偽装 NTP サーバへの追従を緩慢にする緩衝材として悪用されうる
 maxclockerror_max_threshold = 10.0
+# `logchange` 監査の許容上限（秒、既定 10.0）
+# chrony のデフォルトは 1.0 秒。通常運用で 10 秒を超える値を設定する必要はなく、
+# 超過値は攻撃者が時刻改竄の可観測性を下げるための緩和設定として悪用されうる
+logchange_max_threshold = 10.0
 # `maxsamples_too_low` 判定の下限閾値（既定: 4）
 # chrony の NTP フィルタアルゴリズムは通常 4 以上のサンプルで安定動作する
 # 0 に設定すると maxsamples 過少の検知を事実上無効化できる

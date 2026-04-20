@@ -6261,6 +6261,18 @@ pub struct NtpConfigMonitorConfig {
     #[serde(default = "NtpConfigMonitorConfig::default_true")]
     pub check_chrony_maxclockerror: bool,
 
+    /// chrony の `logchange` が許容上限を超えている場合を検知
+    /// （時刻ステップ補正ログをトリガーする閾値が過大に緩められると、偽装 NTP による
+    /// 時刻改竄が監査ログに記録されなくなり、時刻ずれの可観測性が低下する）
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_chrony_logchange: bool,
+
+    /// chrony の `logbanner` が 0 以下に設定されバナー出力が無効化されている場合を検知
+    /// （ログローテーション後に列ヘッダが欠如することで攻撃者の時刻改竄イベントの
+    /// 文脈復元が困難になり、フォレンジック妨害につながる）
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_chrony_logbanner: bool,
+
     /// `maxdistance` の許容上限（秒、既定 5.0）
     /// chrony のデフォルトは 3.0 秒なので 5.0 秒超は明示的な緩和設定と判定する
     #[serde(default = "NtpConfigMonitorConfig::default_maxdistance_max_threshold")]
@@ -6293,6 +6305,12 @@ pub struct NtpConfigMonitorConfig {
     /// 超過値は偽装 NTP サーバへの追従を緩慢にする緩衝材として悪用されうる
     #[serde(default = "NtpConfigMonitorConfig::default_maxclockerror_max_threshold")]
     pub maxclockerror_max_threshold: f64,
+
+    /// `logchange` 監査の許容上限（秒、既定 10.0）
+    /// chrony のデフォルトは 1.0 秒。通常運用で 10 秒を超える値を設定する必要はなく、
+    /// 超過値は攻撃者が時刻改竄の可観測性を下げるための緩和設定として悪用されうる
+    #[serde(default = "NtpConfigMonitorConfig::default_logchange_max_threshold")]
+    pub logchange_max_threshold: f64,
 
     /// `maxsamples_too_low` 判定の下限閾値（既定: 4）
     /// chrony の NTP フィルタアルゴリズムは通常 4 以上のサンプルで安定動作する
@@ -6391,6 +6409,10 @@ impl NtpConfigMonitorConfig {
         10.0
     }
 
+    fn default_logchange_max_threshold() -> f64 {
+        10.0
+    }
+
     fn default_inotify_debounce_ms() -> u64 {
         500
     }
@@ -6432,12 +6454,15 @@ impl Default for NtpConfigMonitorConfig {
             check_chrony_maxchange_max_unlimited: true,
             check_chrony_corrtimeratio: true,
             check_chrony_maxclockerror: true,
+            check_chrony_logchange: true,
+            check_chrony_logbanner: true,
             maxdistance_max_threshold: Self::default_maxdistance_max_threshold(),
             maxjitter_max_threshold: Self::default_maxjitter_max_threshold(),
             makestep_threshold_max: Self::default_makestep_threshold_max(),
             maxchange_offset_max_threshold: Self::default_maxchange_offset_max_threshold(),
             corrtimeratio_max_threshold: Self::default_corrtimeratio_max_threshold(),
             maxclockerror_max_threshold: Self::default_maxclockerror_max_threshold(),
+            logchange_max_threshold: Self::default_logchange_max_threshold(),
             maxsamples_min_threshold: Self::default_maxsamples_min_threshold(),
             allowed_owner_uids: Self::default_allowed_uids(),
             allowed_owner_gids: Self::default_allowed_gids(),
