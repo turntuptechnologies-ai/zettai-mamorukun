@@ -184,12 +184,13 @@
 - [x] **ntp_config_monitor の corrtimeratio / maxclockerror 閾値監査** — v1.78.0 (#363, PR #364)
 - [x] **ntp_config_monitor の maxchange `<max>` 上限なし（-1）監査** — v1.79.0 (#365, PR #366)
 - [x] **ntp_config_monitor の `logbanner` / `logchange` 監査** — v1.80.0 (#367, PR #368)
+- [x] **ntp_config_monitor の maxchange `<start>` フィールド監査** — v1.81.0 (#369, PR #370)
 
 ## 候補
 
-1. **chrony 閾値監査のパターン共通化リファクタ** — v1.70.0 (maxsamples)・v1.75.0 (maxdistance/maxjitter)・v1.76.0 (makestep)・v1.77.0 (maxchange)・v1.78.0 (corrtimeratio/maxclockerror)・v1.79.0 (maxchange max=-1)・v1.80.0 (logchange) で増えた「top-level 整数/浮動小数ディレクティブの閾値超過検知」パターンを汎用ヘルパー（例: `audit_threshold_too_large<T>`）に抽出し、今後の同種監査追加時の重複を抑える
-2. **ntp_config_monitor の maxchange `<start>` フィールド監査** — v1.79.0 で第三引数 `<max>` の監査が入ったため、第二引数 `<start>`（大きなステップ補正の適用開始回数）が過大（例: 10 以上）に設定されている場合を Warning として検知する。`start` が大きいと初期の偽装時刻攻撃が検知されずに受け入れられるリスクがある
-3. **ntp_config_monitor の `log` ディレクティブ監査** — v1.80.0 で `logchange` / `logbanner` 監査が入ったため、次段として chrony の `log` ディレクティブ（`measurements`・`statistics`・`tracking`・`rtc`・`refclocks`・`tempcomp` 等のサブカテゴリ）が空設定されている場合（= 全ログカテゴリ無効化）や、ドロップインで `log` ディレクティブが上書きされて既定カテゴリが欠落している場合を検知する
+1. **chrony 閾値監査のパターン共通化リファクタ** — v1.70.0 (maxsamples)・v1.75.0 (maxdistance/maxjitter)・v1.76.0 (makestep)・v1.77.0 (maxchange)・v1.78.0 (corrtimeratio/maxclockerror)・v1.79.0 (maxchange max=-1)・v1.80.0 (logchange)・v1.81.0 (maxchange start) で増えた「top-level 整数/浮動小数ディレクティブの閾値超過検知」パターンを汎用ヘルパー（例: `audit_threshold_too_large<T>`）に抽出し、今後の同種監査追加時の重複を抑える
+2. **ntp_config_monitor の `log` ディレクティブ監査** — v1.80.0 で `logchange` / `logbanner` 監査が入ったため、次段として chrony の `log` ディレクティブ（`measurements`・`statistics`・`tracking`・`rtc`・`refclocks`・`tempcomp` 等のサブカテゴリ）が空設定されている場合（= 全ログカテゴリ無効化）や、ドロップインで `log` ディレクティブが上書きされて既定カテゴリが欠落している場合を検知する
+3. **ntp_config_monitor の `logdir` 監査** — chrony の `logdir` がデフォルト以外の場所（例: `/tmp/` や非 root 所有ディレクトリ）に設定されている場合を検知する。ログディレクトリが攻撃者書き込み可能な場所にあると、監査ログの改竄や削除により時刻改竄の可観測性が失われる
 4. **ntp_config_monitor のドロップイン動的ホットリロード** — 稼働中に chrony.conf へ `confdir` / `include` が追加された場合、SIGHUP または再起動なしに inotify watch へディレクトリを追加する仕組みを整備する（現状は v1.72.0 で再起動まで反映されない制約あり）
 5. **ntp_config_monitor の refclock SHM セグメント実権限監査** — v1.73.0 で chrony.conf 上の `refclock SHM` 宣言を検知できるようになったため、次段として `SHM <id>` で参照される実 SysV SHM セグメント（`0x4e545030 + id`）の書き込み権限（`ipcs -m`）を検査し、非 root 書き込み可の場合を Critical 扱いにする
 6. **inotify リアルタイム検知の他モジュールへの展開** — cron_monitor / ntp_config_monitor で確立した inotify パターンを sshd_config_monitor / pam_monitor / sudoers_monitor / dns_monitor / security_files_monitor / shell_config_monitor など他の設定ファイル系モジュールに展開する
