@@ -72,6 +72,10 @@
 //!   - `chrony.conf`: `logbanner 0` 等でバナー出力が無効化されている（ログローテーション
 //!     後に列ヘッダが欠如することで攻撃者の時刻改竄イベントの文脈復元が困難になり、
 //!     フォレンジック妨害につながる）
+//!   - `chrony.conf`: `logdir` が world-writable な一時領域（`/tmp/` / `/var/tmp/` /
+//!     `/dev/shm/` / `/run/user/` 配下）に設定されている（攻撃者が時刻改竄イベントの
+//!     監査ログを削除・改竄できるようになり、フォレンジック調査で時刻偽装の痕跡を
+//!     復元できなくなる）
 //! - **ドロップイン監視** — `chrony.conf` 内の `confdir` / `sourcedir` / `include`
 //!   ディレクティブで参照される追加設定ファイル（例: `/etc/chrony/conf.d/*.conf`、
 //!   `/etc/chrony/sources.d/*.sources`）も監視対象に加え、親ディレクトリも inotify
@@ -1140,6 +1144,53 @@ fn audit_chrony_logbanner(content: &str) -> Vec<AuditFinding> {
     findings
 }
 
+/// chrony.conf の `logdir` が world-writable な一時領域を指している場合を監査する
+///
+/// `logdir` は `log measurements tracking` 等で出力される chrony のログファイルの
+/// 書き込み先ディレクトリを指定するディレクティブ。`/tmp/` / `/var/tmp/` / `/dev/shm/` /
+/// `/run/user/` 配下のような world-writable / ユーザー書き込み可能な一時領域に配置すると、
+/// 攻撃者が時刻改竄イベントの監査ログ（時刻ソースの切替・step 補正・offset 記録等）を
+/// 削除・改竄することが可能になり、フォレンジック調査で時刻偽装の痕跡を復元できなく
+/// なる。偽装 NTP サーバや refclock 経由の時刻注入とログ消去を組み合わせた攻撃の
+/// 足場となりうる。
+///
+/// 値が空の場合は `chrony_logdir_empty` Info を発行する（未設定は chrony の既定動作で
+/// ログ出力が無効化されるため本監査では扱わず、ここでは「`logdir` と記述したが値が
+/// 空」という設定ミス・不完全記述を拾う）。それ以外で一時領域配下を指す場合は
+/// `chrony_logdir_insecure_path` Warning を発行する。
+fn audit_chrony_logdir(content: &str) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    const RISKY_PREFIXES: [&str; 4] = ["/tmp/", "/var/tmp/", "/dev/shm/", "/run/user/"];
+
+    for value in find_keyword_lines(content, "logdir") {
+        let trimmed = value.split_whitespace().next().unwrap_or("").trim();
+        if trimmed.is_empty() {
+            findings.push(AuditFinding {
+                kind: "chrony_logdir_empty".to_string(),
+                severity: Severity::Info,
+                message: "chrony.conf の `logdir` に値が指定されていません（設定ミスの可能性があります。書き込み先ディレクトリを明示してください）".to_string(),
+            });
+            continue;
+        }
+        let canonical = trimmed.trim_end_matches('/');
+        let is_risky = RISKY_PREFIXES
+            .iter()
+            .any(|prefix| trimmed.starts_with(prefix) || canonical == prefix.trim_end_matches('/'));
+        if is_risky {
+            findings.push(AuditFinding {
+                kind: "chrony_logdir_insecure_path".to_string(),
+                severity: Severity::Warning,
+                message: format!(
+                    "chrony.conf の `logdir {}` は world-writable な一時領域に配置されています（攻撃者が時刻改竄イベントの監査ログを削除・改竄できるようになり、フォレンジック調査で時刻偽装の痕跡を復元できなくなる恐れがあります）",
+                    trimmed
+                ),
+            });
+        }
+    }
+
+    findings
+}
+
 /// chrony.conf の `makestep <threshold> <limit>` の第一引数（threshold）が過大な場合を監査する
 ///
 /// `makestep` はオフセットが `threshold` 秒を超えた場合に限りクロックを step（瞬時修正）
@@ -1602,6 +1653,9 @@ fn audit_by_kind(
             }
             if config.check_chrony_logbanner {
                 findings.extend(audit_chrony_logbanner(content));
+            }
+            if config.check_chrony_logdir {
+                findings.extend(audit_chrony_logdir(content));
             }
         }
         NtpConfigKind::Ntp => {
@@ -5081,6 +5135,100 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // audit_chrony_logdir
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_chrony_logdir_unset_no_finding() {
+        let content = "";
+        let findings = audit_chrony_logdir(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_safe_path_no_finding() {
+        let content = "logdir /var/log/chrony\n";
+        let findings = audit_chrony_logdir(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_tmp_detects() {
+        let content = "logdir /tmp/chrony\n";
+        let findings = audit_chrony_logdir(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_logdir_insecure_path");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_var_tmp_detects() {
+        let content = "logdir /var/tmp/chrony\n";
+        let findings = audit_chrony_logdir(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_logdir_insecure_path");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_dev_shm_detects() {
+        let content = "logdir /dev/shm/chrony\n";
+        let findings = audit_chrony_logdir(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_logdir_insecure_path");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_run_user_detects() {
+        let content = "logdir /run/user/1000/chrony\n";
+        let findings = audit_chrony_logdir(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_logdir_insecure_path");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_exact_tmp_detects() {
+        let content = "logdir /tmp\n";
+        let findings = audit_chrony_logdir(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_logdir_insecure_path");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_empty_value_detects_info() {
+        let content = "logdir \n";
+        let findings = audit_chrony_logdir(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_logdir_empty");
+        assert!(matches!(findings[0].severity, Severity::Info));
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_comment_ignored() {
+        let content = "# logdir /tmp/x\n";
+        let findings = audit_chrony_logdir(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_inline_option_ignored() {
+        let content = "server ntp.example.com logdir /tmp/x\n";
+        let findings = audit_chrony_logdir(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_multiple_values() {
+        let content = "logdir /var/log/chrony\nlogdir /tmp/chrony\n";
+        let findings = audit_chrony_logdir(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_logdir_insecure_path");
+        assert!(findings[0].message.contains("/tmp/chrony"));
+    }
+
+    // ------------------------------------------------------------------
     // audit_by_kind: corrtimeratio / maxclockerror フラグの有効/無効切替
     // ------------------------------------------------------------------
     #[test]
@@ -5221,9 +5369,37 @@ mod tests {
     }
 
     #[test]
+    fn test_audit_by_kind_logdir_flag_toggle() {
+        let content = "pool foo\nmakestep 1.0 3\nleapsectz right/UTC\nrtcsync\nmaxchange 1000 1 2\nlogdir /tmp/chrony\n";
+        let path = Path::new("/etc/chrony/chrony.conf");
+
+        let mut config = NtpConfigMonitorConfig {
+            check_config_owner: false,
+            check_keys_file_owner: false,
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "chrony_logdir_insecure_path"),
+            "logdir audit should fire by default when pointing to world-writable tmp"
+        );
+
+        config.check_chrony_logdir = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_logdir_insecure_path"),
+            "disabling check_chrony_logdir suppresses the finding"
+        );
+    }
+
+    #[test]
     fn test_audit_by_kind_ntp_does_not_trigger_chrony_logchange_or_logbanner() {
-        // NtpConfigKind::Ntp アームでは chrony 専用の両監査はディスパッチされない
-        let content = "server 0.pool.ntp.org iburst\nrestrict default ignore\ndriftfile /var/ntp.drift\nlogchange 1000\nlogbanner 0\n";
+        // NtpConfigKind::Ntp アームでは chrony 専用の監査はディスパッチされない
+        let content = "server 0.pool.ntp.org iburst\nrestrict default ignore\ndriftfile /var/ntp.drift\nlogchange 1000\nlogbanner 0\nlogdir /tmp/x\n";
         let path = Path::new("/etc/ntp.conf");
         let config = NtpConfigMonitorConfig {
             check_keys_file_owner: false,
@@ -5235,8 +5411,9 @@ mod tests {
             findings
                 .iter()
                 .all(|f| f.kind != "chrony_logchange_too_large"
-                    && f.kind != "chrony_logbanner_disabled"),
-            "ntp.conf path should not dispatch chrony-specific logchange/logbanner audits"
+                    && f.kind != "chrony_logbanner_disabled"
+                    && f.kind != "chrony_logdir_insecure_path"),
+            "ntp.conf path should not dispatch chrony-specific logchange/logbanner/logdir audits"
         );
     }
 

@@ -6281,6 +6281,12 @@ pub struct NtpConfigMonitorConfig {
     #[serde(default = "NtpConfigMonitorConfig::default_true")]
     pub check_chrony_logbanner: bool,
 
+    /// chrony の `logdir` が world-writable な一時領域に設定されている場合を検知
+    /// （攻撃者が時刻改竄イベントの監査ログを削除・改竄できるようになり、
+    /// フォレンジック調査が妨害される）
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_chrony_logdir: bool,
+
     /// `maxdistance` の許容上限（秒、既定 5.0）
     /// chrony のデフォルトは 3.0 秒なので 5.0 秒超は明示的な緩和設定と判定する
     #[serde(default = "NtpConfigMonitorConfig::default_maxdistance_max_threshold")]
@@ -6476,6 +6482,7 @@ impl Default for NtpConfigMonitorConfig {
             check_chrony_maxclockerror: true,
             check_chrony_logchange: true,
             check_chrony_logbanner: true,
+            check_chrony_logdir: true,
             maxdistance_max_threshold: Self::default_maxdistance_max_threshold(),
             maxjitter_max_threshold: Self::default_maxjitter_max_threshold(),
             makestep_threshold_max: Self::default_makestep_threshold_max(),
