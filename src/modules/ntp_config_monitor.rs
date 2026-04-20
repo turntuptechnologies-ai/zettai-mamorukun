@@ -51,6 +51,14 @@
 //!     推奨上限を超える（`maxchange` は step される時刻量の上限と連続許容回数を定める
 //!     安全装置。未設定または offset が過大だと、`makestep` と組み合わさって攻撃者による
 //!     大幅な時刻偽装を許容する）
+//!   - `chrony.conf`: `maxchange <offset> <start> <max>` の第二引数 `<start>` が
+//!     推奨上限を超える（`<start>` は「何回目のクロック更新から offset 閾値判定を
+//!     開始するか」を意味し、大きな値は起動直後の初期クロック更新で step 量の
+//!     上限チェックを事実上無効化するため、chronyd 起動直後を狙った偽装時刻注入への
+//!     耐性が低下する）
+//!   - `chrony.conf`: `maxchange <offset> <start> <max>` の第三引数 `<max>` が `-1`
+//!     （上限なし）に設定されている（連続で閾値を超えるオフセットを受けても
+//!     chronyd が panic-exit せず、持続的な時刻偽装攻撃が素通りする）
 //!   - `chrony.conf`: `corrtimeratio` が推奨上限を超える（system clock の slew 補正に
 //!     割く時間比率が過大に緩められると周波数補正フェーズが長引き、時刻精度が劣化して
 //!     TLS 有効期限判定・Kerberos/TOTP 時刻窓・ログ整合性に悪影響を与える）
@@ -901,6 +909,10 @@ fn audit_chrony_maxjitter(content: &str, max_threshold: f64) -> Vec<AuditFinding
 /// - `chrony_maxchange_max_unlimited` (Warning) — 第三引数の `<max>` が `-1`（上限なし）に
 ///   設定されており、連続で閾値を超えるオフセットを受けても chronyd が panic-exit せず
 ///   持続的な時刻偽装攻撃を検知できない
+/// - `chrony_maxchange_start_too_large` (Warning) — 第二引数の `<start>` が
+///   `start_max_threshold` を超えており、起動直後の初期クロック更新で step 量上限の
+///   判定が事実上無効化される（攻撃者が chronyd 起動直後を狙って偽装時刻を注入する
+///   シナリオへの耐性が低下する）
 ///
 /// 0 以下・パースできない offset トークンは `offset_too_large` 側では無視する
 /// （`unset` 検知とは独立。`unset` は maxchange 行自体の有無で判定）。
@@ -908,6 +920,8 @@ fn audit_chrony_maxchange(
     content: &str,
     offset_max_threshold: f64,
     check_max_unlimited: bool,
+    check_start_too_large: bool,
+    start_max_threshold: u32,
 ) -> Vec<AuditFinding> {
     let mut findings = Vec::new();
 
@@ -951,6 +965,21 @@ fn audit_chrony_maxchange(
         });
     }
 
+    if check_start_too_large
+        && let Some(start_val) = parse_chrony_maxchange_start(content)
+        && start_val > 0
+        && start_val > i64::from(start_max_threshold)
+    {
+        findings.push(AuditFinding {
+            kind: "chrony_maxchange_start_too_large".to_string(),
+            severity: Severity::Warning,
+            message: format!(
+                "chrony.conf の `maxchange <offset> <start> <max>` の start（第二引数）が `{}` に設定されており、推奨上限（{} 回）を超えています（起動直後の初期クロック更新で step 量の上限チェックが事実上無効になり、chronyd 起動直後を狙った偽装時刻の注入に対する耐性が低下します。推奨: `maxchange 1000 1 2`）",
+                start_val, start_max_threshold
+            ),
+        });
+    }
+
     findings
 }
 
@@ -965,6 +994,25 @@ fn parse_chrony_maxchange_max(content: &str) -> Option<i64> {
         let mut tokens = value.split_whitespace();
         // 第1 (offset) と第2 (start) を読み飛ばす
         let _ = tokens.next();
+        let _ = tokens.next();
+        match tokens.next().and_then(|t| t.parse::<i64>().ok()) {
+            Some(n) => last = Some(n),
+            None => last = None,
+        }
+    }
+    last
+}
+
+/// `maxchange <offset> <start> <max>` 行の第二引数 `<start>` を整数として抽出する
+///
+/// 複数行ある場合は最後の行を採用する。トークンが 2 個未満または第二トークンが
+/// 整数としてパースできない場合は last を None へリセットする（非数値・欠損は
+/// 検知対象外）。
+fn parse_chrony_maxchange_start(content: &str) -> Option<i64> {
+    let mut last: Option<i64> = None;
+    for value in find_keyword_lines(content, "maxchange") {
+        let mut tokens = value.split_whitespace();
+        // 第1 (offset) を読み飛ばす
         let _ = tokens.next();
         match tokens.next().and_then(|t| t.parse::<i64>().ok()) {
             Some(n) => last = Some(n),
@@ -1530,6 +1578,8 @@ fn audit_by_kind(
                     content,
                     config.maxchange_offset_max_threshold,
                     config.check_chrony_maxchange_max_unlimited,
+                    config.check_chrony_maxchange_start_too_large,
+                    config.maxchange_start_max_threshold,
                 ));
             }
             if config.check_chrony_corrtimeratio {
@@ -4340,7 +4390,7 @@ mod tests {
     fn test_audit_chrony_maxchange_unset_detects() {
         // maxchange が設定されていない場合 → Warning
         let content = "pool foo\nmakestep 1.0 3\n";
-        let findings = audit_chrony_maxchange(content, 1000.0, false);
+        let findings = audit_chrony_maxchange(content, 1000.0, false, false, 10);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, "chrony_maxchange_unset");
         assert!(matches!(findings[0].severity, Severity::Warning));
@@ -4351,7 +4401,7 @@ mod tests {
     fn test_audit_chrony_maxchange_recommended_no_finding() {
         // 推奨値 `maxchange 1000 1 2` は 1000 秒上限以下なので検知しない
         let content = "maxchange 1000 1 2\n";
-        let findings = audit_chrony_maxchange(content, 1000.0, true);
+        let findings = audit_chrony_maxchange(content, 1000.0, true, false, 10);
         assert!(findings.is_empty());
     }
 
@@ -4359,7 +4409,7 @@ mod tests {
     fn test_audit_chrony_maxchange_small_offset_no_finding() {
         // 推奨値より小さな offset は正常扱い
         let content = "maxchange 500 1 2\n";
-        let findings = audit_chrony_maxchange(content, 1000.0, true);
+        let findings = audit_chrony_maxchange(content, 1000.0, true, false, 10);
         assert!(findings.is_empty());
     }
 
@@ -4367,7 +4417,7 @@ mod tests {
     fn test_audit_chrony_maxchange_offset_too_large_detects() {
         // 2000 秒 offset は 1000 秒上限を大幅超過 → Warning
         let content = "maxchange 2000 1 2\n";
-        let findings = audit_chrony_maxchange(content, 1000.0, true);
+        let findings = audit_chrony_maxchange(content, 1000.0, true, false, 10);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, "chrony_maxchange_offset_too_large");
         assert!(matches!(findings[0].severity, Severity::Warning));
@@ -4378,7 +4428,7 @@ mod tests {
     fn test_audit_chrony_maxchange_boundary_equal_no_finding() {
         // 境界値: 閾値ちょうどは検知しない（strict greater-than）
         let content = "maxchange 1000.0 1 2\n";
-        let findings = audit_chrony_maxchange(content, 1000.0, true);
+        let findings = audit_chrony_maxchange(content, 1000.0, true, false, 10);
         assert!(findings.is_empty());
     }
 
@@ -4387,7 +4437,7 @@ mod tests {
         // offset のパース不能トークンは offset_too_large 側では無視するが、
         // maxchange 行は存在するため unset は発火しない
         let content = "maxchange abc 1 2\n";
-        let findings = audit_chrony_maxchange(content, 1000.0, false);
+        let findings = audit_chrony_maxchange(content, 1000.0, false, false, 10);
         assert!(findings.is_empty());
     }
 
@@ -4396,7 +4446,7 @@ mod tests {
         // 0 以下は設定ミス扱いで offset_too_large の対象外。
         // maxchange 行自体は存在するため unset も発火しない
         let content = "maxchange 0 1 2\n";
-        let findings = audit_chrony_maxchange(content, 1000.0, true);
+        let findings = audit_chrony_maxchange(content, 1000.0, true, false, 10);
         assert!(findings.is_empty());
     }
 
@@ -4404,7 +4454,7 @@ mod tests {
     fn test_audit_chrony_maxchange_negative_no_finding() {
         // 負値は設定ミス扱いで offset_too_large の対象外
         let content = "maxchange -1 1 2\n";
-        let findings = audit_chrony_maxchange(content, 1000.0, true);
+        let findings = audit_chrony_maxchange(content, 1000.0, true, false, 10);
         assert!(findings.is_empty());
     }
 
@@ -4413,7 +4463,7 @@ mod tests {
         // server ディレクティブの inline トークンは top-level として認識されないため
         // maxchange 未設定扱い → chrony_maxchange_unset が発火
         let content = "server ntp.example.com maxchange 2000\n";
-        let findings = audit_chrony_maxchange(content, 1000.0, false);
+        let findings = audit_chrony_maxchange(content, 1000.0, false, false, 10);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, "chrony_maxchange_unset");
     }
@@ -4423,7 +4473,7 @@ mod tests {
         // 複数行ある場合は後者の値が採用される
         // check_max_unlimited=false で新ルールは抑止され、offset のみ検知
         let content = "maxchange 500 1 2\nmaxchange 5000 1 -1\n";
-        let findings = audit_chrony_maxchange(content, 1000.0, false);
+        let findings = audit_chrony_maxchange(content, 1000.0, false, false, 10);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, "chrony_maxchange_offset_too_large");
         assert!(findings[0].message.contains("5000"));
@@ -4433,7 +4483,7 @@ mod tests {
     fn test_audit_chrony_maxchange_comment_does_not_count() {
         // コメント行は未設定と同等に扱われる
         let content = "# maxchange 1000 1 2\n";
-        let findings = audit_chrony_maxchange(content, 1000.0, true);
+        let findings = audit_chrony_maxchange(content, 1000.0, true, false, 10);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, "chrony_maxchange_unset");
     }
@@ -4445,7 +4495,7 @@ mod tests {
     fn test_audit_chrony_maxchange_max_minus_one_detects() {
         // 第三引数 -1（上限なし）は chronyd が連続超過しても panic-exit しない
         let content = "maxchange 1000 1 -1\n";
-        let findings = audit_chrony_maxchange(content, 1000.0, true);
+        let findings = audit_chrony_maxchange(content, 1000.0, true, false, 10);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, "chrony_maxchange_max_unlimited");
         assert!(matches!(findings[0].severity, Severity::Warning));
@@ -4456,7 +4506,7 @@ mod tests {
     fn test_audit_chrony_maxchange_max_minus_five_detects() {
         // -1 以下（-5 など）も上限なし扱いとして検知する
         let content = "maxchange 1000 1 -5\n";
-        let findings = audit_chrony_maxchange(content, 1000.0, true);
+        let findings = audit_chrony_maxchange(content, 1000.0, true, false, 10);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, "chrony_maxchange_max_unlimited");
         assert!(findings[0].message.contains("-5"));
@@ -4466,7 +4516,7 @@ mod tests {
     fn test_audit_chrony_maxchange_max_positive_no_finding() {
         // 推奨値 2 は検知しない（1 以上は対象外）
         let content = "maxchange 1000 1 2\n";
-        let findings = audit_chrony_maxchange(content, 1000.0, true);
+        let findings = audit_chrony_maxchange(content, 1000.0, true, false, 10);
         assert!(findings.is_empty());
     }
 
@@ -4474,7 +4524,7 @@ mod tests {
     fn test_audit_chrony_maxchange_max_zero_no_finding() {
         // 0 は検知対象外（-1 以下のみ検知）
         let content = "maxchange 1000 1 0\n";
-        let findings = audit_chrony_maxchange(content, 1000.0, true);
+        let findings = audit_chrony_maxchange(content, 1000.0, true, false, 10);
         assert!(findings.is_empty());
     }
 
@@ -4482,7 +4532,7 @@ mod tests {
     fn test_audit_chrony_maxchange_max_non_numeric_no_finding() {
         // 非数値トークンは検知対象外
         let content = "maxchange 1000 1 abc\n";
-        let findings = audit_chrony_maxchange(content, 1000.0, true);
+        let findings = audit_chrony_maxchange(content, 1000.0, true, false, 10);
         assert!(findings.is_empty());
     }
 
@@ -4490,7 +4540,7 @@ mod tests {
     fn test_audit_chrony_maxchange_max_missing_no_finding() {
         // 第三引数が欠損している場合は検知対象外
         let content = "maxchange 1000 1\n";
-        let findings = audit_chrony_maxchange(content, 1000.0, true);
+        let findings = audit_chrony_maxchange(content, 1000.0, true, false, 10);
         assert!(findings.is_empty());
     }
 
@@ -4498,7 +4548,7 @@ mod tests {
     fn test_audit_chrony_maxchange_max_commented_no_finding() {
         // コメント行は未設定扱い → unset のみ発火し、新ルールは発火しない
         let content = "# maxchange 1000 1 -1\n";
-        let findings = audit_chrony_maxchange(content, 1000.0, true);
+        let findings = audit_chrony_maxchange(content, 1000.0, true, false, 10);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, "chrony_maxchange_unset");
     }
@@ -4507,7 +4557,7 @@ mod tests {
     fn test_audit_chrony_maxchange_max_multiple_last_wins_detects() {
         // 複数行で最後の行の max=-1 を検知。offset=5000 も閾値超過で両方発火
         let content = "maxchange 500 1 2\nmaxchange 5000 1 -1\n";
-        let findings = audit_chrony_maxchange(content, 1000.0, true);
+        let findings = audit_chrony_maxchange(content, 1000.0, true, false, 10);
         let kinds: Vec<&str> = findings.iter().map(|f| f.kind.as_str()).collect();
         assert!(kinds.contains(&"chrony_maxchange_offset_too_large"));
         assert!(kinds.contains(&"chrony_maxchange_max_unlimited"));
@@ -4518,7 +4568,7 @@ mod tests {
     fn test_audit_chrony_maxchange_max_offset_ok_only_max_fires() {
         // offset が閾値以下なら offset_too_large は発火せず、max=-1 のみ発火
         let content = "maxchange 1000 1 -1\n";
-        let findings = audit_chrony_maxchange(content, 1000.0, true);
+        let findings = audit_chrony_maxchange(content, 1000.0, true, false, 10);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, "chrony_maxchange_max_unlimited");
     }
@@ -4527,7 +4577,7 @@ mod tests {
     fn test_audit_chrony_maxchange_max_both_fire_when_offset_too_large_and_max_unlimited() {
         // offset が閾値超過かつ max=-1 の場合は両方発火
         let content = "maxchange 2000 1 -1\n";
-        let findings = audit_chrony_maxchange(content, 1000.0, true);
+        let findings = audit_chrony_maxchange(content, 1000.0, true, false, 10);
         let kinds: Vec<&str> = findings.iter().map(|f| f.kind.as_str()).collect();
         assert!(kinds.contains(&"chrony_maxchange_offset_too_large"));
         assert!(kinds.contains(&"chrony_maxchange_max_unlimited"));
@@ -4538,8 +4588,171 @@ mod tests {
     fn test_audit_chrony_maxchange_max_flag_suppresses() {
         // フラグを false にすると新ルールは抑止される
         let content = "maxchange 1000 1 -1\n";
-        let findings = audit_chrony_maxchange(content, 1000.0, false);
+        let findings = audit_chrony_maxchange(content, 1000.0, false, false, 10);
         assert!(findings.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // audit_chrony_maxchange — chrony_maxchange_start_too_large
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_chrony_maxchange_start_recommended_no_finding() {
+        // 推奨値 start=1 は閾値以下なので検知しない
+        let content = "maxchange 1000 1 2\n";
+        let findings = audit_chrony_maxchange(content, 1000.0, true, true, 10);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxchange_start_below_threshold_no_finding() {
+        // 閾値 10 で start=5 は未発火
+        let content = "maxchange 1000 5 2\n";
+        let findings = audit_chrony_maxchange(content, 1000.0, true, true, 10);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxchange_start_boundary_equal_no_finding() {
+        // 境界値: 閾値ちょうどは検知しない（strict greater-than）
+        let content = "maxchange 1000 10 2\n";
+        let findings = audit_chrony_maxchange(content, 1000.0, true, true, 10);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxchange_start_just_above_threshold_detects() {
+        // 閾値 10 で start=11 は Warning を発火
+        let content = "maxchange 1000 11 2\n";
+        let findings = audit_chrony_maxchange(content, 1000.0, true, true, 10);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_maxchange_start_too_large");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+        assert!(findings[0].message.contains("11"));
+    }
+
+    #[test]
+    fn test_audit_chrony_maxchange_start_large_value_detects() {
+        // 典型的な緩和設定である start=100 も検知
+        let content = "maxchange 1000 100 2\n";
+        let findings = audit_chrony_maxchange(content, 1000.0, true, true, 10);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_maxchange_start_too_large");
+        assert!(findings[0].message.contains("100"));
+    }
+
+    #[test]
+    fn test_audit_chrony_maxchange_start_zero_no_finding() {
+        // 0 は chrony の既定扱いとして検知対象外
+        let content = "maxchange 1000 0 2\n";
+        let findings = audit_chrony_maxchange(content, 1000.0, true, true, 10);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxchange_start_negative_no_finding() {
+        // 負値は設定ミス扱いで検知対象外
+        let content = "maxchange 1000 -5 2\n";
+        let findings = audit_chrony_maxchange(content, 1000.0, true, true, 10);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxchange_start_non_numeric_no_finding() {
+        // 非数値トークンは検知対象外
+        let content = "maxchange 1000 abc 2\n";
+        let findings = audit_chrony_maxchange(content, 1000.0, true, true, 10);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxchange_start_missing_no_finding() {
+        // 第二引数が欠損している場合は検知対象外
+        let content = "maxchange 1000\n";
+        let findings = audit_chrony_maxchange(content, 1000.0, true, true, 10);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxchange_start_commented_no_finding() {
+        // コメント行は未設定扱い → unset のみ発火し、start ルールは発火しない
+        let content = "# maxchange 1000 100 2\n";
+        let findings = audit_chrony_maxchange(content, 1000.0, true, true, 10);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_maxchange_unset");
+    }
+
+    #[test]
+    fn test_audit_chrony_maxchange_start_multiple_last_wins_detects() {
+        // 複数行で最後の行の start=50 を検知
+        let content = "maxchange 500 1 2\nmaxchange 1000 50 2\n";
+        let findings = audit_chrony_maxchange(content, 1000.0, true, true, 10);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_maxchange_start_too_large");
+        assert!(findings[0].message.contains("50"));
+    }
+
+    #[test]
+    fn test_audit_chrony_maxchange_start_flag_suppresses() {
+        // フラグを false にすると start ルールは抑止される
+        let content = "maxchange 1000 100 2\n";
+        let findings = audit_chrony_maxchange(content, 1000.0, true, false, 10);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxchange_start_all_rules_fire() {
+        // offset 超過 + max=-1 + start 過大の 3 つが同時に発火
+        let content = "maxchange 2000 100 -1\n";
+        let findings = audit_chrony_maxchange(content, 1000.0, true, true, 10);
+        let kinds: Vec<&str> = findings.iter().map(|f| f.kind.as_str()).collect();
+        assert!(kinds.contains(&"chrony_maxchange_offset_too_large"));
+        assert!(kinds.contains(&"chrony_maxchange_max_unlimited"));
+        assert!(kinds.contains(&"chrony_maxchange_start_too_large"));
+        assert_eq!(findings.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_chrony_maxchange_start_basic() {
+        // 基本的なパース
+        assert_eq!(
+            parse_chrony_maxchange_start("maxchange 1000 1 2\n"),
+            Some(1)
+        );
+        assert_eq!(
+            parse_chrony_maxchange_start("maxchange 1000 100 2\n"),
+            Some(100)
+        );
+        assert_eq!(
+            parse_chrony_maxchange_start("maxchange 1000 -5 2\n"),
+            Some(-5)
+        );
+    }
+
+    #[test]
+    fn test_parse_chrony_maxchange_start_missing_returns_none() {
+        // 第二引数が欠損している場合は None
+        assert_eq!(parse_chrony_maxchange_start("maxchange 1000\n"), None);
+        assert_eq!(parse_chrony_maxchange_start("maxchange\n"), None);
+    }
+
+    #[test]
+    fn test_parse_chrony_maxchange_start_non_numeric_returns_none() {
+        // 非数値は None
+        assert_eq!(parse_chrony_maxchange_start("maxchange 1000 abc 2\n"), None);
+    }
+
+    #[test]
+    fn test_parse_chrony_maxchange_start_multiple_last_wins() {
+        // 複数行で最後の行が採用される
+        assert_eq!(
+            parse_chrony_maxchange_start("maxchange 500 1 2\nmaxchange 1000 50 2\n"),
+            Some(50)
+        );
+        // 最後の行が非数値だと None にリセットされる
+        assert_eq!(
+            parse_chrony_maxchange_start("maxchange 500 50 2\nmaxchange 1000 abc 2\n"),
+            None
+        );
     }
 
     // ------------------------------------------------------------------
@@ -5102,6 +5315,56 @@ mod tests {
                 .iter()
                 .all(|f| f.kind != "chrony_maxchange_max_unlimited"),
             "disabling check_chrony_maxchange_max_unlimited suppresses the finding"
+        );
+    }
+
+    #[test]
+    fn test_audit_by_kind_maxchange_start_too_large_flag_toggle() {
+        // 他の新規ルールを発火させない最小 chrony 設定に start=100 を指定
+        let content =
+            "pool foo\nmakestep 1.0 3\nleapsectz right/UTC\nrtcsync\nmaxchange 1000 100 2\n";
+        let path = Path::new("/etc/chrony/chrony.conf");
+
+        let mut config = NtpConfigMonitorConfig {
+            check_config_owner: false,
+            check_keys_file_owner: false,
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "chrony_maxchange_start_too_large"),
+            "start=100 finding should fire by default"
+        );
+
+        config.check_chrony_maxchange_start_too_large = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_maxchange_start_too_large"),
+            "disabling check_chrony_maxchange_start_too_large suppresses the finding"
+        );
+    }
+
+    #[test]
+    fn test_audit_by_kind_ntp_does_not_trigger_chrony_maxchange_start() {
+        // NtpConfigKind::Ntp アームでは start 監査もディスパッチされない
+        let content =
+            "server 0.pool.ntp.org iburst\nrestrict default ignore\ndriftfile /var/ntp.drift\n";
+        let path = Path::new("/etc/ntp.conf");
+        let config = NtpConfigMonitorConfig {
+            check_keys_file_owner: false,
+            check_config_owner: false,
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Ntp, content, &config, path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_maxchange_start_too_large"),
+            "ntp.conf path should not dispatch chrony-specific maxchange start audit"
         );
     }
 

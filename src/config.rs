@@ -6249,6 +6249,14 @@ pub struct NtpConfigMonitorConfig {
     #[serde(default = "NtpConfigMonitorConfig::default_true")]
     pub check_chrony_maxchange_max_unlimited: bool,
 
+    /// chrony の `maxchange <offset> <start> <max>` の第二引数 `<start>` が過大な
+    /// 場合を検知する。`<start>` は「何回目のクロック更新から offset 閾値の判定を
+    /// 開始するか」を意味し、大きな値を指定すると起動直後の初期クロック更新で
+    /// step 量の上限チェックが事実上無効になる。攻撃者が chronyd 起動直後の
+    /// タイミングを狙って偽装時刻を注入するシナリオへの耐性が下がる
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_chrony_maxchange_start_too_large: bool,
+
     /// chrony の `corrtimeratio` が許容上限を超えている場合を検知
     /// （slew 補正に割く時間比率の過大な緩和は周波数補正フェーズの長期化を招き、
     /// 時刻精度が劣化して TLS 有効期限判定・Kerberos/TOTP 時刻窓に影響する）
@@ -6293,6 +6301,13 @@ pub struct NtpConfigMonitorConfig {
     /// 実質的に無制限となり、攻撃者による大幅な時刻偽装を許容してしまう
     #[serde(default = "NtpConfigMonitorConfig::default_maxchange_offset_max_threshold")]
     pub maxchange_offset_max_threshold: f64,
+
+    /// `maxchange` の start 許容上限（回、既定 10）
+    /// 推奨は `maxchange 1000 1 2` 相当の `<start>=1`。10 を超える値は起動直後の
+    /// 初期クロック更新で step 量の上限チェックが事実上無効になるため、
+    /// 偽装時刻注入攻撃に対する安全装置を無効化する緩和設定と判定する
+    #[serde(default = "NtpConfigMonitorConfig::default_maxchange_start_max_threshold")]
+    pub maxchange_start_max_threshold: u32,
 
     /// `corrtimeratio` 監査の許容上限（無次元比率、既定 10.0）
     /// chrony のデフォルトは 3.0。値を大きくすると slew 補正フェーズが長引き時刻精度が
@@ -6401,6 +6416,10 @@ impl NtpConfigMonitorConfig {
         1000.0
     }
 
+    fn default_maxchange_start_max_threshold() -> u32 {
+        10
+    }
+
     fn default_corrtimeratio_max_threshold() -> f64 {
         10.0
     }
@@ -6452,6 +6471,7 @@ impl Default for NtpConfigMonitorConfig {
             check_chrony_makestep_threshold: true,
             check_chrony_maxchange: true,
             check_chrony_maxchange_max_unlimited: true,
+            check_chrony_maxchange_start_too_large: true,
             check_chrony_corrtimeratio: true,
             check_chrony_maxclockerror: true,
             check_chrony_logchange: true,
@@ -6460,6 +6480,7 @@ impl Default for NtpConfigMonitorConfig {
             maxjitter_max_threshold: Self::default_maxjitter_max_threshold(),
             makestep_threshold_max: Self::default_makestep_threshold_max(),
             maxchange_offset_max_threshold: Self::default_maxchange_offset_max_threshold(),
+            maxchange_start_max_threshold: Self::default_maxchange_start_max_threshold(),
             corrtimeratio_max_threshold: Self::default_corrtimeratio_max_threshold(),
             maxclockerror_max_threshold: Self::default_maxclockerror_max_threshold(),
             logchange_max_threshold: Self::default_logchange_max_threshold(),
