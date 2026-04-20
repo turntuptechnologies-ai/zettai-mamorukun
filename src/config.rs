@@ -6229,6 +6229,13 @@ pub struct NtpConfigMonitorConfig {
     #[serde(default = "NtpConfigMonitorConfig::default_true")]
     pub check_chrony_maxjitter: bool,
 
+    /// chrony の `makestep <threshold> <limit>` の threshold が過大な場合を検知
+    /// （step 許容閾値が緩すぎると、攻撃者による NTP オフセット注入でシステム時刻が
+    /// 大きく跳躍する。ログ跳躍・証明書有効期限判定の回避・Kerberos / TOTP の時刻窓
+    /// 操作のリスクが高まる）
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_chrony_makestep_threshold: bool,
+
     /// `maxdistance` の許容上限（秒、既定 5.0）
     /// chrony のデフォルトは 3.0 秒なので 5.0 秒超は明示的な緩和設定と判定する
     #[serde(default = "NtpConfigMonitorConfig::default_maxdistance_max_threshold")]
@@ -6238,6 +6245,11 @@ pub struct NtpConfigMonitorConfig {
     /// chrony のデフォルトは 1.0 秒
     #[serde(default = "NtpConfigMonitorConfig::default_maxjitter_max_threshold")]
     pub maxjitter_max_threshold: f64,
+
+    /// `makestep` の threshold 許容上限（秒、既定 100.0）
+    /// 推奨は `makestep 1.0 3` のような小さな閾値であり、100 秒超は明示的な緩和設定
+    #[serde(default = "NtpConfigMonitorConfig::default_makestep_threshold_max")]
+    pub makestep_threshold_max: f64,
 
     /// `maxsamples_too_low` 判定の下限閾値（既定: 4）
     /// chrony の NTP フィルタアルゴリズムは通常 4 以上のサンプルで安定動作する
@@ -6320,6 +6332,10 @@ impl NtpConfigMonitorConfig {
         2.0
     }
 
+    fn default_makestep_threshold_max() -> f64 {
+        100.0
+    }
+
     fn default_inotify_debounce_ms() -> u64 {
         500
     }
@@ -6356,8 +6372,10 @@ impl Default for NtpConfigMonitorConfig {
             check_chrony_rtcfile: true,
             check_chrony_maxdistance: true,
             check_chrony_maxjitter: true,
+            check_chrony_makestep_threshold: true,
             maxdistance_max_threshold: Self::default_maxdistance_max_threshold(),
             maxjitter_max_threshold: Self::default_maxjitter_max_threshold(),
+            makestep_threshold_max: Self::default_makestep_threshold_max(),
             maxsamples_min_threshold: Self::default_maxsamples_min_threshold(),
             allowed_owner_uids: Self::default_allowed_uids(),
             allowed_owner_gids: Self::default_allowed_gids(),

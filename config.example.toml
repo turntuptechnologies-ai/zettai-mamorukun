@@ -1545,10 +1545,17 @@ check_chrony_maxdistance = true
 # jitter の許容値が緩すぎるとジッターの大きい時刻ソースが候補に残り、
 # 時刻同期の安定性と偽装耐性が低下する
 check_chrony_maxjitter = true
+# chrony の `makestep <threshold> <limit>` の threshold が推奨上限を超える場合を検知（Warning）
+# step 許容閾値が緩すぎると、攻撃者による NTP オフセット注入でシステム時刻が大きく跳躍し、
+# ログ跳躍・証明書有効期限判定の回避・Kerberos / TOTP の時刻窓操作のリスクが高まる
+check_chrony_makestep_threshold = true
 # `maxdistance` 監査の許容上限（秒、既定 5.0）。chrony のデフォルトは 3.0 秒
 maxdistance_max_threshold = 5.0
 # `maxjitter` 監査の許容上限（秒、既定 2.0）。chrony のデフォルトは 1.0 秒
 maxjitter_max_threshold = 2.0
+# `makestep` threshold 監査の許容上限（秒、既定 100.0）
+# 推奨は `makestep 1.0 3` のような小さな閾値であり、100 秒超は明示的な緩和設定と判定する
+makestep_threshold_max = 100.0
 # `maxsamples_too_low` 判定の下限閾値（既定: 4）
 # chrony の NTP フィルタアルゴリズムは通常 4 以上のサンプルで安定動作する
 # 0 に設定すると maxsamples 過少の検知を事実上無効化できる
