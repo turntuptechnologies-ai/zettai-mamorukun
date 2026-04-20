@@ -1554,6 +1554,14 @@ check_chrony_makestep_threshold = true
 # 未設定だと `makestep` と組み合わさって攻撃者が任意の大きなオフセットを注入可能。
 # 推奨値は `maxchange 1000 1 2`。
 check_chrony_maxchange = true
+# chrony の `corrtimeratio` が推奨上限を超えている場合を検知（Warning）
+# slew 補正に割く時間比率が過大に緩められると周波数補正フェーズが長引き、時刻精度が劣化して
+# TLS 有効期限判定・Kerberos/TOTP 時刻窓・ログ整合性に悪影響を与える
+check_chrony_corrtimeratio = true
+# chrony の `maxclockerror` が推奨上限を超えている場合を検知（Warning）
+# ローカルクロックの誤差許容が過大だと外部時刻ソースとの差分を「自クロックのドリフト」と
+# 誤認しやすくなり、偽装 NTP サーバへの追従が緩慢になって中間者攻撃の緩衝材として働く
+check_chrony_maxclockerror = true
 # `maxdistance` 監査の許容上限（秒、既定 5.0）。chrony のデフォルトは 3.0 秒
 maxdistance_max_threshold = 5.0
 # `maxjitter` 監査の許容上限（秒、既定 2.0）。chrony のデフォルトは 1.0 秒
@@ -1565,6 +1573,14 @@ makestep_threshold_max = 100.0
 # 推奨は `maxchange 1000 1 2` 相当。1000 秒を超える offset は step 量上限が
 # 実質的に無制限となり、攻撃者による大幅な時刻偽装を許容してしまう
 maxchange_offset_max_threshold = 1000.0
+# `corrtimeratio` 監査の許容上限（無次元比率、既定 10.0）
+# chrony のデフォルトは 3.0。値を大きくすると slew 補正フェーズが長引き時刻精度が
+# 劣化するため、10.0 を超える値は明示的な緩和設定と判定する
+corrtimeratio_max_threshold = 10.0
+# `maxclockerror` 監査の許容上限（ppm、既定 10.0）
+# chrony のデフォルトは 1.0 ppm。通常運用で 10 ppm を超える値を設定する必要はなく、
+# 超過値は偽装 NTP サーバへの追従を緩慢にする緩衝材として悪用されうる
+maxclockerror_max_threshold = 10.0
 # `maxsamples_too_low` 判定の下限閾値（既定: 4）
 # chrony の NTP フィルタアルゴリズムは通常 4 以上のサンプルで安定動作する
 # 0 に設定すると maxsamples 過少の検知を事実上無効化できる

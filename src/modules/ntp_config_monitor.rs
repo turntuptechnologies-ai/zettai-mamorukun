@@ -51,6 +51,13 @@
 //!     推奨上限を超える（`maxchange` は step される時刻量の上限と連続許容回数を定める
 //!     安全装置。未設定または offset が過大だと、`makestep` と組み合わさって攻撃者による
 //!     大幅な時刻偽装を許容する）
+//!   - `chrony.conf`: `corrtimeratio` が推奨上限を超える（system clock の slew 補正に
+//!     割く時間比率が過大に緩められると周波数補正フェーズが長引き、時刻精度が劣化して
+//!     TLS 有効期限判定・Kerberos/TOTP 時刻窓・ログ整合性に悪影響を与える）
+//!   - `chrony.conf`: `maxclockerror` が推奨上限を超える（ローカルクロックの最大推定
+//!     誤差率 ppm が過大に緩められると、外部時刻ソースとの差分を「ローカルクロックの
+//!     ドリフトで説明できる」と判定しやすくなり、偽装 NTP サーバへの追従が緩慢になって
+//!     中間者攻撃の緩衝材として働く）
 //! - **ドロップイン監視** — `chrony.conf` 内の `confdir` / `sourcedir` / `include`
 //!   ディレクティブで参照される追加設定ファイル（例: `/etc/chrony/conf.d/*.conf`、
 //!   `/etc/chrony/sources.d/*.sources`）も監視対象に加え、親ディレクトリも inotify
@@ -903,6 +910,66 @@ fn audit_chrony_maxchange(content: &str, offset_max_threshold: f64) -> Vec<Audit
     findings
 }
 
+/// chrony.conf の `corrtimeratio` が許容上限を超えている場合を監査する
+///
+/// `corrtimeratio` は chrony が system clock を slew（徐々に補正）する際、
+/// 補正に割く時間と通常稼働時間の最大比率を指定するディレクティブ。chrony の
+/// デフォルトは 3.0。値を大きくすると補正フェーズが長引き、時刻精度が目に見えて
+/// 劣化する。運用ミスや意図的な緩和で極端に大きな値を設定されていると、
+/// step を避ける slew モードであっても時刻偽装や時刻ずれに対する追従が鈍化し、
+/// TLS 有効期限判定・Kerberos/TOTP 時刻窓・ログ整合性に悪影響を与える。
+///
+/// `max_threshold`（無次元比率）を超える値を Warning として報告する。
+/// 0 以下・パースできないトークンは無視する（未設定は `corrtimeratio` 行が
+/// 欠如しているだけで chrony デフォルトの 3.0 として動作するため検知対象外）。
+fn audit_chrony_corrtimeratio(content: &str, max_threshold: f64) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    if let Some(v) = parse_chrony_top_level_f64(content, "corrtimeratio")
+        && v > 0.0
+        && v > max_threshold
+    {
+        findings.push(AuditFinding {
+            kind: "chrony_corrtimeratio_too_large".to_string(),
+            severity: Severity::Warning,
+            message: format!(
+                "chrony.conf の `corrtimeratio {}` は推奨上限（{}）を超えています（slew 補正に割く時間比率が過大に緩められると周波数補正フェーズが長引き、時刻精度が劣化して TLS 有効期限判定・Kerberos/TOTP 時刻窓・ログ整合性に悪影響を与えます）",
+                v, max_threshold
+            ),
+        });
+    }
+    findings
+}
+
+/// chrony.conf の `maxclockerror` が許容上限を超えている場合を監査する
+///
+/// `maxclockerror` はローカルクロックの最大推定誤差率（ppm）を指定するディレクティブ。
+/// chrony のデフォルトは 1.0 ppm。値を大きくすると、chrony が外部時刻ソースとの差分を
+/// 「ローカルクロックのドリフトで説明できる」と判定しやすくなり、外部時刻ソースへの
+/// 追従が緩慢になる。攻撃者が偽装 NTP サーバや中間者攻撃で時刻を注入した際、
+/// 過大な `maxclockerror` は偽装を「自クロックのドリフト」と誤認させる緩衝材として
+/// 作用してしまう。通常運用で 10 ppm を超える値を設定する必要はない。
+///
+/// `max_threshold`（ppm）を超える値を Warning として報告する。
+/// 0 以下・パースできないトークンは無視する（未設定は chrony デフォルトの 1.0 ppm で
+/// 動作するため検知対象外）。
+fn audit_chrony_maxclockerror(content: &str, max_threshold: f64) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    if let Some(v) = parse_chrony_top_level_f64(content, "maxclockerror")
+        && v > 0.0
+        && v > max_threshold
+    {
+        findings.push(AuditFinding {
+            kind: "chrony_maxclockerror_too_large".to_string(),
+            severity: Severity::Warning,
+            message: format!(
+                "chrony.conf の `maxclockerror {}` は推奨上限（{} ppm）を超えています（ローカルクロックの誤差許容が過大だと、外部時刻ソースとの差分を「自クロックのドリフト」と誤認しやすくなり、偽装 NTP サーバへの追従が緩慢になって中間者攻撃の緩衝材として働きます）",
+                v, max_threshold
+            ),
+        });
+    }
+    findings
+}
+
 /// chrony.conf の `makestep <threshold> <limit>` の第一引数（threshold）が過大な場合を監査する
 ///
 /// `makestep` はオフセットが `threshold` 秒を超えた場合に限りクロックを step（瞬時修正）
@@ -1340,6 +1407,18 @@ fn audit_by_kind(
                 findings.extend(audit_chrony_maxchange(
                     content,
                     config.maxchange_offset_max_threshold,
+                ));
+            }
+            if config.check_chrony_corrtimeratio {
+                findings.extend(audit_chrony_corrtimeratio(
+                    content,
+                    config.corrtimeratio_max_threshold,
+                ));
+            }
+            if config.check_chrony_maxclockerror {
+                findings.extend(audit_chrony_maxclockerror(
+                    content,
+                    config.maxclockerror_max_threshold,
                 ));
             }
         }
@@ -4224,6 +4303,254 @@ mod tests {
         let findings = audit_chrony_maxchange(content, 1000.0);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, "chrony_maxchange_unset");
+    }
+
+    // ------------------------------------------------------------------
+    // audit_chrony_corrtimeratio
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_chrony_corrtimeratio_unset_no_finding() {
+        // 未設定は chrony デフォルト値で動作するため検知対象外
+        let content = "pool foo\nmakestep 1.0 3\n";
+        let findings = audit_chrony_corrtimeratio(content, 10.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_corrtimeratio_default_no_finding() {
+        // chrony デフォルト値 3.0 は 10.0 上限以下なので検知しない
+        let content = "corrtimeratio 3.0\n";
+        let findings = audit_chrony_corrtimeratio(content, 10.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_corrtimeratio_too_large_detects() {
+        // 20 は 10 上限を超過 → Warning
+        let content = "corrtimeratio 20\n";
+        let findings = audit_chrony_corrtimeratio(content, 10.0);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_corrtimeratio_too_large");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+        assert!(findings[0].message.contains("20"));
+    }
+
+    #[test]
+    fn test_audit_chrony_corrtimeratio_boundary_equal_no_finding() {
+        // 境界値: 閾値ちょうどは検知しない（strict greater-than）
+        let content = "corrtimeratio 10.0\n";
+        let findings = audit_chrony_corrtimeratio(content, 10.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_corrtimeratio_non_numeric_no_finding() {
+        // パース不能トークンは無視
+        let content = "corrtimeratio abc\n";
+        let findings = audit_chrony_corrtimeratio(content, 10.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_corrtimeratio_zero_no_finding() {
+        // 0 以下は設定ミス扱いで検知対象外
+        let content = "corrtimeratio 0\n";
+        let findings = audit_chrony_corrtimeratio(content, 10.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_corrtimeratio_negative_no_finding() {
+        let content = "corrtimeratio -5\n";
+        let findings = audit_chrony_corrtimeratio(content, 10.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_corrtimeratio_inline_option_ignored() {
+        // server ディレクティブの inline トークンは top-level として認識されない
+        let content = "server ntp.example.com corrtimeratio 100\n";
+        let findings = audit_chrony_corrtimeratio(content, 10.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_corrtimeratio_multiple_last_wins() {
+        // 複数行ある場合は後者の値が採用される
+        let content = "corrtimeratio 3.0\ncorrtimeratio 50\n";
+        let findings = audit_chrony_corrtimeratio(content, 10.0);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_corrtimeratio_too_large");
+        assert!(findings[0].message.contains("50"));
+    }
+
+    #[test]
+    fn test_audit_chrony_corrtimeratio_comment_does_not_count() {
+        // コメント行は未設定と同等
+        let content = "# corrtimeratio 100\n";
+        let findings = audit_chrony_corrtimeratio(content, 10.0);
+        assert!(findings.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // audit_chrony_maxclockerror
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_chrony_maxclockerror_unset_no_finding() {
+        // 未設定は chrony デフォルト 1.0 ppm で動作するため検知対象外
+        let content = "pool foo\nmakestep 1.0 3\n";
+        let findings = audit_chrony_maxclockerror(content, 10.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxclockerror_default_no_finding() {
+        // chrony デフォルト値 1.0 ppm は 10.0 上限以下なので検知しない
+        let content = "maxclockerror 1.0\n";
+        let findings = audit_chrony_maxclockerror(content, 10.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxclockerror_too_large_detects() {
+        // 100 ppm は 10 ppm 上限を超過 → Warning
+        let content = "maxclockerror 100\n";
+        let findings = audit_chrony_maxclockerror(content, 10.0);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_maxclockerror_too_large");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+        assert!(findings[0].message.contains("100"));
+    }
+
+    #[test]
+    fn test_audit_chrony_maxclockerror_boundary_equal_no_finding() {
+        let content = "maxclockerror 10.0\n";
+        let findings = audit_chrony_maxclockerror(content, 10.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxclockerror_non_numeric_no_finding() {
+        let content = "maxclockerror abc\n";
+        let findings = audit_chrony_maxclockerror(content, 10.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxclockerror_zero_no_finding() {
+        let content = "maxclockerror 0\n";
+        let findings = audit_chrony_maxclockerror(content, 10.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxclockerror_negative_no_finding() {
+        let content = "maxclockerror -1\n";
+        let findings = audit_chrony_maxclockerror(content, 10.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxclockerror_inline_option_ignored() {
+        let content = "server ntp.example.com maxclockerror 500\n";
+        let findings = audit_chrony_maxclockerror(content, 10.0);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_maxclockerror_multiple_last_wins() {
+        let content = "maxclockerror 1.0\nmaxclockerror 500\n";
+        let findings = audit_chrony_maxclockerror(content, 10.0);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_maxclockerror_too_large");
+        assert!(findings[0].message.contains("500"));
+    }
+
+    #[test]
+    fn test_audit_chrony_maxclockerror_comment_does_not_count() {
+        let content = "# maxclockerror 500\n";
+        let findings = audit_chrony_maxclockerror(content, 10.0);
+        assert!(findings.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // audit_by_kind: corrtimeratio / maxclockerror フラグの有効/無効切替
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_by_kind_corrtimeratio_flag_toggle() {
+        // 新規ルールだけを発火させる最小 chrony 設定
+        let content = "pool foo\nmakestep 1.0 3\nleapsectz right/UTC\nrtcsync\nmaxchange 1000 1 2\ncorrtimeratio 50\n";
+        let path = Path::new("/etc/chrony/chrony.conf");
+
+        let mut config = NtpConfigMonitorConfig {
+            check_config_owner: false,
+            check_keys_file_owner: false,
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "chrony_corrtimeratio_too_large"),
+            "corrtimeratio audit should fire by default when above threshold"
+        );
+
+        config.check_chrony_corrtimeratio = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_corrtimeratio_too_large"),
+            "disabling check_chrony_corrtimeratio suppresses the finding"
+        );
+    }
+
+    #[test]
+    fn test_audit_by_kind_maxclockerror_flag_toggle() {
+        let content = "pool foo\nmakestep 1.0 3\nleapsectz right/UTC\nrtcsync\nmaxchange 1000 1 2\nmaxclockerror 500\n";
+        let path = Path::new("/etc/chrony/chrony.conf");
+
+        let mut config = NtpConfigMonitorConfig {
+            check_config_owner: false,
+            check_keys_file_owner: false,
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "chrony_maxclockerror_too_large"),
+            "maxclockerror audit should fire by default when above threshold"
+        );
+
+        config.check_chrony_maxclockerror = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_maxclockerror_too_large"),
+            "disabling check_chrony_maxclockerror suppresses the finding"
+        );
+    }
+
+    #[test]
+    fn test_audit_by_kind_ntp_does_not_trigger_chrony_corrtimeratio_or_maxclockerror() {
+        // NtpConfigKind::Ntp アームでは chrony 専用の両監査はディスパッチされない
+        let content = "server 0.pool.ntp.org iburst\nrestrict default ignore\ndriftfile /var/ntp.drift\ncorrtimeratio 100\nmaxclockerror 500\n";
+        let path = Path::new("/etc/ntp.conf");
+        let config = NtpConfigMonitorConfig {
+            check_keys_file_owner: false,
+            check_config_owner: false,
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Ntp, content, &config, path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_corrtimeratio_too_large"
+                    && f.kind != "chrony_maxclockerror_too_large"),
+            "ntp.conf path should not dispatch chrony-specific audits"
+        );
     }
 
     // ------------------------------------------------------------------
