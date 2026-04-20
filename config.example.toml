@@ -1558,6 +1558,11 @@ check_chrony_maxchange = true
 # `<max>` が -1 に設定されていると、連続で閾値を超えるオフセットを受けても chronyd が
 # panic-exit しないため、持続的な時刻偽装攻撃を検知できなくなる。
 check_chrony_maxchange_max_unlimited = true
+# chrony の `maxchange <offset> <start> <max>` の第二引数 `<start>` が推奨上限を超える場合を検知（Warning）
+# `<start>` は「何回目のクロック更新から offset 閾値判定を開始するか」を意味し、
+# 大きな値を指定すると起動直後の初期クロック更新で step 量の上限チェックが事実上無効になる。
+# chronyd 起動直後を狙った偽装時刻の注入に対する耐性が低下する。
+check_chrony_maxchange_start_too_large = true
 # chrony の `corrtimeratio` が推奨上限を超えている場合を検知（Warning）
 # slew 補正に割く時間比率が過大に緩められると周波数補正フェーズが長引き、時刻精度が劣化して
 # TLS 有効期限判定・Kerberos/TOTP 時刻窓・ログ整合性に悪影響を与える
@@ -1585,6 +1590,11 @@ makestep_threshold_max = 100.0
 # 推奨は `maxchange 1000 1 2` 相当。1000 秒を超える offset は step 量上限が
 # 実質的に無制限となり、攻撃者による大幅な時刻偽装を許容してしまう
 maxchange_offset_max_threshold = 1000.0
+# `maxchange` start 監査の許容上限（回、既定 10）
+# 推奨は `maxchange 1000 1 2` 相当の `<start>=1`。10 を超える値は起動直後の初期
+# クロック更新で step 量の上限チェックが事実上無効になるため、偽装時刻注入攻撃に
+# 対する安全装置を無効化する緩和設定と判定する
+maxchange_start_max_threshold = 10
 # `corrtimeratio` 監査の許容上限（無次元比率、既定 10.0）
 # chrony のデフォルトは 3.0。値を大きくすると slew 補正フェーズが長引き時刻精度が
 # 劣化するため、10.0 を超える値は明示的な緩和設定と判定する
