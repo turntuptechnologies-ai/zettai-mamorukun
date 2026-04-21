@@ -85,6 +85,12 @@
 //!     パス**そのもの**が symlink であることを別 kind (`chrony_logdir_is_symlink`) で
 //!     報告する。攻撃者が symlink を差し替えることでログ出力先を任意ディレクトリに
 //!     誘導し、監査ログ改竄・フォレンジック妨害の足場とする攻撃を検知する）
+//!   - `chrony.conf`: `logdir` が指すパスの**親コンポーネント（ancestor）** が
+//!     シンボリックリンクである（`chrony_logdir_is_symlink` が最終コンポーネント自身の
+//!     symlink のみ検知するのに対し、本監査は途中の親ディレクトリ（例: `logdir
+//!     /var/log/chrony` における `/var/log`）が symlink に差し替えられているケースを
+//!     `chrony_logdir_ancestor_is_symlink` kind で報告する。中間パスを経由したログ出力先
+//!     誘導攻撃の足場を塞ぐ）
 //! - **ドロップイン監視** — `chrony.conf` 内の `confdir` / `sourcedir` / `include`
 //!   ディレクティブで参照される追加設定ファイル（例: `/etc/chrony/conf.d/*.conf`、
 //!   `/etc/chrony/sources.d/*.sources`）も監視対象に加え、親ディレクトリも inotify
@@ -1363,6 +1369,89 @@ fn audit_chrony_logdir_symlink(content: &str, config_path: &Path) -> Vec<AuditFi
     findings
 }
 
+/// chrony.conf の `logdir` ディレクティブで指定されたパスの**親コンポーネント（ancestor）**
+/// がシンボリックリンクである場合を監査する
+///
+/// `audit_chrony_logdir_symlink` は `logdir` の**最終コンポーネント自身**が symlink である
+/// 場合のみを検知する。これに対し本関数は、最終コンポーネントは通常ディレクトリであっても、
+/// 途中の親ディレクトリが symlink に差し替えられているケースを補完的に検知する。
+/// 例: `logdir /var/log/chrony` と設定されていて `/var/log/chrony` 自体は通常ディレクトリ
+/// でも、`/var/log` が `/tmp/fakelog` への symlink に差し替えられている場合、chrony が
+/// 実際にログを書き込む先は攻撃者の制御下となる。
+///
+/// アルゴリズム:
+///
+/// - `logdir` 値の先頭トークンを path として扱い、空ならスキップ
+/// - 相対パスは `config_path.parent()` 基準で解決（`audit_chrony_logdir_symlink` と同じ規則）
+/// - `resolved.ancestors().skip(1)` で最終コンポーネントを除く親コンポーネントを列挙し、
+///   **ルートから深い方へ向かって**順次検査する（`ancestors()` は深→浅の順序で返すため
+///   `.collect()` してから `.rev()` で反転する）。`parent()` が `None` となるルート (`/` 等)
+///   は検査対象外
+/// - 各 ancestor で `std::fs::symlink_metadata` を呼び出し:
+///   - symlink の場合、`read_link` で終端解決先を取得し Warning を発行
+///   - 通常ディレクトリなら次の（より深い）ancestor へ進む
+///   - Err（例: ENOENT）なら以降（より深い）ancestor は存在しえないので break する
+///     （浅い方の ancestor は反転順の先頭で既に検査済みなので取りこぼさない）
+///
+/// 検知時は以下の kind を発行する:
+///
+/// - `chrony_logdir_ancestor_is_symlink`（Warning）— 親コンポーネントに symlink を検出
+///
+/// 終端解決先の取得に失敗した場合は `<unreadable>` プレースホルダ。
+/// 最終コンポーネント自身の symlink 検知は `audit_chrony_logdir_symlink` の責務であり、
+/// 本関数は重複検知しない（`ancestors().skip(1)` で最終コンポーネントを除外）。
+fn audit_chrony_logdir_ancestor_symlink(content: &str, config_path: &Path) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    let base_dir = config_path.parent();
+
+    for value in find_keyword_lines(content, "logdir") {
+        let trimmed = value.split_whitespace().next().unwrap_or("").trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let candidate = std::path::PathBuf::from(trimmed);
+        let resolved = if candidate.is_absolute() {
+            candidate
+        } else if let Some(dir) = base_dir {
+            dir.join(candidate)
+        } else {
+            candidate
+        };
+
+        // ancestors() は深→浅の順で返すため、反転してルート側から深い方へ進める
+        let ancestors: Vec<&Path> = resolved.ancestors().skip(1).collect();
+        for ancestor in ancestors.iter().rev() {
+            if ancestor.parent().is_none() {
+                continue;
+            }
+            let metadata = match std::fs::symlink_metadata(ancestor) {
+                Ok(m) => m,
+                Err(_) => break,
+            };
+            if !metadata.file_type().is_symlink() {
+                continue;
+            }
+
+            let target = std::fs::read_link(ancestor)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "<unreadable>".to_string());
+
+            findings.push(AuditFinding {
+                kind: "chrony_logdir_ancestor_is_symlink".to_string(),
+                severity: Severity::Warning,
+                message: format!(
+                    "chrony.conf の `logdir {}` の親コンポーネント `{}` がシンボリックリンクです（終端解決先: {}）。攻撃者が途中パスの symlink を差し替えることでログ出力先を任意のディレクトリに誘導できるため、監査ログ改竄・フォレンジック妨害の足場となりえます",
+                    trimmed,
+                    ancestor.display(),
+                    target
+                ),
+            });
+        }
+    }
+
+    findings
+}
+
 /// chrony.conf の `makestep <threshold> <limit>` の第一引数（threshold）が過大な場合を監査する
 ///
 /// `makestep` はオフセットが `threshold` 秒を超えた場合に限りクロックを step（瞬時修正）
@@ -1834,6 +1923,9 @@ fn audit_by_kind(
             }
             if config.check_chrony_logdir_symlink {
                 findings.extend(audit_chrony_logdir_symlink(content, config_path));
+            }
+            if config.check_chrony_logdir_ancestor_symlink {
+                findings.extend(audit_chrony_logdir_ancestor_symlink(content, config_path));
             }
         }
         NtpConfigKind::Ntp => {
@@ -5935,6 +6027,188 @@ mod tests {
         );
     }
 
+    // ------------------------------------------------------------------
+    // audit_chrony_logdir_ancestor_symlink
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_chrony_logdir_ancestor_symlink_detects_middle_symlink() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let real_parent = dir.path().join("real_parent");
+        std::fs::create_dir(&real_parent).unwrap();
+        let link_parent = dir.path().join("link_parent");
+        symlink(&real_parent, &link_parent).unwrap();
+        // logdir の最終コンポーネントとなる実ディレクトリを real_parent 側に作成
+        // （link_parent 経由でも同じ実体を指す）
+        std::fs::create_dir(real_parent.join("chrony_logs")).unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = format!("logdir {}/chrony_logs\n", link_parent.display());
+
+        let findings = audit_chrony_logdir_ancestor_symlink(&content, &config_path);
+        let finding = findings
+            .iter()
+            .find(|f| f.kind == "chrony_logdir_ancestor_is_symlink")
+            .expect("親コンポーネントの symlink が検知される");
+        assert!(
+            finding.message.contains(&link_parent.display().to_string()),
+            "message に symlink の ancestor パスが含まれる (got {:?})",
+            finding.message
+        );
+        assert!(
+            finding.message.contains(&real_parent.display().to_string()),
+            "message に symlink の終端解決先が含まれる (got {:?})",
+            finding.message
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_ancestor_symlink_plain_tree_no_finding() {
+        let dir = tempfile::tempdir().unwrap();
+        let deep = dir.path().join("a").join("b").join("c");
+        std::fs::create_dir_all(&deep).unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = format!("logdir {}\n", deep.display());
+
+        let findings = audit_chrony_logdir_ancestor_symlink(&content, &config_path);
+        assert!(
+            findings.is_empty(),
+            "通常ディレクトリツリーでは検知しない (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_ancestor_symlink_empty_value_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = "logdir \n";
+
+        let findings = audit_chrony_logdir_ancestor_symlink(content, &config_path);
+        assert!(
+            findings.is_empty(),
+            "空値はスキップ (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_ancestor_symlink_relative_path_resolved() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let real_parent = dir.path().join("real_parent");
+        std::fs::create_dir(&real_parent).unwrap();
+        let link_parent = dir.path().join("link_parent");
+        symlink(&real_parent, &link_parent).unwrap();
+        std::fs::create_dir(real_parent.join("chrony_logs")).unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = "logdir link_parent/chrony_logs\n";
+
+        let findings = audit_chrony_logdir_ancestor_symlink(content, &config_path);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "chrony_logdir_ancestor_is_symlink"),
+            "相対パスでも ancestor の symlink が検知される (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_ancestor_symlink_detects_despite_missing_deep_component() {
+        // /tmpdir/link_parent -> /tmpdir/real_parent（通常ディレクトリ）
+        // logdir /tmpdir/link_parent/nonexistent/deeper と書いても、
+        // link_parent 自体は symlink として検知されなければならない。
+        // （深い方に ENOENT があっても、浅い方の ancestor symlink は取りこぼさない）
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let real_parent = dir.path().join("real_parent");
+        std::fs::create_dir(&real_parent).unwrap();
+        let link_parent = dir.path().join("link_parent");
+        symlink(&real_parent, &link_parent).unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        // `nonexistent/deeper` は実在しない
+        let content = format!("logdir {}/nonexistent/deeper\n", link_parent.display());
+
+        let findings = audit_chrony_logdir_ancestor_symlink(&content, &config_path);
+        let finding = findings
+            .iter()
+            .find(|f| f.kind == "chrony_logdir_ancestor_is_symlink")
+            .expect("深い方が ENOENT でも、浅い方の ancestor symlink は検知される");
+        assert!(
+            finding.message.contains(&link_parent.display().to_string()),
+            "message に symlink の ancestor パスが含まれる (got {:?})",
+            finding.message
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_ancestor_symlink_final_component_not_reported() {
+        // 最終コンポーネント自身が symlink（親は通常ディレクトリ）の場合、
+        // ancestor 監査では発火しない（audit_chrony_logdir_symlink の責務のため重複回避）
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let real_dir = dir.path().join("real_logs");
+        std::fs::create_dir(&real_dir).unwrap();
+        let link_path = dir.path().join("logs_link");
+        symlink(&real_dir, &link_path).unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = format!("logdir {}\n", link_path.display());
+
+        let findings = audit_chrony_logdir_ancestor_symlink(&content, &config_path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_logdir_ancestor_is_symlink"),
+            "最終コンポーネント自身の symlink は ancestor 監査では発火しない (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_audit_by_kind_logdir_ancestor_symlink_flag_toggle() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let real_parent = dir.path().join("real_parent");
+        std::fs::create_dir(&real_parent).unwrap();
+        let link_parent = dir.path().join("link_parent");
+        symlink(&real_parent, &link_parent).unwrap();
+        std::fs::create_dir(real_parent.join("chrony_logs")).unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = format!(
+            "pool foo\nmakestep 1.0 3\nleapsectz right/UTC\nrtcsync\nmaxchange 1000 1 2\nlogdir {}/chrony_logs\n",
+            link_parent.display()
+        );
+
+        // 最終コンポーネント監査・メタデータ監査は無効化し、ancestor のみ対象にする
+        let mut config = NtpConfigMonitorConfig {
+            check_config_owner: false,
+            check_keys_file_owner: false,
+            check_chrony_logdir_symlink: false,
+            check_chrony_logdir_metadata: false,
+            allowed_owner_uids: Vec::new(),
+            allowed_owner_gids: Vec::new(),
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Chrony, &content, &config, &config_path);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "chrony_logdir_ancestor_is_symlink"),
+            "既定で ancestor symlink 監査が発火する (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+
+        config.check_chrony_logdir_ancestor_symlink = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, &content, &config, &config_path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_logdir_ancestor_is_symlink"),
+            "check_chrony_logdir_ancestor_symlink=false で ancestor symlink 監査が抑止される (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn test_audit_by_kind_ntp_does_not_trigger_chrony_logchange_or_logbanner() {
         // NtpConfigKind::Ntp アームでは chrony 専用の監査はディスパッチされない
@@ -5955,7 +6229,8 @@ mod tests {
                     && f.kind != "chrony_logdir_world_writable"
                     && f.kind != "chrony_logdir_insecure_owner"
                     && f.kind != "chrony_logdir_insecure_group"
-                    && f.kind != "chrony_logdir_is_symlink"),
+                    && f.kind != "chrony_logdir_is_symlink"
+                    && f.kind != "chrony_logdir_ancestor_is_symlink"),
             "ntp.conf path should not dispatch chrony-specific logchange/logbanner/logdir audits"
         );
     }

@@ -144,7 +144,7 @@ src/
     network_interface_monitor.rs # ネットワークインターフェース監視モジュール
     network_monitor.rs # ネットワーク接続監視モジュール
     network_traffic_monitor.rs # ネットワークトラフィック異常検知モジュール
-    ntp_config_monitor.rs # NTP / 時刻同期設定監視モジュール（inotify リアルタイム検知・chrony ドロップイン監視・refclock 監査・maxchange max -1 / start 過大監査・logbanner / logchange / logdir 監査・logdir 実ディレクトリのメタデータ監査・logdir シンボリックリンク自己検知対応）
+    ntp_config_monitor.rs # NTP / 時刻同期設定監視モジュール（inotify リアルタイム検知・chrony ドロップイン監視・refclock 監査・maxchange max -1 / start 過大監査・logbanner / logchange / logdir 監査・logdir 実ディレクトリのメタデータ監査・logdir シンボリックリンク自己検知・logdir 親ディレクトリ（ancestor）symlink 検知対応）
     pam_monitor.rs     # PAM 設定監視モジュール
     privilege_escalation_monitor.rs # プロセス権限昇格検知モジュール
     proc_environ_monitor.rs # プロセス環境変数スナップショット監視モジュール
