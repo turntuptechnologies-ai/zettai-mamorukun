@@ -186,18 +186,19 @@
 - [x] **ntp_config_monitor の `logbanner` / `logchange` 監査** — v1.80.0 (#367, PR #368)
 - [x] **ntp_config_monitor の maxchange `<start>` フィールド監査** — v1.81.0 (#369, PR #370)
 - [x] **ntp_config_monitor の `logdir` 世界書き込み可能領域監査** — v1.82.0 (#371, PR #372)
+- [x] **ntp_config_monitor の `logdir` 実ディレクトリメタデータ監査（world-writable / 所有者）** — v1.83.0 (#373, PR #374)
 
 ## 候補
 
 1. **chrony 閾値監査のパターン共通化リファクタ** — v1.70.0 (maxsamples)・v1.75.0 (maxdistance/maxjitter)・v1.76.0 (makestep)・v1.77.0 (maxchange)・v1.78.0 (corrtimeratio/maxclockerror)・v1.79.0 (maxchange max=-1)・v1.80.0 (logchange)・v1.81.0 (maxchange start) で増えた「top-level 整数/浮動小数ディレクティブの閾値超過検知」パターンを汎用ヘルパー（例: `audit_threshold_too_large<T>`）に抽出し、今後の同種監査追加時の重複を抑える
 2. **ntp_config_monitor の `log` ディレクティブ監査** — v1.80.0 で `logchange` / `logbanner` 監査が入ったため、次段として chrony の `log` ディレクティブ（`measurements`・`statistics`・`tracking`・`rtc`・`refclocks`・`tempcomp` 等のサブカテゴリ）が空設定されている場合（= 全ログカテゴリ無効化）や、ドロップインで `log` ディレクティブが上書きされて既定カテゴリが欠落している場合を検知する
-3. **ntp_config_monitor の `logdir` 所有者・パーミッション実体監査** — v1.82.0 では `logdir` のパス文字列パターン（`/tmp/` 等の prefix）のみを監査対象としたが、次段として設定ファイル内の `logdir` が指す実ディレクトリの `stat(2)` メタデータを取得し、所有者 uid/gid が `allowed_owner_uids / gids` に該当しない場合や、実ディレクトリが world-writable (`o+w`) の場合を Warning として検知する。`audit_keys_file_permissions` / `audit_keys_file_owner` と同様のパターンで実装する
-4. **ntp_config_monitor のドロップイン動的ホットリロード** — 稼働中に chrony.conf へ `confdir` / `include` が追加された場合、SIGHUP または再起動なしに inotify watch へディレクトリを追加する仕組みを整備する（現状は v1.72.0 で再起動まで反映されない制約あり）
-5. **ntp_config_monitor の refclock SHM セグメント実権限監査** — v1.73.0 で chrony.conf 上の `refclock SHM` 宣言を検知できるようになったため、次段として `SHM <id>` で参照される実 SysV SHM セグメント（`0x4e545030 + id`）の書き込み権限（`ipcs -m`）を検査し、非 root 書き込み可の場合を Critical 扱いにする
-6. **inotify リアルタイム検知の他モジュールへの展開** — cron_monitor / ntp_config_monitor で確立した inotify パターンを sshd_config_monitor / pam_monitor / sudoers_monitor / dns_monitor / security_files_monitor / shell_config_monitor など他の設定ファイル系モジュールに展開する
-7. **所有者監査パターンの他モジュールへの展開** — ntp_config_monitor で実装した `allowed_owner_uids / gids` によるオーナー監査を、sshd_config_monitor・pam_monitor・security_files_monitor・sudoers_monitor 等の設定ファイル系モジュールに共通パターンとして展開する（root 以外が所有する設定ファイルは権限昇格の足場となるため）
-8. **CI ワークフローでの clippy -D warnings 強制化** — GitHub Actions で `cargo clippy --all-targets -- -D warnings` / `cargo fmt --check` を PR 時に自動実行する `.github/workflows/ci.yaml` を整備する（promtool.yaml と同様、PAT の workflow スコープ問題があれば README 記載にとどめる）
-9. **promtool ユニットテスト用の GitHub Actions ワークフロー追加** — PAT の workflow スコープ制約で v1.59.0 では README のサンプル掲載にとどめた `.github/workflows/promtool.yaml` を、適切な権限で追加し `grafana/alerts/**` の変更時に自動検証する
-10. **module-stats 履歴スナップショット機能** — `record_scan_duration` による最新 1024 サンプルに加え、1h/1d など時間粒度で集計したスナップショットを保持し、長期傾向（1日/1週間の P95 推移）を REST API で取得可能にする
-11. **Webhook 統合テスト強化** — wiremock を使った Webhook 送信の統合テスト（リトライ動作、4xx/5xx エラー処理、タイムアウト等）を追加する
-12. **プロセス起動リアルタイム監視強化** — proc connector（netlink）を使ったプロセス fork/exec のリアルタイム検知で、既存の定期スキャンを補完する
+3. **ntp_config_monitor の `logdir` シンボリックリンク自己検知** — v1.83.0 で `logdir` 実ディレクトリの stat(2) 監査が入ったが、現状 `std::fs::metadata` は symlink を辿るため「終端の実体」が評価される。次段として `symlink_metadata(2)` も併用し、`logdir` が**そもそも symlink である**ケース（文字列は `/var/log/chrony` だが実体は `/tmp/evil` へリンク）を別 kind（`chrony_logdir_is_symlink`）として検知する。監査ログディレクトリが symlink 経由で差し替えられる攻撃の足場を検知できるようになる
+4. **ntp_config_monitor の `logdir` ファミリー 設定ファイル側 keys パーミッションと統一リファクタ** — v1.83.0 の実装で world-writable / owner / group 検査を再実装する形になったため、`audit_keys_file_permissions` / `audit_keys_file_owner` と共通のディレクトリ/ファイル両対応ヘルパー（例: `audit_path_perms_and_owner(path, kind_prefix, config)`）に抽出し、今後同種監査（`driftfile` 親ディレクトリ、`rtcfile`、ドロップイン置き場等）で再利用できるようにする
+5. **ntp_config_monitor のドロップイン動的ホットリロード** — 稼働中に chrony.conf へ `confdir` / `include` が追加された場合、SIGHUP または再起動なしに inotify watch へディレクトリを追加する仕組みを整備する（現状は v1.72.0 で再起動まで反映されない制約あり）
+6. **ntp_config_monitor の refclock SHM セグメント実権限監査** — v1.73.0 で chrony.conf 上の `refclock SHM` 宣言を検知できるようになったため、次段として `SHM <id>` で参照される実 SysV SHM セグメント（`0x4e545030 + id`）の書き込み権限（`ipcs -m`）を検査し、非 root 書き込み可の場合を Critical 扱いにする
+7. **inotify リアルタイム検知の他モジュールへの展開** — cron_monitor / ntp_config_monitor で確立した inotify パターンを sshd_config_monitor / pam_monitor / sudoers_monitor / dns_monitor / security_files_monitor / shell_config_monitor など他の設定ファイル系モジュールに展開する
+8. **所有者監査パターンの他モジュールへの展開** — ntp_config_monitor で実装した `allowed_owner_uids / gids` によるオーナー監査を、sshd_config_monitor・pam_monitor・security_files_monitor・sudoers_monitor 等の設定ファイル系モジュールに共通パターンとして展開する（root 以外が所有する設定ファイルは権限昇格の足場となるため）
+9. **CI ワークフローでの clippy -D warnings 強制化** — GitHub Actions で `cargo clippy --all-targets -- -D warnings` / `cargo fmt --check` を PR 時に自動実行する `.github/workflows/ci.yaml` を整備する（promtool.yaml と同様、PAT の workflow スコープ問題があれば README 記載にとどめる）
+10. **promtool ユニットテスト用の GitHub Actions ワークフロー追加** — PAT の workflow スコープ制約で v1.59.0 では README のサンプル掲載にとどめた `.github/workflows/promtool.yaml` を、適切な権限で追加し `grafana/alerts/**` の変更時に自動検証する
+11. **module-stats 履歴スナップショット機能** — `record_scan_duration` による最新 1024 サンプルに加え、1h/1d など時間粒度で集計したスナップショットを保持し、長期傾向（1日/1週間の P95 推移）を REST API で取得可能にする
+12. **Webhook 統合テスト強化** — wiremock を使った Webhook 送信の統合テスト（リトライ動作、4xx/5xx エラー処理、タイムアウト等）を追加する
