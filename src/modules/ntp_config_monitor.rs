@@ -816,6 +816,42 @@ fn parse_chrony_top_level_i64(content: &str, keyword: &str) -> Option<i64> {
     last
 }
 
+/// chrony.conf の top-level 浮動小数ディレクティブが閾値を超過している場合に
+/// `AuditFinding` を 1 件生成する共通ヘルパー。
+///
+/// 検知ルール:
+///
+/// - `parse_chrony_top_level_f64(content, directive)` で値を取得
+/// - 値が `> 0.0` かつ `> max_threshold` のときのみ Warning 1 件を push する
+/// - 未設定・0 以下・パースできない値はすべて対象外（各 `audit_chrony_*_too_large` 系と同一挙動）
+///
+/// 本ヘルパーは `maxdistance` / `maxjitter` / `corrtimeratio` / `maxclockerror` /
+/// `logchange` / `makestep` / `maxchange` の offset（第一引数）監査など、
+/// chrony.conf の「top-level 浮動小数ディレクティブに対して上限超過を Warning 検知する」
+/// 同形パターンの共通化を目的とする。kind ごとに単位（秒 / ppm / 無次元比率）や
+/// 脅威モデルが異なるため、メッセージ本文は `format_message(actual, threshold)` で
+/// 呼び出し側から与える。
+fn audit_chrony_threshold_too_large(
+    content: &str,
+    directive: &str,
+    max_threshold: f64,
+    kind: &str,
+    format_message: impl FnOnce(f64, f64) -> String,
+) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    if let Some(v) = parse_chrony_top_level_f64(content, directive)
+        && v > 0.0
+        && v > max_threshold
+    {
+        findings.push(AuditFinding {
+            kind: kind.to_string(),
+            severity: Severity::Warning,
+            message: format_message(v, max_threshold),
+        });
+    }
+    findings
+}
+
 /// chrony.conf の `maxsamples` / `minsamples` のサンプル数設定を監査する
 ///
 /// - `maxsamples` が 0（= 無制限）を除き閾値未満 → `chrony_maxsamples_too_low` (Warning)
@@ -868,21 +904,18 @@ fn audit_chrony_sample_counts(content: &str, maxsamples_min_threshold: u32) -> V
 ///
 /// 0 以下の値は設定ミス扱いとし、本監査の対象外とする（chrony 側で拒否される値域）。
 fn audit_chrony_maxdistance(content: &str, max_threshold: f64) -> Vec<AuditFinding> {
-    let mut findings = Vec::new();
-    if let Some(v) = parse_chrony_top_level_f64(content, "maxdistance")
-        && v > 0.0
-        && v > max_threshold
-    {
-        findings.push(AuditFinding {
-            kind: "chrony_maxdistance_too_large".to_string(),
-            severity: Severity::Warning,
-            message: format!(
+    audit_chrony_threshold_too_large(
+        content,
+        "maxdistance",
+        max_threshold,
+        "chrony_maxdistance_too_large",
+        |v, t| {
+            format!(
                 "chrony.conf の `maxdistance {}` は推奨上限（{} 秒）を超えています（root distance の許容値が緩すぎると劣化した時刻ソースが同期候補に残り、中間者攻撃や偽装 NTP サーバによる時刻偽装の余地が広がります）",
-                v, max_threshold
-            ),
-        });
-    }
-    findings
+                v, t
+            )
+        },
+    )
 }
 
 /// chrony.conf の `maxjitter` が許容上限を超えている場合を監査する
@@ -894,21 +927,18 @@ fn audit_chrony_maxdistance(content: &str, max_threshold: f64) -> Vec<AuditFindi
 ///
 /// 0 以下の値は設定ミス扱いとし、本監査の対象外とする（chrony 側で拒否される値域）。
 fn audit_chrony_maxjitter(content: &str, max_threshold: f64) -> Vec<AuditFinding> {
-    let mut findings = Vec::new();
-    if let Some(v) = parse_chrony_top_level_f64(content, "maxjitter")
-        && v > 0.0
-        && v > max_threshold
-    {
-        findings.push(AuditFinding {
-            kind: "chrony_maxjitter_too_large".to_string(),
-            severity: Severity::Warning,
-            message: format!(
+    audit_chrony_threshold_too_large(
+        content,
+        "maxjitter",
+        max_threshold,
+        "chrony_maxjitter_too_large",
+        |v, t| {
+            format!(
                 "chrony.conf の `maxjitter {}` は推奨上限（{} 秒）を超えています（jitter の許容値が緩すぎるとジッターの大きい時刻ソースが同期候補に残り、時刻同期の安定性と偽装耐性が低下します）",
-                v, max_threshold
-            ),
-        });
-    }
-    findings
+                v, t
+            )
+        },
+    )
 }
 
 /// chrony.conf の `maxchange <offset> <start> <max>` ディレクティブを監査する
@@ -956,19 +986,18 @@ fn audit_chrony_maxchange(
         return findings;
     }
 
-    if let Some(v) = parse_chrony_top_level_f64(content, "maxchange")
-        && v > 0.0
-        && v > offset_max_threshold
-    {
-        findings.push(AuditFinding {
-            kind: "chrony_maxchange_offset_too_large".to_string(),
-            severity: Severity::Warning,
-            message: format!(
+    findings.extend(audit_chrony_threshold_too_large(
+        content,
+        "maxchange",
+        offset_max_threshold,
+        "chrony_maxchange_offset_too_large",
+        |v, t| {
+            format!(
                 "chrony.conf の `maxchange {}` の offset は推奨上限（{} 秒）を超えています（step 量の上限が実質無制限となり、`makestep` と組み合わさって攻撃者による大幅な時刻偽装を許容するリスクがあります）",
-                v, offset_max_threshold
-            ),
-        });
-    }
+                v, t
+            )
+        },
+    ));
 
     if check_max_unlimited
         && let Some(max_val) = parse_chrony_maxchange_max(content)
@@ -1054,21 +1083,18 @@ fn parse_chrony_maxchange_start(content: &str) -> Option<i64> {
 /// 0 以下・パースできないトークンは無視する（未設定は `corrtimeratio` 行が
 /// 欠如しているだけで chrony デフォルトの 3.0 として動作するため検知対象外）。
 fn audit_chrony_corrtimeratio(content: &str, max_threshold: f64) -> Vec<AuditFinding> {
-    let mut findings = Vec::new();
-    if let Some(v) = parse_chrony_top_level_f64(content, "corrtimeratio")
-        && v > 0.0
-        && v > max_threshold
-    {
-        findings.push(AuditFinding {
-            kind: "chrony_corrtimeratio_too_large".to_string(),
-            severity: Severity::Warning,
-            message: format!(
+    audit_chrony_threshold_too_large(
+        content,
+        "corrtimeratio",
+        max_threshold,
+        "chrony_corrtimeratio_too_large",
+        |v, t| {
+            format!(
                 "chrony.conf の `corrtimeratio {}` は推奨上限（{}）を超えています（slew 補正に割く時間比率が過大に緩められると周波数補正フェーズが長引き、時刻精度が劣化して TLS 有効期限判定・Kerberos/TOTP 時刻窓・ログ整合性に悪影響を与えます）",
-                v, max_threshold
-            ),
-        });
-    }
-    findings
+                v, t
+            )
+        },
+    )
 }
 
 /// chrony.conf の `maxclockerror` が許容上限を超えている場合を監査する
@@ -1084,21 +1110,18 @@ fn audit_chrony_corrtimeratio(content: &str, max_threshold: f64) -> Vec<AuditFin
 /// 0 以下・パースできないトークンは無視する（未設定は chrony デフォルトの 1.0 ppm で
 /// 動作するため検知対象外）。
 fn audit_chrony_maxclockerror(content: &str, max_threshold: f64) -> Vec<AuditFinding> {
-    let mut findings = Vec::new();
-    if let Some(v) = parse_chrony_top_level_f64(content, "maxclockerror")
-        && v > 0.0
-        && v > max_threshold
-    {
-        findings.push(AuditFinding {
-            kind: "chrony_maxclockerror_too_large".to_string(),
-            severity: Severity::Warning,
-            message: format!(
+    audit_chrony_threshold_too_large(
+        content,
+        "maxclockerror",
+        max_threshold,
+        "chrony_maxclockerror_too_large",
+        |v, t| {
+            format!(
                 "chrony.conf の `maxclockerror {}` は推奨上限（{} ppm）を超えています（ローカルクロックの誤差許容が過大だと、外部時刻ソースとの差分を「自クロックのドリフト」と誤認しやすくなり、偽装 NTP サーバへの追従が緩慢になって中間者攻撃の緩衝材として働きます）",
-                v, max_threshold
-            ),
-        });
-    }
-    findings
+                v, t
+            )
+        },
+    )
 }
 
 /// chrony.conf の `logchange` が許容上限を超えている場合を監査する
@@ -1113,21 +1136,18 @@ fn audit_chrony_maxclockerror(content: &str, max_threshold: f64) -> Vec<AuditFin
 /// 0 以下・パースできないトークンは無視する（未設定は chrony デフォルトの 1.0 秒で
 /// 動作するため検知対象外）。
 fn audit_chrony_logchange(content: &str, max_threshold: f64) -> Vec<AuditFinding> {
-    let mut findings = Vec::new();
-    if let Some(v) = parse_chrony_top_level_f64(content, "logchange")
-        && v > 0.0
-        && v > max_threshold
-    {
-        findings.push(AuditFinding {
-            kind: "chrony_logchange_too_large".to_string(),
-            severity: Severity::Warning,
-            message: format!(
+    audit_chrony_threshold_too_large(
+        content,
+        "logchange",
+        max_threshold,
+        "chrony_logchange_too_large",
+        |v, t| {
+            format!(
                 "chrony.conf の `logchange {}` は推奨上限（{} 秒）を超えています（攻撃者が時刻ステップ補正ログをトリガーする閾値を極端に大きく設定することで、偽装 NTP による時刻改竄が監査ログに記録されなくなり、時刻ずれの可観測性が低下します）",
-                v, max_threshold
-            ),
-        });
-    }
-    findings
+                v, t
+            )
+        },
+    )
 }
 
 /// chrony.conf の `logbanner` がバナー出力無効化（0 以下）に設定されている場合を監査する
@@ -1468,21 +1488,18 @@ fn audit_chrony_logdir_ancestor_symlink(content: &str, config_path: &Path) -> Ve
 /// 0 以下・パースできないトークンは無視する（`makestep` 未設定は既存の
 /// `chrony_no_makestep` Info で扱うため本監査の対象外）。
 fn audit_chrony_makestep_threshold(content: &str, max_threshold: f64) -> Vec<AuditFinding> {
-    let mut findings = Vec::new();
-    if let Some(v) = parse_chrony_top_level_f64(content, "makestep")
-        && v > 0.0
-        && v > max_threshold
-    {
-        findings.push(AuditFinding {
-            kind: "chrony_makestep_threshold_too_large".to_string(),
-            severity: Severity::Warning,
-            message: format!(
+    audit_chrony_threshold_too_large(
+        content,
+        "makestep",
+        max_threshold,
+        "chrony_makestep_threshold_too_large",
+        |v, t| {
+            format!(
                 "chrony.conf の `makestep {}` は推奨上限（{} 秒）を超えています（step 許容閾値が緩すぎると、攻撃者が NTP ソースに大きなオフセットを注入した際にシステム時刻が大きく跳ぶため、ログ跳躍・証明書有効期限判定の回避・Kerberos/TOTP 時刻窓操作などのリスクが高まります）",
-                v, max_threshold
-            ),
-        });
-    }
-    findings
+                v, t
+            )
+        },
+    )
 }
 
 /// chrony.conf の `refclock` ディレクティブを監査する
@@ -4530,6 +4547,96 @@ mod tests {
                 .iter()
                 .all(|f| f.kind == "chrony_rtcfile_not_absolute")
         );
+    }
+
+    // ------------------------------------------------------------------
+    // audit_chrony_threshold_too_large（共通ヘルパー）
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_chrony_threshold_helper_detects_over_threshold() {
+        let content = "somekey 7.5\n";
+        let findings = audit_chrony_threshold_too_large(
+            content,
+            "somekey",
+            5.0,
+            "chrony_some_too_large",
+            |v, t| format!("actual={v} threshold={t}"),
+        );
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_some_too_large");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+        assert_eq!(findings[0].message, "actual=7.5 threshold=5");
+    }
+
+    #[test]
+    fn test_audit_chrony_threshold_helper_boundary_not_detected() {
+        // 境界値ちょうどは `>` で判定しているため検知しない
+        let content = "somekey 5.0\n";
+        let findings = audit_chrony_threshold_too_large(
+            content,
+            "somekey",
+            5.0,
+            "chrony_some_too_large",
+            |_, _| String::from("msg"),
+        );
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_threshold_helper_unset_not_detected() {
+        let content = "server foo\n";
+        let findings = audit_chrony_threshold_too_large(
+            content,
+            "somekey",
+            5.0,
+            "chrony_some_too_large",
+            |_, _| String::from("msg"),
+        );
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_threshold_helper_zero_or_negative_not_detected() {
+        // 0 以下の値は設定ミス扱いで監査対象外（chrony 側で拒否される値域）
+        for content in ["somekey 0\n", "somekey -1.5\n"] {
+            let findings = audit_chrony_threshold_too_large(
+                content,
+                "somekey",
+                5.0,
+                "chrony_some_too_large",
+                |_, _| String::from("msg"),
+            );
+            assert!(findings.is_empty(), "content={content:?}");
+        }
+    }
+
+    #[test]
+    fn test_audit_chrony_threshold_helper_inline_server_option_ignored() {
+        // find_keyword_lines は行頭トークンのみ一致するため、server の inline は拾わない
+        let content = "server ntp.example.com somekey 999\n";
+        let findings = audit_chrony_threshold_too_large(
+            content,
+            "somekey",
+            5.0,
+            "chrony_some_too_large",
+            |_, _| String::from("msg"),
+        );
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_threshold_helper_multiple_lines_uses_last() {
+        // parse_chrony_top_level_f64 は複数行を後者優先で解釈する
+        let content = "somekey 3.0\nsomekey 7.0\n";
+        let findings = audit_chrony_threshold_too_large(
+            content,
+            "somekey",
+            5.0,
+            "chrony_some_too_large",
+            |v, t| format!("v={v} t={t}"),
+        );
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].message, "v=7 t=5");
     }
 
     // ------------------------------------------------------------------
