@@ -6302,6 +6302,15 @@ pub struct NtpConfigMonitorConfig {
     #[serde(default = "NtpConfigMonitorConfig::default_true")]
     pub check_chrony_logdir_symlink: bool,
 
+    /// chrony の `logdir` に指定されたパスの**親コンポーネント（ancestor）** が
+    /// シンボリックリンクである場合を検知する（`check_chrony_logdir_symlink` は
+    /// 最終コンポーネント自身のみを対象とするため、途中の親ディレクトリが symlink に
+    /// 差し替えられているケース（例: `/var/log -> /tmp/fakelog` で `logdir /var/log/chrony`）を
+    /// 補完的に検知する。ancestor を順次 `lstat(2)` で検査し、symlink が見つかった場合に
+    /// Warning を発行することで、中間パスを経由したログ出力先誘導攻撃の足場を塞ぐ）
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_chrony_logdir_ancestor_symlink: bool,
+
     /// `maxdistance` の許容上限（秒、既定 5.0）
     /// chrony のデフォルトは 3.0 秒なので 5.0 秒超は明示的な緩和設定と判定する
     #[serde(default = "NtpConfigMonitorConfig::default_maxdistance_max_threshold")]
@@ -6500,6 +6509,7 @@ impl Default for NtpConfigMonitorConfig {
             check_chrony_logdir: true,
             check_chrony_logdir_metadata: true,
             check_chrony_logdir_symlink: true,
+            check_chrony_logdir_ancestor_symlink: true,
             maxdistance_max_threshold: Self::default_maxdistance_max_threshold(),
             maxjitter_max_threshold: Self::default_maxjitter_max_threshold(),
             makestep_threshold_max: Self::default_makestep_threshold_max(),

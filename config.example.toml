@@ -1594,6 +1594,13 @@ check_chrony_logdir_metadata = true
 # 回避手法を lstat(2) 相当の symlink_metadata で検知する。攻撃者が symlink 差し替えで
 # ログ出力先を任意ディレクトリに誘導する攻撃の足場となる）
 check_chrony_logdir_symlink = true
+# chrony の `logdir` に指定されたパスの「親コンポーネント（ancestor）」が
+# シンボリックリンクである場合を検知する（check_chrony_logdir_symlink は最終コンポーネント
+# 自身のみを対象とするため、途中の親ディレクトリが symlink に差し替えられているケース
+# （例: /var/log -> /tmp/fakelog で logdir /var/log/chrony）を補完的に検知する。ancestor を
+# 順次 lstat(2) で検査し、symlink が見つかった場合に Warning を発行することで、中間パスを
+# 経由したログ出力先誘導攻撃の足場を塞ぐ）
+check_chrony_logdir_ancestor_symlink = true
 # `maxdistance` 監査の許容上限（秒、既定 5.0）。chrony のデフォルトは 3.0 秒
 maxdistance_max_threshold = 5.0
 # `maxjitter` 監査の許容上限（秒、既定 2.0）。chrony のデフォルトは 1.0 秒
