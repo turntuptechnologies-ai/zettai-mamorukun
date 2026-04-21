@@ -1583,6 +1583,11 @@ check_chrony_logbanner = true
 # 設定されている場合を検知する（攻撃者が時刻改竄イベントの監査ログを削除・改竄できるように
 # なり、フォレンジック調査が妨害される）
 check_chrony_logdir = true
+# chrony の `logdir` が指す「実ディレクトリ」のメタデータ（パーミッション・所有者・グループ）を
+# stat(2) で検査する（文字列パターンベースの check_chrony_logdir を補完し、見かけ上は安全な
+# パスでも実体が world-writable / 非 root 所有になっているケース、シンボリックリンク経由の
+# ケース、chmod o+w で事後的に緩められたケースを検知する）
+check_chrony_logdir_metadata = true
 # `maxdistance` 監査の許容上限（秒、既定 5.0）。chrony のデフォルトは 3.0 秒
 maxdistance_max_threshold = 5.0
 # `maxjitter` 監査の許容上限（秒、既定 2.0）。chrony のデフォルトは 1.0 秒
