@@ -188,13 +188,14 @@
 - [x] **ntp_config_monitor の `logdir` 世界書き込み可能領域監査** — v1.82.0 (#371, PR #372)
 - [x] **ntp_config_monitor の `logdir` 実ディレクトリメタデータ監査（world-writable / 所有者）** — v1.83.0 (#373, PR #374)
 - [x] **ntp_config_monitor の `logdir` シンボリックリンク自己検知** — v1.84.0 (#376, PR #377)
+- [x] **ntp_config_monitor の `logdir` 親ディレクトリ（ancestor）symlink 検知** — v1.85.0 (#378, PR #379)
 
 ## 候補
 
 1. **chrony 閾値監査のパターン共通化リファクタ** — v1.70.0 (maxsamples)・v1.75.0 (maxdistance/maxjitter)・v1.76.0 (makestep)・v1.77.0 (maxchange)・v1.78.0 (corrtimeratio/maxclockerror)・v1.79.0 (maxchange max=-1)・v1.80.0 (logchange)・v1.81.0 (maxchange start) で増えた「top-level 整数/浮動小数ディレクティブの閾値超過検知」パターンを汎用ヘルパー（例: `audit_threshold_too_large<T>`）に抽出し、今後の同種監査追加時の重複を抑える
 2. **ntp_config_monitor の `log` ディレクティブ監査** — v1.80.0 で `logchange` / `logbanner` 監査が入ったため、次段として chrony の `log` ディレクティブ（`measurements`・`statistics`・`tracking`・`rtc`・`refclocks`・`tempcomp` 等のサブカテゴリ）が空設定されている場合（= 全ログカテゴリ無効化）や、ドロップインで `log` ディレクティブが上書きされて既定カテゴリが欠落している場合を検知する
-3. **ntp_config_monitor の `logdir` 親ディレクトリ symlink 検知** — v1.84.0 で `logdir` 最終コンポーネント（`<path>` そのもの）の symlink を検知できるようになったが、`/var/log/chrony` と書かれていても途中の `/var/log` が symlink に差し替えられているケースは未検知。次段として `logdir` パスの各親コンポーネントについて `lstat(2)` で symlink を検査し、「途中パスに symlink が混入している」場合に `chrony_logdir_ancestor_is_symlink` Warning を発行する
-4. **ntp_config_monitor の `logdir` ファミリー 設定ファイル側 keys パーミッションと統一リファクタ** — v1.83.0 の実装で world-writable / owner / group 検査を再実装する形になったため、`audit_keys_file_permissions` / `audit_keys_file_owner` と共通のディレクトリ/ファイル両対応ヘルパー（例: `audit_path_perms_and_owner(path, kind_prefix, config)`）に抽出し、今後同種監査（`driftfile` 親ディレクトリ、`rtcfile`、ドロップイン置き場等）で再利用できるようにする
+3. **ntp_config_monitor の logdir 関連監査の統合リファクタ** — v1.82.0（world-writable パス禁止リスト）・v1.83.0（実ディレクトリメタデータ：world-writable / 所有者 / グループ）・v1.84.0（最終コンポーネント symlink）・v1.85.0（ancestor symlink）で増えた 4 本の `audit_chrony_logdir_*` 関数を、共通 path 解決＋共通 `symlink_metadata` ループで統合し、さらに `audit_keys_file_permissions` / `audit_keys_file_owner` とも共通化した `audit_path_perms_and_symlink(path, kind_prefix, config)` 的ヘルパーを抽出する。今後 `driftfile` 親ディレクトリ・`rtcfile`・ドロップイン置き場等で再利用できるようにする
+4. **ntp_config_monitor の `logdir` ancestor world-writable 監査** — v1.83.0 で `logdir` の実ディレクトリ自身の world-writable 検知が入り、v1.85.0 で ancestor symlink 検知が入ったため、次段として **各 ancestor ディレクトリが world-writable (o+w)** であるケースを検知する（例: `/var/log/chrony` と書かれていて `/var/log` が誤って 777 になっていると攻撃者が `/var/log/chrony` を差し替え可能）
 5. **ntp_config_monitor のドロップイン動的ホットリロード** — 稼働中に chrony.conf へ `confdir` / `include` が追加された場合、SIGHUP または再起動なしに inotify watch へディレクトリを追加する仕組みを整備する（現状は v1.72.0 で再起動まで反映されない制約あり）
 6. **ntp_config_monitor の refclock SHM セグメント実権限監査** — v1.73.0 で chrony.conf 上の `refclock SHM` 宣言を検知できるようになったため、次段として `SHM <id>` で参照される実 SysV SHM セグメント（`0x4e545030 + id`）の書き込み権限（`ipcs -m`）を検査し、非 root 書き込み可の場合を Critical 扱いにする
 7. **inotify リアルタイム検知の他モジュールへの展開** — cron_monitor / ntp_config_monitor で確立した inotify パターンを sshd_config_monitor / pam_monitor / sudoers_monitor / dns_monitor / security_files_monitor / shell_config_monitor など他の設定ファイル系モジュールに展開する
