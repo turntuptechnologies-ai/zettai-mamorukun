@@ -80,6 +80,11 @@
 //!     （world-writable / 許容外 uid / gid 所有）にある。文字列パターンでは安全に見える
 //!     パスでも、`chmod o+w` やシンボリックリンク経由で実体が改竄可能な場合を `stat(2)`
 //!     で検知する
+//!   - `chrony.conf`: `logdir` が指すパス自体がシンボリックリンクである（`stat(2)` は
+//!     symlink を辿るため終端実体のメタデータしか見えないが、`lstat(2)` で `logdir`
+//!     パス**そのもの**が symlink であることを別 kind (`chrony_logdir_is_symlink`) で
+//!     報告する。攻撃者が symlink を差し替えることでログ出力先を任意ディレクトリに
+//!     誘導し、監査ログ改竄・フォレンジック妨害の足場とする攻撃を検知する）
 //! - **ドロップイン監視** — `chrony.conf` 内の `confdir` / `sourcedir` / `include`
 //!   ディレクティブで参照される追加設定ファイル（例: `/etc/chrony/conf.d/*.conf`、
 //!   `/etc/chrony/sources.d/*.sources`）も監視対象に加え、親ディレクトリも inotify
@@ -1293,6 +1298,71 @@ fn audit_chrony_logdir_metadata(
     findings
 }
 
+/// chrony.conf の `logdir` ディレクティブで指定されたパス自体がシンボリックリンクである場合を監査する
+///
+/// `audit_chrony_logdir_metadata` は `std::fs::metadata` を使うため symlink を辿った
+/// **終端実体**のメタデータを検査する。つまり `logdir /var/log/chrony` と書かれていて
+/// 実体は `/var/log/chrony -> /tmp/evil` のような symlink 差し替えが行われている場合、
+/// 終端 `/tmp/evil` が `chrony:chrony` / `mode=0755` 等の「一見安全な」状態で準備されて
+/// いれば、メタデータ監査は素通りしてしまう。
+///
+/// symlink 経由の差し替えは chrony プロセス自身のログ書き込み先を任意ディレクトリに
+/// 誘導する攻撃の足場となるため、**`logdir` が symlink であるという事実そのもの**を
+/// 別 kind で報告する（`std::fs::symlink_metadata` = lstat(2) 相当を使用）。
+///
+/// 検知時は以下の kind を発行する:
+///
+/// - `chrony_logdir_is_symlink`（Warning）— `logdir <path>` の `<path>` 自体が symlink
+///
+/// symlink の終端解決先は `std::fs::read_link` で取得してメッセージに含める
+/// （フォレンジック調査支援のため）。取得に失敗した場合は `<unreadable>` プレースホルダ。
+/// 値が空・存在しない・メタデータ取得失敗はスキップする。
+///
+/// 相対パスは `audit_chrony_logdir_metadata` と同じ規則で設定ファイルのディレクトリを
+/// 基準に解決する。
+fn audit_chrony_logdir_symlink(content: &str, config_path: &Path) -> Vec<AuditFinding> {
+    let mut findings = Vec::new();
+    let base_dir = config_path.parent();
+
+    for value in find_keyword_lines(content, "logdir") {
+        let trimmed = value.split_whitespace().next().unwrap_or("").trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let candidate = std::path::PathBuf::from(trimmed);
+        let resolved = if candidate.is_absolute() {
+            candidate
+        } else if let Some(dir) = base_dir {
+            dir.join(candidate)
+        } else {
+            candidate
+        };
+
+        let metadata = match std::fs::symlink_metadata(&resolved) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if !metadata.file_type().is_symlink() {
+            continue;
+        }
+
+        let target = std::fs::read_link(&resolved)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "<unreadable>".to_string());
+
+        findings.push(AuditFinding {
+            kind: "chrony_logdir_is_symlink".to_string(),
+            severity: Severity::Warning,
+            message: format!(
+                "chrony.conf の `logdir {}` が指すパス自体がシンボリックリンクです（終端解決先: {}）。攻撃者が symlink を差し替えることでログ出力先を任意のディレクトリに誘導できるため、監査ログ改竄・フォレンジック妨害の足場となりえます",
+                trimmed, target
+            ),
+        });
+    }
+
+    findings
+}
+
 /// chrony.conf の `makestep <threshold> <limit>` の第一引数（threshold）が過大な場合を監査する
 ///
 /// `makestep` はオフセットが `threshold` 秒を超えた場合に限りクロックを step（瞬時修正）
@@ -1761,6 +1831,9 @@ fn audit_by_kind(
             }
             if config.check_chrony_logdir_metadata {
                 findings.extend(audit_chrony_logdir_metadata(content, config_path, config));
+            }
+            if config.check_chrony_logdir_symlink {
+                findings.extend(audit_chrony_logdir_symlink(content, config_path));
             }
         }
         NtpConfigKind::Ntp => {
@@ -5722,6 +5795,146 @@ mod tests {
         );
     }
 
+    // ------------------------------------------------------------------
+    // audit_chrony_logdir_symlink
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_chrony_logdir_symlink_detects() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let real_dir = dir.path().join("real_logs");
+        std::fs::create_dir(&real_dir).unwrap();
+        let link_path = dir.path().join("logs_link");
+        symlink(&real_dir, &link_path).unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = format!("logdir {}\n", link_path.display());
+
+        let findings = audit_chrony_logdir_symlink(&content, &config_path);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "chrony_logdir_is_symlink"),
+            "symlink 指定は検知される (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+        // メッセージに終端解決先が含まれる
+        let finding = findings
+            .iter()
+            .find(|f| f.kind == "chrony_logdir_is_symlink")
+            .unwrap();
+        assert!(
+            finding.message.contains(&real_dir.display().to_string()),
+            "message に終端解決先が含まれる (got {:?})",
+            finding.message
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_symlink_plain_dir_no_finding() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir(&log_dir).unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = format!("logdir {}\n", log_dir.display());
+
+        let findings = audit_chrony_logdir_symlink(&content, &config_path);
+        assert!(
+            findings.is_empty(),
+            "通常ディレクトリでは検知しない (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_symlink_missing_path_no_finding() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = format!("logdir {}\n", dir.path().join("not_exist").display());
+
+        let findings = audit_chrony_logdir_symlink(&content, &config_path);
+        assert!(
+            findings.is_empty(),
+            "存在しないパスはスキップ (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_symlink_empty_value_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = "logdir \n";
+
+        let findings = audit_chrony_logdir_symlink(content, &config_path);
+        assert!(
+            findings.is_empty(),
+            "空値はスキップ (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_symlink_relative_path_resolved() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let real_dir = dir.path().join("real_logs");
+        std::fs::create_dir(&real_dir).unwrap();
+        let link_path = dir.path().join("relative_link");
+        symlink(&real_dir, &link_path).unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = "logdir relative_link\n";
+
+        let findings = audit_chrony_logdir_symlink(content, &config_path);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "chrony_logdir_is_symlink"),
+            "相対パスの symlink も検知される (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_audit_by_kind_logdir_symlink_flag_toggle() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let real_dir = dir.path().join("real_logs");
+        std::fs::create_dir(&real_dir).unwrap();
+        let link_path = dir.path().join("logs_link");
+        symlink(&real_dir, &link_path).unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = format!(
+            "pool foo\nmakestep 1.0 3\nleapsectz right/UTC\nrtcsync\nmaxchange 1000 1 2\nlogdir {}\n",
+            link_path.display()
+        );
+
+        let mut config = NtpConfigMonitorConfig {
+            check_config_owner: false,
+            check_keys_file_owner: false,
+            allowed_owner_uids: Vec::new(),
+            allowed_owner_gids: Vec::new(),
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Chrony, &content, &config, &config_path);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "chrony_logdir_is_symlink"),
+            "既定で symlink 監査が発火する (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+
+        config.check_chrony_logdir_symlink = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, &content, &config, &config_path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_logdir_is_symlink"),
+            "check_chrony_logdir_symlink=false で symlink 監査が抑止される (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn test_audit_by_kind_ntp_does_not_trigger_chrony_logchange_or_logbanner() {
         // NtpConfigKind::Ntp アームでは chrony 専用の監査はディスパッチされない
@@ -5741,7 +5954,8 @@ mod tests {
                     && f.kind != "chrony_logdir_insecure_path"
                     && f.kind != "chrony_logdir_world_writable"
                     && f.kind != "chrony_logdir_insecure_owner"
-                    && f.kind != "chrony_logdir_insecure_group"),
+                    && f.kind != "chrony_logdir_insecure_group"
+                    && f.kind != "chrony_logdir_is_symlink"),
             "ntp.conf path should not dispatch chrony-specific logchange/logbanner/logdir audits"
         );
     }
