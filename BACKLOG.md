@@ -187,12 +187,13 @@
 - [x] **ntp_config_monitor の maxchange `<start>` フィールド監査** — v1.81.0 (#369, PR #370)
 - [x] **ntp_config_monitor の `logdir` 世界書き込み可能領域監査** — v1.82.0 (#371, PR #372)
 - [x] **ntp_config_monitor の `logdir` 実ディレクトリメタデータ監査（world-writable / 所有者）** — v1.83.0 (#373, PR #374)
+- [x] **ntp_config_monitor の `logdir` シンボリックリンク自己検知** — v1.84.0 (#376, PR #377)
 
 ## 候補
 
 1. **chrony 閾値監査のパターン共通化リファクタ** — v1.70.0 (maxsamples)・v1.75.0 (maxdistance/maxjitter)・v1.76.0 (makestep)・v1.77.0 (maxchange)・v1.78.0 (corrtimeratio/maxclockerror)・v1.79.0 (maxchange max=-1)・v1.80.0 (logchange)・v1.81.0 (maxchange start) で増えた「top-level 整数/浮動小数ディレクティブの閾値超過検知」パターンを汎用ヘルパー（例: `audit_threshold_too_large<T>`）に抽出し、今後の同種監査追加時の重複を抑える
 2. **ntp_config_monitor の `log` ディレクティブ監査** — v1.80.0 で `logchange` / `logbanner` 監査が入ったため、次段として chrony の `log` ディレクティブ（`measurements`・`statistics`・`tracking`・`rtc`・`refclocks`・`tempcomp` 等のサブカテゴリ）が空設定されている場合（= 全ログカテゴリ無効化）や、ドロップインで `log` ディレクティブが上書きされて既定カテゴリが欠落している場合を検知する
-3. **ntp_config_monitor の `logdir` シンボリックリンク自己検知** — v1.83.0 で `logdir` 実ディレクトリの stat(2) 監査が入ったが、現状 `std::fs::metadata` は symlink を辿るため「終端の実体」が評価される。次段として `symlink_metadata(2)` も併用し、`logdir` が**そもそも symlink である**ケース（文字列は `/var/log/chrony` だが実体は `/tmp/evil` へリンク）を別 kind（`chrony_logdir_is_symlink`）として検知する。監査ログディレクトリが symlink 経由で差し替えられる攻撃の足場を検知できるようになる
+3. **ntp_config_monitor の `logdir` 親ディレクトリ symlink 検知** — v1.84.0 で `logdir` 最終コンポーネント（`<path>` そのもの）の symlink を検知できるようになったが、`/var/log/chrony` と書かれていても途中の `/var/log` が symlink に差し替えられているケースは未検知。次段として `logdir` パスの各親コンポーネントについて `lstat(2)` で symlink を検査し、「途中パスに symlink が混入している」場合に `chrony_logdir_ancestor_is_symlink` Warning を発行する
 4. **ntp_config_monitor の `logdir` ファミリー 設定ファイル側 keys パーミッションと統一リファクタ** — v1.83.0 の実装で world-writable / owner / group 検査を再実装する形になったため、`audit_keys_file_permissions` / `audit_keys_file_owner` と共通のディレクトリ/ファイル両対応ヘルパー（例: `audit_path_perms_and_owner(path, kind_prefix, config)`）に抽出し、今後同種監査（`driftfile` 親ディレクトリ、`rtcfile`、ドロップイン置き場等）で再利用できるようにする
 5. **ntp_config_monitor のドロップイン動的ホットリロード** — 稼働中に chrony.conf へ `confdir` / `include` が追加された場合、SIGHUP または再起動なしに inotify watch へディレクトリを追加する仕組みを整備する（現状は v1.72.0 で再起動まで反映されない制約あり）
 6. **ntp_config_monitor の refclock SHM セグメント実権限監査** — v1.73.0 で chrony.conf 上の `refclock SHM` 宣言を検知できるようになったため、次段として `SHM <id>` で参照される実 SysV SHM セグメント（`0x4e545030 + id`）の書き込み権限（`ipcs -m`）を検査し、非 root 書き込み可の場合を Critical 扱いにする
