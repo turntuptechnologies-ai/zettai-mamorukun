@@ -6294,6 +6294,14 @@ pub struct NtpConfigMonitorConfig {
     #[serde(default = "NtpConfigMonitorConfig::default_true")]
     pub check_chrony_logdir_metadata: bool,
 
+    /// chrony の `logdir` に指定されたパス自体がシンボリックリンクである場合を検知
+    /// （`std::fs::metadata` は symlink を辿り終端実体のメタデータしか検査しないため、
+    /// 終端を `chrony:chrony` / `mode=0755` で準備した上で元ディレクトリを symlink に
+    /// 差し替える回避手法を `lstat(2)` 相当の `symlink_metadata` で検知する。攻撃者が
+    /// symlink 差し替えでログ出力先を任意ディレクトリに誘導する攻撃の足場となる）
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_chrony_logdir_symlink: bool,
+
     /// `maxdistance` の許容上限（秒、既定 5.0）
     /// chrony のデフォルトは 3.0 秒なので 5.0 秒超は明示的な緩和設定と判定する
     #[serde(default = "NtpConfigMonitorConfig::default_maxdistance_max_threshold")]
@@ -6491,6 +6499,7 @@ impl Default for NtpConfigMonitorConfig {
             check_chrony_logbanner: true,
             check_chrony_logdir: true,
             check_chrony_logdir_metadata: true,
+            check_chrony_logdir_symlink: true,
             maxdistance_max_threshold: Self::default_maxdistance_max_threshold(),
             maxjitter_max_threshold: Self::default_maxjitter_max_threshold(),
             makestep_threshold_max: Self::default_makestep_threshold_max(),

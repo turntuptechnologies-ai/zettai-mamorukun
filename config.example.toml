@@ -1588,6 +1588,12 @@ check_chrony_logdir = true
 # パスでも実体が world-writable / 非 root 所有になっているケース、シンボリックリンク経由の
 # ケース、chmod o+w で事後的に緩められたケースを検知する）
 check_chrony_logdir_metadata = true
+# chrony の `logdir` に指定されたパス自体がシンボリックリンクである場合を検知する
+# （stat(2) は symlink を辿って終端実体のメタデータしか検査しないため、終端を
+# chrony:chrony / mode=0755 で準備したうえで元ディレクトリを symlink に差し替える
+# 回避手法を lstat(2) 相当の symlink_metadata で検知する。攻撃者が symlink 差し替えで
+# ログ出力先を任意ディレクトリに誘導する攻撃の足場となる）
+check_chrony_logdir_symlink = true
 # `maxdistance` 監査の許容上限（秒、既定 5.0）。chrony のデフォルトは 3.0 秒
 maxdistance_max_threshold = 5.0
 # `maxjitter` 監査の許容上限（秒、既定 2.0）。chrony のデフォルトは 1.0 秒
