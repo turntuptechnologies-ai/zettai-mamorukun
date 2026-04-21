@@ -6287,6 +6287,13 @@ pub struct NtpConfigMonitorConfig {
     #[serde(default = "NtpConfigMonitorConfig::default_true")]
     pub check_chrony_logdir: bool,
 
+    /// chrony の `logdir` が指す**実ディレクトリ**の所有者・パーミッションを
+    /// `stat(2)` で検査する（文字列パターンベースの `check_chrony_logdir` の補完として、
+    /// 見かけ上は安全なパスでも実体が world-writable / 非 root 所有になっているケース、
+    /// シンボリックリンク経由のケース、`chmod o+w` で事後的に緩められたケースを検知する）
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_chrony_logdir_metadata: bool,
+
     /// `maxdistance` の許容上限（秒、既定 5.0）
     /// chrony のデフォルトは 3.0 秒なので 5.0 秒超は明示的な緩和設定と判定する
     #[serde(default = "NtpConfigMonitorConfig::default_maxdistance_max_threshold")]
@@ -6483,6 +6490,7 @@ impl Default for NtpConfigMonitorConfig {
             check_chrony_logchange: true,
             check_chrony_logbanner: true,
             check_chrony_logdir: true,
+            check_chrony_logdir_metadata: true,
             maxdistance_max_threshold: Self::default_maxdistance_max_threshold(),
             maxjitter_max_threshold: Self::default_maxjitter_max_threshold(),
             makestep_threshold_max: Self::default_makestep_threshold_max(),

@@ -76,6 +76,10 @@
 //!     `/dev/shm/` / `/run/user/` 配下）に設定されている（攻撃者が時刻改竄イベントの
 //!     監査ログを削除・改竄できるようになり、フォレンジック調査で時刻偽装の痕跡を
 //!     復元できなくなる）
+//!   - `chrony.conf`: `logdir` が指す**実ディレクトリ**のメタデータが危険な状態
+//!     （world-writable / 許容外 uid / gid 所有）にある。文字列パターンでは安全に見える
+//!     パスでも、`chmod o+w` やシンボリックリンク経由で実体が改竄可能な場合を `stat(2)`
+//!     で検知する
 //! - **ドロップイン監視** — `chrony.conf` 内の `confdir` / `sourcedir` / `include`
 //!   ディレクティブで参照される追加設定ファイル（例: `/etc/chrony/conf.d/*.conf`、
 //!   `/etc/chrony/sources.d/*.sources`）も監視対象に加え、親ディレクトリも inotify
@@ -1191,6 +1195,104 @@ fn audit_chrony_logdir(content: &str) -> Vec<AuditFinding> {
     findings
 }
 
+/// chrony.conf の `logdir` ディレクティブで指定された**実ディレクトリ**のメタデータを監査する
+///
+/// 文字列パターンベースの `audit_chrony_logdir` を補完し、以下のような見かけ上安全な
+/// パス文字列でも実体が危険な状態を検知する:
+///
+/// - 見かけは `/var/log/chrony-custom` 等だが、実ディレクトリが `chmod o+w` で world-writable
+/// - シンボリックリンク経由で `/tmp/` 等を指しているが文字列上は気付かれないケース
+/// - 所有者 uid / gid が root 以外に書き換えられ、監査ログを改竄可能な状態
+///
+/// `std::fs::metadata` は symlink を辿るため、`logdir <path>` の終端実体に対する検査と
+/// なる。対象が存在しない・メタデータ取得に失敗した場合は検知しない（存在確認は本監査の
+/// 責務外）。対象がディレクトリでない場合もスキップする（`logdir` はディレクトリ指定が
+/// 前提で、ファイル指定は chrony 側で書き込み失敗するため監査の対象外）。
+///
+/// 検知時は以下の kind を発行する:
+///
+/// - `chrony_logdir_world_writable`（実ディレクトリの mode に `o+w` が立っている）
+/// - `chrony_logdir_insecure_owner`（uid が `allowed_owner_uids` 非該当）
+/// - `chrony_logdir_insecure_group`(gid が `allowed_owner_gids` 非該当）
+///
+/// 相対パスは設定ファイルのディレクトリを基準に解決する（`iter_keys_paths` と同じ規則）。
+fn audit_chrony_logdir_metadata(
+    content: &str,
+    config_path: &Path,
+    config: &NtpConfigMonitorConfig,
+) -> Vec<AuditFinding> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let mut findings = Vec::new();
+    let base_dir = config_path.parent();
+
+    for value in find_keyword_lines(content, "logdir") {
+        let trimmed = value.split_whitespace().next().unwrap_or("").trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let candidate = std::path::PathBuf::from(trimmed);
+        let resolved = if candidate.is_absolute() {
+            candidate
+        } else if let Some(dir) = base_dir {
+            dir.join(candidate)
+        } else {
+            candidate
+        };
+
+        let metadata = match std::fs::metadata(&resolved) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if !metadata.is_dir() {
+            continue;
+        }
+
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode & 0o002 != 0 {
+            findings.push(AuditFinding {
+                kind: "chrony_logdir_world_writable".to_string(),
+                severity: Severity::Warning,
+                message: format!(
+                    "chrony.conf の `logdir {}` が指す実ディレクトリのパーミッションが過剰です (mode=0o{:o}, world-writable): 攻撃者が時刻改竄イベントの監査ログを削除・改竄できるため、フォレンジック調査で時刻偽装の痕跡を復元できなくなる恐れがあります",
+                    trimmed, mode
+                ),
+            });
+        }
+
+        let uid = metadata.uid();
+        let gid = metadata.gid();
+
+        if !owner_uid_allowed(uid, &config.allowed_owner_uids) {
+            findings.push(AuditFinding {
+                kind: "chrony_logdir_insecure_owner".to_string(),
+                severity: Severity::Warning,
+                message: format!(
+                    "chrony.conf の `logdir {}` が指す実ディレクトリの所有者 uid={} が許容リスト ({}) に含まれていません（root 以外が所有するログディレクトリは監査ログ改竄の足場となりえます）",
+                    trimmed,
+                    uid,
+                    format_uid_list(&config.allowed_owner_uids)
+                ),
+            });
+        }
+
+        if !owner_gid_allowed(gid, &config.allowed_owner_gids) {
+            findings.push(AuditFinding {
+                kind: "chrony_logdir_insecure_group".to_string(),
+                severity: Severity::Warning,
+                message: format!(
+                    "chrony.conf の `logdir {}` が指す実ディレクトリの所有グループ gid={} が許容リスト ({}) に含まれていません（書き込み権限を持つグループ経由で監査ログが改竄される恐れがあります）",
+                    trimmed,
+                    gid,
+                    format_uid_list(&config.allowed_owner_gids)
+                ),
+            });
+        }
+    }
+
+    findings
+}
+
 /// chrony.conf の `makestep <threshold> <limit>` の第一引数（threshold）が過大な場合を監査する
 ///
 /// `makestep` はオフセットが `threshold` 秒を超えた場合に限りクロックを step（瞬時修正）
@@ -1656,6 +1758,9 @@ fn audit_by_kind(
             }
             if config.check_chrony_logdir {
                 findings.extend(audit_chrony_logdir(content));
+            }
+            if config.check_chrony_logdir_metadata {
+                findings.extend(audit_chrony_logdir_metadata(content, config_path, config));
             }
         }
         NtpConfigKind::Ntp => {
@@ -5396,6 +5501,227 @@ mod tests {
         );
     }
 
+    // ------------------------------------------------------------------
+    // audit_chrony_logdir_metadata
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_chrony_logdir_metadata_world_writable_detects() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir(&log_dir).unwrap();
+        std::fs::set_permissions(&log_dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = format!("logdir {}\n", log_dir.display());
+
+        let config = NtpConfigMonitorConfig {
+            allowed_owner_uids: Vec::new(),
+            allowed_owner_gids: Vec::new(),
+            ..Default::default()
+        };
+        let findings = audit_chrony_logdir_metadata(&content, &config_path, &config);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "chrony_logdir_world_writable"),
+            "world-writable ディレクトリは検知される (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_metadata_safe_perms_no_finding() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir(&log_dir).unwrap();
+        std::fs::set_permissions(&log_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = format!("logdir {}\n", log_dir.display());
+
+        let metadata = std::fs::metadata(&log_dir).unwrap();
+        let config = NtpConfigMonitorConfig {
+            allowed_owner_uids: vec![metadata.uid()],
+            allowed_owner_gids: vec![metadata.gid()],
+            ..Default::default()
+        };
+        let findings = audit_chrony_logdir_metadata(&content, &config_path, &config);
+        assert!(
+            findings.is_empty(),
+            "安全なパーミッション・許容 uid/gid では検知しない (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_metadata_missing_dir_no_finding() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = format!("logdir {}\n", dir.path().join("not_exist").display());
+
+        let config = NtpConfigMonitorConfig::default();
+        let findings = audit_chrony_logdir_metadata(&content, &config_path, &config);
+        assert!(
+            findings.is_empty(),
+            "存在しないディレクトリは検知しない (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_metadata_file_not_dir_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("not_a_dir");
+        std::fs::write(&file_path, "").unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = format!("logdir {}\n", file_path.display());
+
+        let config = NtpConfigMonitorConfig::default();
+        let findings = audit_chrony_logdir_metadata(&content, &config_path, &config);
+        assert!(
+            findings.is_empty(),
+            "ファイル指定はスキップされる (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_metadata_insecure_owner_detects() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir(&log_dir).unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = format!("logdir {}\n", log_dir.display());
+
+        let metadata = std::fs::metadata(&log_dir).unwrap();
+        // 現在の uid / gid と異なる uid / gid のみを許容
+        let config = NtpConfigMonitorConfig {
+            allowed_owner_uids: vec![metadata.uid().wrapping_add(1)],
+            allowed_owner_gids: vec![metadata.gid().wrapping_add(1)],
+            ..Default::default()
+        };
+        let findings = audit_chrony_logdir_metadata(&content, &config_path, &config);
+        let kinds: Vec<_> = findings.iter().map(|f| f.kind.as_str()).collect();
+        assert!(
+            kinds.contains(&"chrony_logdir_insecure_owner"),
+            "許容 uid 外で insecure_owner が発火する (got {:?})",
+            kinds
+        );
+        assert!(
+            kinds.contains(&"chrony_logdir_insecure_group"),
+            "許容 gid 外で insecure_group が発火する (got {:?})",
+            kinds
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_metadata_empty_allowlist_allows_all_owners() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir(&log_dir).unwrap();
+        std::fs::set_permissions(&log_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = format!("logdir {}\n", log_dir.display());
+
+        let config = NtpConfigMonitorConfig {
+            allowed_owner_uids: Vec::new(),
+            allowed_owner_gids: Vec::new(),
+            ..Default::default()
+        };
+        let findings = audit_chrony_logdir_metadata(&content, &config_path, &config);
+        assert!(
+            findings.is_empty(),
+            "空の許容リストは全 uid/gid を許容する (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_metadata_empty_value_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        // `logdir` の値が空 → stat 不可のためスキップ（empty は audit_chrony_logdir が Info 発行する）
+        let content = "logdir \n";
+
+        let config = NtpConfigMonitorConfig::default();
+        let findings = audit_chrony_logdir_metadata(content, &config_path, &config);
+        assert!(
+            findings.is_empty(),
+            "空の logdir 値は本監査ではスキップされる (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_metadata_relative_path_resolved() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let log_dir = dir.path().join("relative_logs");
+        std::fs::create_dir(&log_dir).unwrap();
+        std::fs::set_permissions(&log_dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        // 相対パスは config_path の親ディレクトリ基準で解決される
+        let content = "logdir relative_logs\n";
+
+        let config = NtpConfigMonitorConfig {
+            allowed_owner_uids: Vec::new(),
+            allowed_owner_gids: Vec::new(),
+            ..Default::default()
+        };
+        let findings = audit_chrony_logdir_metadata(content, &config_path, &config);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "chrony_logdir_world_writable"),
+            "相対パスも解決され実ディレクトリが監査される (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_audit_by_kind_logdir_metadata_flag_toggle() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir(&log_dir).unwrap();
+        std::fs::set_permissions(&log_dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = format!(
+            "pool foo\nmakestep 1.0 3\nleapsectz right/UTC\nrtcsync\nmaxchange 1000 1 2\nlogdir {}\n",
+            log_dir.display()
+        );
+
+        let mut config = NtpConfigMonitorConfig {
+            check_config_owner: false,
+            check_keys_file_owner: false,
+            allowed_owner_uids: Vec::new(),
+            allowed_owner_gids: Vec::new(),
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Chrony, &content, &config, &config_path);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "chrony_logdir_world_writable"),
+            "既定で logdir 実体監査が発火する (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+
+        config.check_chrony_logdir_metadata = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, &content, &config, &config_path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_logdir_world_writable"
+                    && f.kind != "chrony_logdir_insecure_owner"
+                    && f.kind != "chrony_logdir_insecure_group"),
+            "check_chrony_logdir_metadata=false で実体監査が抑止される (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn test_audit_by_kind_ntp_does_not_trigger_chrony_logchange_or_logbanner() {
         // NtpConfigKind::Ntp アームでは chrony 専用の監査はディスパッチされない
@@ -5412,7 +5738,10 @@ mod tests {
                 .iter()
                 .all(|f| f.kind != "chrony_logchange_too_large"
                     && f.kind != "chrony_logbanner_disabled"
-                    && f.kind != "chrony_logdir_insecure_path"),
+                    && f.kind != "chrony_logdir_insecure_path"
+                    && f.kind != "chrony_logdir_world_writable"
+                    && f.kind != "chrony_logdir_insecure_owner"
+                    && f.kind != "chrony_logdir_insecure_group"),
             "ntp.conf path should not dispatch chrony-specific logchange/logbanner/logdir audits"
         );
     }
