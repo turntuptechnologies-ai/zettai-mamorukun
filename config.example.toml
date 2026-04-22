@@ -1579,6 +1579,11 @@ check_chrony_logchange = true
 # ログローテーション後に列ヘッダが欠如することで攻撃者の時刻改竄イベントの文脈復元が
 # 困難になり、フォレンジック妨害につながる
 check_chrony_logbanner = true
+# chrony の `log` ディレクティブがカテゴリ指定（measurements / statistics / tracking / rtc /
+# refclocks / tempcomp 等）なしで記述され、詳細ログ出力が無効化されている場合を検知（Warning）
+# 稼働中 chrony.conf への空 `log` 行挿入で既存の `log measurements tracking` 等を上書き無効化
+# する攻撃、および設定ミスによる observability 喪失を拾う
+check_chrony_log = true
 # chrony の `logdir` が world-writable な一時領域（/tmp/・/var/tmp/・/dev/shm/・/run/user/ 配下）に
 # 設定されている場合を検知する（攻撃者が時刻改竄イベントの監査ログを削除・改竄できるように
 # なり、フォレンジック調査が妨害される）
