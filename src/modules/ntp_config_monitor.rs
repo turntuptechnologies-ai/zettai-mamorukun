@@ -1472,6 +1472,96 @@ fn audit_chrony_logdir_ancestor_symlink(content: &str, config_path: &Path) -> Ve
     findings
 }
 
+/// chrony.conf の `logdir` ディレクティブで指定されたパスの**親コンポーネント（ancestor）**
+/// のパーミッションが world-writable (o+w) である場合を監査する
+///
+/// `audit_chrony_logdir_metadata` は `logdir` の**最終コンポーネント自身**のパーミッション
+/// のみを検査するため、最終コンポーネントを `chrony:chrony / 0755` で堅牢に用意していても、
+/// 途中の親ディレクトリ（例: `/var/log`）が誤って `0777` になっていると、攻撃者は
+///
+/// - 最終コンポーネントを `rename(2)` / `unlink(2)` で別物に差し替え
+/// - 同名の symlink を被せてログ出力先を任意ディレクトリへ誘導
+/// - 書き込み権限を利用してフォレンジック痕跡を改竄・消去
+///
+/// といった操作が可能になり、世界書き込み可能な ancestor は symlink 差し替え攻撃・
+/// ログ改竄攻撃の足場として成立する。
+///
+/// アルゴリズム:
+///
+/// - `logdir` 値の先頭トークンを path として扱い、空ならスキップ
+/// - 相対パスは `config_path.parent()` 基準で解決（`audit_chrony_logdir_ancestor_symlink` と
+///   同じ規則）
+/// - `resolved.ancestors().skip(1)` で最終コンポーネントを除く親コンポーネントを列挙し、
+///   `.rev()` でルート側から深い方へ順次検査する
+/// - 各 ancestor で `std::fs::symlink_metadata` を呼び出し:
+///   - symlink は `audit_chrony_logdir_ancestor_symlink` の責務のためスキップ（重複検知回避）
+///   - 実ディレクトリかつ `mode & 0o002 != 0` なら Warning を発行
+///   - Err（例: ENOENT）なら以降（より深い）ancestor は存在しえないので break
+///   - `parent().is_none()` となるルート (`/` 等) は mode 検査対象外
+///
+/// 検知時は以下の kind を発行する:
+///
+/// - `chrony_logdir_ancestor_world_writable`（Warning）— 親コンポーネントが world-writable
+///
+/// 最終コンポーネント自身の world-writable 検知は `audit_chrony_logdir_metadata` の
+/// 責務であり、本関数は重複検知しない（`ancestors().skip(1)` で最終コンポーネントを除外）。
+fn audit_chrony_logdir_ancestor_writable(content: &str, config_path: &Path) -> Vec<AuditFinding> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut findings = Vec::new();
+    let base_dir = config_path.parent();
+
+    for value in find_keyword_lines(content, "logdir") {
+        let trimmed = value.split_whitespace().next().unwrap_or("").trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let candidate = std::path::PathBuf::from(trimmed);
+        let resolved = if candidate.is_absolute() {
+            candidate
+        } else if let Some(dir) = base_dir {
+            dir.join(candidate)
+        } else {
+            candidate
+        };
+
+        // ancestors() は深→浅の順で返すため、反転してルート側から深い方へ進める
+        let ancestors: Vec<&Path> = resolved.ancestors().skip(1).collect();
+        for ancestor in ancestors.iter().rev() {
+            if ancestor.parent().is_none() {
+                continue;
+            }
+            let metadata = match std::fs::symlink_metadata(ancestor) {
+                Ok(m) => m,
+                Err(_) => break,
+            };
+            // symlink は別監査（audit_chrony_logdir_ancestor_symlink）の責務
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if !metadata.is_dir() {
+                continue;
+            }
+
+            let mode = metadata.permissions().mode() & 0o777;
+            if mode & 0o002 != 0 {
+                findings.push(AuditFinding {
+                    kind: "chrony_logdir_ancestor_world_writable".to_string(),
+                    severity: Severity::Warning,
+                    message: format!(
+                        "chrony.conf の `logdir {}` の親コンポーネント `{}` が world-writable です (mode=0o{:o})。攻撃者が最終コンポーネントを rename / unlink して差し替えたり、同名の symlink を被せてログ出力先を誘導できるため、監査ログ改竄・フォレンジック妨害の足場となりえます",
+                        trimmed,
+                        ancestor.display(),
+                        mode
+                    ),
+                });
+            }
+        }
+    }
+
+    findings
+}
+
 /// chrony.conf の `makestep <threshold> <limit>` の第一引数（threshold）が過大な場合を監査する
 ///
 /// `makestep` はオフセットが `threshold` 秒を超えた場合に限りクロックを step（瞬時修正）
@@ -1943,6 +2033,9 @@ fn audit_by_kind(
             }
             if config.check_chrony_logdir_ancestor_symlink {
                 findings.extend(audit_chrony_logdir_ancestor_symlink(content, config_path));
+            }
+            if config.check_chrony_logdir_ancestor_writable {
+                findings.extend(audit_chrony_logdir_ancestor_writable(content, config_path));
             }
         }
         NtpConfigKind::Ntp => {
@@ -6312,6 +6405,224 @@ mod tests {
                 .iter()
                 .all(|f| f.kind != "chrony_logdir_ancestor_is_symlink"),
             "check_chrony_logdir_ancestor_symlink=false で ancestor symlink 監査が抑止される (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // audit_chrony_logdir_ancestor_writable
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_chrony_logdir_ancestor_writable_detects_middle_world_writable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        // tmpdir/insecure_parent を 0777 にし、配下に最終コンポーネント chrony_logs を作る
+        let insecure_parent = dir.path().join("insecure_parent");
+        std::fs::create_dir(&insecure_parent).unwrap();
+        let final_dir = insecure_parent.join("chrony_logs");
+        std::fs::create_dir(&final_dir).unwrap();
+        std::fs::set_permissions(&insecure_parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        // 最終コンポーネント自身は安全なパーミッション（0755）に設定しておき、
+        // 本監査が ancestor のみを検知することを確認する
+        std::fs::set_permissions(&final_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = format!("logdir {}\n", final_dir.display());
+
+        let findings = audit_chrony_logdir_ancestor_writable(&content, &config_path);
+        let finding = findings
+            .iter()
+            .find(|f| f.kind == "chrony_logdir_ancestor_world_writable")
+            .expect("world-writable な ancestor が検知される");
+        assert!(
+            finding
+                .message
+                .contains(&insecure_parent.display().to_string()),
+            "message に world-writable な ancestor パスが含まれる (got {:?})",
+            finding.message
+        );
+        assert!(
+            finding.message.contains("777"),
+            "message に mode が含まれる (got {:?})",
+            finding.message
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_ancestor_writable_safe_tree_no_finding() {
+        use std::os::unix::fs::PermissionsExt;
+        // 注意: tempdir の上位 ancestor（/tmp など）はシステム設定で world-writable
+        // の場合があるため、assertion は tempdir 配下に作成した自前の ancestor パス
+        // （a / b）が検知対象になっていないことのみを確認する。
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = a.join("b");
+        let c = b.join("c");
+        std::fs::create_dir_all(&c).unwrap();
+        for p in [&a, &b, &c] {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let config_path = dir.path().join("chrony.conf");
+        let content = format!("logdir {}\n", c.display());
+
+        let findings = audit_chrony_logdir_ancestor_writable(&content, &config_path);
+        for p in [&a, &b] {
+            let hit = findings.iter().any(|f| {
+                f.kind == "chrony_logdir_ancestor_world_writable"
+                    && f.message.contains(&format!("`{}`", p.display()))
+            });
+            assert!(
+                !hit,
+                "安全な ancestor {} が誤検知された (got {:?})",
+                p.display(),
+                findings.iter().map(|f| &f.message).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_ancestor_writable_empty_value_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = "logdir \n";
+
+        let findings = audit_chrony_logdir_ancestor_writable(content, &config_path);
+        assert!(
+            findings.is_empty(),
+            "空値はスキップ (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_ancestor_writable_relative_path_resolved() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let insecure_parent = dir.path().join("insecure_parent");
+        std::fs::create_dir(&insecure_parent).unwrap();
+        let final_dir = insecure_parent.join("chrony_logs");
+        std::fs::create_dir(&final_dir).unwrap();
+        std::fs::set_permissions(&insecure_parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        std::fs::set_permissions(&final_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = "logdir insecure_parent/chrony_logs\n";
+
+        let findings = audit_chrony_logdir_ancestor_writable(content, &config_path);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "chrony_logdir_ancestor_world_writable"),
+            "相対パスでも world-writable な ancestor が検知される (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_ancestor_writable_symlink_ancestor_skipped() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        // ancestor が symlink（かつ指す先が world-writable であっても）の場合、
+        // 本監査では発火しない（symlink は audit_chrony_logdir_ancestor_symlink の責務）
+        let dir = tempfile::tempdir().unwrap();
+        let real_parent = dir.path().join("real_parent");
+        std::fs::create_dir(&real_parent).unwrap();
+        std::fs::set_permissions(&real_parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let link_parent = dir.path().join("link_parent");
+        symlink(&real_parent, &link_parent).unwrap();
+        let final_dir = real_parent.join("chrony_logs");
+        std::fs::create_dir(&final_dir).unwrap();
+        std::fs::set_permissions(&final_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        // link_parent は symlink。最終 ancestor として登場するため、
+        // 本監査では symlink として skip されなければならない
+        let content = format!("logdir {}/chrony_logs\n", link_parent.display());
+
+        let findings = audit_chrony_logdir_ancestor_writable(&content, &config_path);
+        // link_parent 自身が world-writable として報告されないことを確認
+        // （/tmp 等の上位 ancestor 由来の別 finding は許容する）
+        let hit = findings.iter().any(|f| {
+            f.kind == "chrony_logdir_ancestor_world_writable"
+                && f.message.contains(&format!("`{}`", link_parent.display()))
+        });
+        assert!(
+            !hit,
+            "symlink な ancestor {} は本監査では発火しない (got {:?})",
+            link_parent.display(),
+            findings.iter().map(|f| &f.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_audit_chrony_logdir_ancestor_writable_final_component_not_reported() {
+        use std::os::unix::fs::PermissionsExt;
+        // 最終コンポーネント自身のみが world-writable で、ancestor は安全な場合、
+        // 本監査では発火しない（最終コンポーネント監査は audit_chrony_logdir_metadata の責務）
+        let dir = tempfile::tempdir().unwrap();
+        let safe_parent = dir.path().join("safe_parent");
+        std::fs::create_dir(&safe_parent).unwrap();
+        std::fs::set_permissions(&safe_parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let final_dir = safe_parent.join("chrony_logs");
+        std::fs::create_dir(&final_dir).unwrap();
+        std::fs::set_permissions(&final_dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = format!("logdir {}\n", final_dir.display());
+
+        let findings = audit_chrony_logdir_ancestor_writable(&content, &config_path);
+        // final_dir 自身が ancestor 扱いで報告されないことを確認
+        // （/tmp 等の上位 ancestor 由来の別 finding は許容する）
+        let hit = findings.iter().any(|f| {
+            f.kind == "chrony_logdir_ancestor_world_writable"
+                && f.message.contains(&format!("`{}`", final_dir.display()))
+        });
+        assert!(
+            !hit,
+            "最終コンポーネント {} 自身の world-writable は ancestor 監査では発火しない (got {:?})",
+            final_dir.display(),
+            findings.iter().map(|f| &f.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_audit_by_kind_logdir_ancestor_writable_flag_toggle() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let insecure_parent = dir.path().join("insecure_parent");
+        std::fs::create_dir(&insecure_parent).unwrap();
+        let final_dir = insecure_parent.join("chrony_logs");
+        std::fs::create_dir(&final_dir).unwrap();
+        std::fs::set_permissions(&insecure_parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        std::fs::set_permissions(&final_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config_path = dir.path().join("chrony.conf");
+        let content = format!(
+            "pool foo\nmakestep 1.0 3\nleapsectz right/UTC\nrtcsync\nmaxchange 1000 1 2\nlogdir {}\n",
+            final_dir.display()
+        );
+
+        // 他の logdir 系監査は抑止し、ancestor_writable のみ対象にする
+        let mut config = NtpConfigMonitorConfig {
+            check_config_owner: false,
+            check_keys_file_owner: false,
+            check_chrony_logdir_symlink: false,
+            check_chrony_logdir_metadata: false,
+            check_chrony_logdir_ancestor_symlink: false,
+            allowed_owner_uids: Vec::new(),
+            allowed_owner_gids: Vec::new(),
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Chrony, &content, &config, &config_path);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "chrony_logdir_ancestor_world_writable"),
+            "既定で ancestor world-writable 監査が発火する (got {:?})",
+            findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
+        );
+
+        config.check_chrony_logdir_ancestor_writable = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, &content, &config, &config_path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_logdir_ancestor_world_writable"),
+            "check_chrony_logdir_ancestor_writable=false で ancestor world-writable 監査が抑止される (got {:?})",
             findings.iter().map(|f| &f.kind).collect::<Vec<_>>()
         );
     }
