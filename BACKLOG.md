@@ -190,15 +190,16 @@
 - [x] **ntp_config_monitor の `logdir` シンボリックリンク自己検知** — v1.84.0 (#376, PR #377)
 - [x] **ntp_config_monitor の `logdir` 親ディレクトリ（ancestor）symlink 検知** — v1.85.0 (#378, PR #379)
 - [x] **chrony 閾値監査パターンの共通化（audit_chrony_threshold_too_large ヘルパー抽出）** — v1.86.0 (#380, PR #381)
+- [x] **ntp_config_monitor の `logdir` 親ディレクトリ（ancestor）world-writable 検知** — v1.87.0 (#382, PR #383)
 
 ## 候補
 
 1. **ntp_config_monitor の `log` ディレクティブ監査** — v1.80.0 で `logchange` / `logbanner` 監査が入ったため、次段として chrony の `log` ディレクティブ（`measurements`・`statistics`・`tracking`・`rtc`・`refclocks`・`tempcomp` 等のサブカテゴリ）が空設定されている場合（= 全ログカテゴリ無効化）や、ドロップインで `log` ディレクティブが上書きされて既定カテゴリが欠落している場合を検知する
-2. **ntp_config_monitor の logdir 関連監査の統合リファクタ** — v1.82.0（world-writable パス禁止リスト）・v1.83.0（実ディレクトリメタデータ：world-writable / 所有者 / グループ）・v1.84.0（最終コンポーネント symlink）・v1.85.0（ancestor symlink）で増えた 4 本の `audit_chrony_logdir_*` 関数を、共通 path 解決＋共通 `symlink_metadata` ループで統合し、さらに `audit_keys_file_permissions` / `audit_keys_file_owner` とも共通化した `audit_path_perms_and_symlink(path, kind_prefix, config)` 的ヘルパーを抽出する。今後 `driftfile` 親ディレクトリ・`rtcfile`・ドロップイン置き場等で再利用できるようにする
-3. **ntp_config_monitor の `logdir` ancestor world-writable 監査** — v1.83.0 で `logdir` の実ディレクトリ自身の world-writable 検知が入り、v1.85.0 で ancestor symlink 検知が入ったため、次段として **各 ancestor ディレクトリが world-writable (o+w)** であるケースを検知する（例: `/var/log/chrony` と書かれていて `/var/log` が誤って 777 になっていると攻撃者が `/var/log/chrony` を差し替え可能）
-4. **chrony 閾値監査 `too_small` / i64 バリアント対応** — v1.86.0 で `audit_chrony_threshold_too_large<f64>` を抽出したが、`audit_chrony_sample_counts`（`maxsamples` の下限監査）や `audit_chrony_logbanner`（i64 の 0 以下判定）は比較方向・型が異なるため未統合。次段として `audit_chrony_threshold_too_small<T>` と i64 バリアントを追加し、これらの監査も共通ヘルパー経由に寄せる
-5. **ntp_config_monitor のドロップイン動的ホットリロード** — 稼働中に chrony.conf へ `confdir` / `include` が追加された場合、SIGHUP または再起動なしに inotify watch へディレクトリを追加する仕組みを整備する（現状は v1.72.0 で再起動まで反映されない制約あり）
-6. **ntp_config_monitor の refclock SHM セグメント実権限監査** — v1.73.0 で chrony.conf 上の `refclock SHM` 宣言を検知できるようになったため、次段として `SHM <id>` で参照される実 SysV SHM セグメント（`0x4e545030 + id`）の書き込み権限（`ipcs -m`）を検査し、非 root 書き込み可の場合を Critical 扱いにする
+2. **ntp_config_monitor の logdir 関連監査の統合リファクタ** — v1.82.0（world-writable パス禁止リスト）・v1.83.0（実ディレクトリメタデータ）・v1.84.0（最終コンポーネント symlink）・v1.85.0（ancestor symlink）・v1.87.0（ancestor world-writable）で増えた 5 本の `audit_chrony_logdir_*` 関数を、共通 path 解決＋共通 `symlink_metadata` ループで統合し、さらに `audit_keys_file_permissions` / `audit_keys_file_owner` とも共通化した `audit_path_perms_and_symlink(path, kind_prefix, config)` 的ヘルパーを抽出する。今後 `driftfile` 親ディレクトリ・`rtcfile`・ドロップイン置き場等で再利用できるようにする
+3. **chrony 閾値監査 `too_small` / i64 バリアント対応** — v1.86.0 で `audit_chrony_threshold_too_large<f64>` を抽出したが、`audit_chrony_sample_counts`（`maxsamples` の下限監査）や `audit_chrony_logbanner`（i64 の 0 以下判定）は比較方向・型が異なるため未統合。次段として `audit_chrony_threshold_too_small<T>` と i64 バリアントを追加し、これらの監査も共通ヘルパー経由に寄せる
+4. **ntp_config_monitor の `driftfile` / `rtcfile` ancestor 監査** — v1.87.0 で logdir の ancestor world-writable 検知が入ったため、同様のリスクが存在する `driftfile` / `rtcfile`（周波数補正値・RTC 補正値を保存するファイル）の親ディレクトリについても world-writable / symlink 検知を展開する。これらのファイルが差し替え可能な状態だと、時刻同期の健全性判定が攻撃者に偽装される
+5. **ntp_config_monitor の refclock SHM セグメント実権限監査** — v1.73.0 で chrony.conf 上の `refclock SHM` 宣言を検知できるようになったため、次段として `SHM <id>` で参照される実 SysV SHM セグメント（`0x4e545030 + id`）の書き込み権限（`ipcs -m`）を検査し、非 root 書き込み可の場合を Critical 扱いにする
+6. **ntp_config_monitor のドロップイン動的ホットリロード** — 稼働中に chrony.conf へ `confdir` / `include` が追加された場合、SIGHUP または再起動なしに inotify watch へディレクトリを追加する仕組みを整備する（現状は v1.72.0 で再起動まで反映されない制約あり）
 7. **inotify リアルタイム検知の他モジュールへの展開** — cron_monitor / ntp_config_monitor で確立した inotify パターンを sshd_config_monitor / pam_monitor / sudoers_monitor / dns_monitor / security_files_monitor / shell_config_monitor など他の設定ファイル系モジュールに展開する
 8. **所有者監査パターンの他モジュールへの展開** — ntp_config_monitor で実装した `allowed_owner_uids / gids` によるオーナー監査を、sshd_config_monitor・pam_monitor・security_files_monitor・sudoers_monitor 等の設定ファイル系モジュールに共通パターンとして展開する（root 以外が所有する設定ファイルは権限昇格の足場となるため）
 9. **CI ワークフローでの clippy -D warnings 強制化** — GitHub Actions で `cargo clippy --all-targets -- -D warnings` / `cargo fmt --check` を PR 時に自動実行する `.github/workflows/ci.yaml` を整備する（promtool.yaml と同様、PAT の workflow スコープ問題があれば README 記載にとどめる）
