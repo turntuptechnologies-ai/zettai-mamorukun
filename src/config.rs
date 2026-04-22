@@ -6281,6 +6281,13 @@ pub struct NtpConfigMonitorConfig {
     #[serde(default = "NtpConfigMonitorConfig::default_true")]
     pub check_chrony_logbanner: bool,
 
+    /// chrony の `log` ディレクティブがカテゴリ指定（measurements / statistics / tracking /
+    /// rtc / refclocks / tempcomp 等）なしで記述され、詳細ログ出力が無効化されている場合を
+    /// 検知（稼働中 chrony.conf への空 `log` 行挿入で既存 `log measurements tracking` 等を
+    /// 上書き無効化する攻撃、および設定ミスによる observability 喪失を拾う）
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_chrony_log: bool,
+
     /// chrony の `logdir` が world-writable な一時領域に設定されている場合を検知
     /// （攻撃者が時刻改竄イベントの監査ログを削除・改竄できるようになり、
     /// フォレンジック調査が妨害される）
@@ -6516,6 +6523,7 @@ impl Default for NtpConfigMonitorConfig {
             check_chrony_maxclockerror: true,
             check_chrony_logchange: true,
             check_chrony_logbanner: true,
+            check_chrony_log: true,
             check_chrony_logdir: true,
             check_chrony_logdir_metadata: true,
             check_chrony_logdir_symlink: true,

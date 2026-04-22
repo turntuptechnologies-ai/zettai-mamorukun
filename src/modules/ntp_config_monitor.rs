@@ -1179,6 +1179,42 @@ fn audit_chrony_logbanner(content: &str) -> Vec<AuditFinding> {
     findings
 }
 
+/// chrony.conf の `log` ディレクティブがカテゴリ指定無しで記述されている場合を監査する
+///
+/// chrony の `log` ディレクティブは `measurements` / `statistics` / `tracking` / `rtc` /
+/// `refclocks` / `tempcomp` 等のカテゴリを引数に取り、出力するログの種類を選択する
+/// （chrony デフォルトはどのカテゴリも有効化されない、= ログ出力なし）。`log` 行を
+/// カテゴリ引数**なし**で設定ファイルに記述すると、「`log` を書いたが何も出力しない」
+/// という無害な設定として chrony に受理されるが、実運用としては以下のリスクがある:
+///
+/// - 稼働中 chrony.conf に空の `log` 行を差し込むことで、攻撃者が既存ドロップインの
+///   `log measurements tracking` 等を上書き無効化し、時刻ソース切替・step 補正・offset
+///   記録等の監査ログ出力をまるごと抑止できる（フォレンジック妨害）
+/// - 設定ミスとして `log` とだけ書いて意図せず observability を失うケースも拾える
+///
+/// `find_keyword_lines` は行頭トークン一致のみ返すため、`server ... log ...` のような
+/// inline オプション風の誤用には反応しない。複数行ある場合は最終行のみを判定する
+/// （chrony の挙動と同じく「後勝ち」）。
+///
+/// 検知時は `chrony_log_no_categories` Warning を 1 件発行する。
+fn audit_chrony_log(content: &str) -> Vec<AuditFinding> {
+    let mut last_value: Option<&str> = None;
+    for value in find_keyword_lines(content, "log") {
+        last_value = Some(value);
+    }
+    let mut findings = Vec::new();
+    if let Some(value) = last_value
+        && value.split_whitespace().next().is_none()
+    {
+        findings.push(AuditFinding {
+            kind: "chrony_log_no_categories".to_string(),
+            severity: Severity::Warning,
+            message: "chrony.conf の `log` ディレクティブにカテゴリ（measurements / statistics / tracking / rtc / refclocks / tempcomp 等）が指定されておらず、chrony の詳細ログ出力が全て無効化されています（時刻ソース切替・step 補正・offset 記録等の監査ログが残らず、偽装 NTP による時刻改竄の痕跡追跡が困難になります）".to_string(),
+        });
+    }
+    findings
+}
+
 /// chrony.conf の `logdir` が world-writable な一時領域を指している場合を監査する
 ///
 /// `logdir` は `log measurements tracking` 等で出力される chrony のログファイルの
@@ -2021,6 +2057,9 @@ fn audit_by_kind(
             }
             if config.check_chrony_logbanner {
                 findings.extend(audit_chrony_logbanner(content));
+            }
+            if config.check_chrony_log {
+                findings.extend(audit_chrony_log(content));
             }
             if config.check_chrony_logdir {
                 findings.extend(audit_chrony_logdir(content));
@@ -5605,6 +5644,89 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // audit_chrony_log
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_audit_chrony_log_unset_no_finding() {
+        let content = "server ntp.example.com iburst\n";
+        let findings = audit_chrony_log(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_log_with_categories_no_finding() {
+        let content = "log measurements tracking\n";
+        let findings = audit_chrony_log(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_log_single_category_no_finding() {
+        let content = "log tracking\n";
+        let findings = audit_chrony_log(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_log_empty_categories_detects() {
+        // `log` だけで引数が無い（末尾改行のみ）→ カテゴリ指定なしとして Warning
+        let content = "log\n";
+        let findings = audit_chrony_log(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_log_no_categories");
+        assert!(matches!(findings[0].severity, Severity::Warning));
+    }
+
+    #[test]
+    fn test_audit_chrony_log_trailing_whitespace_detects() {
+        // `log ` の後に空白だけ → カテゴリ未指定扱い
+        let content = "log   \n";
+        let findings = audit_chrony_log(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_log_no_categories");
+    }
+
+    #[test]
+    fn test_audit_chrony_log_inline_option_ignored() {
+        // `server ... log` のような inline オプション風の記述は誤反応しない
+        let content = "server ntp.example.com log\n";
+        let findings = audit_chrony_log(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_log_comment_ignored() {
+        let content = "# log\n# log measurements\n";
+        let findings = audit_chrony_log(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_log_multiple_last_wins_categories_suppresses() {
+        // 最後にカテゴリ指定の `log` 行が来ると検知しない（chrony 挙動と同じ後勝ち）
+        let content = "log\nlog measurements tracking\n";
+        let findings = audit_chrony_log(content);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_audit_chrony_log_multiple_last_wins_empty_detects() {
+        // 最終行が空 `log` → 検知
+        let content = "log measurements tracking\nlog\n";
+        let findings = audit_chrony_log(content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "chrony_log_no_categories");
+    }
+
+    #[test]
+    fn test_audit_chrony_log_logbanner_logchange_logdir_not_confused() {
+        // `log` と類似の直前マッチしないキーワードに誤反応しない
+        let content = "logbanner 32\nlogchange 1.0\nlogdir /var/log/chrony\n";
+        let findings = audit_chrony_log(content);
+        assert!(findings.is_empty());
+    }
+
+    // ------------------------------------------------------------------
     // audit_chrony_logdir
     // ------------------------------------------------------------------
     #[test]
@@ -5835,6 +5957,36 @@ mod tests {
                 .iter()
                 .all(|f| f.kind != "chrony_logbanner_disabled"),
             "disabling check_chrony_logbanner suppresses the finding"
+        );
+    }
+
+    #[test]
+    fn test_audit_by_kind_log_flag_toggle() {
+        // 最終行が空 `log` → `chrony_log_no_categories` Warning が既定で発火
+        let content =
+            "pool foo\nmakestep 1.0 3\nleapsectz right/UTC\nrtcsync\nmaxchange 1000 1 2\nlog\n";
+        let path = Path::new("/etc/chrony/chrony.conf");
+
+        let mut config = NtpConfigMonitorConfig {
+            check_config_owner: false,
+            check_keys_file_owner: false,
+            ..Default::default()
+        };
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.kind == "chrony_log_no_categories"),
+            "log audit should fire by default when `log` has no categories"
+        );
+
+        config.check_chrony_log = false;
+        let findings = audit_by_kind(NtpConfigKind::Chrony, content, &config, path);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.kind != "chrony_log_no_categories"),
+            "disabling check_chrony_log suppresses the finding"
         );
     }
 
