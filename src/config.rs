@@ -6311,6 +6311,16 @@ pub struct NtpConfigMonitorConfig {
     #[serde(default = "NtpConfigMonitorConfig::default_true")]
     pub check_chrony_logdir_ancestor_symlink: bool,
 
+    /// chrony の `logdir` に指定されたパスの**親コンポーネント（ancestor）** が
+    /// world-writable (o+w) である場合を検知する（`check_chrony_logdir_metadata` は
+    /// 最終コンポーネント自身のみを対象とするため、親ディレクトリが `0777` 等に
+    /// 緩められているケース（例: `/var/log` が誤って world-writable で `logdir
+    /// /var/log/chrony`）を補完的に検知する。世界書き込み可能な ancestor は最終
+    /// コンポーネントの rename / unlink / symlink 差し替えを許してしまい、ログ出力先を
+    /// 任意のディレクトリへ誘導する攻撃の足場となる）
+    #[serde(default = "NtpConfigMonitorConfig::default_true")]
+    pub check_chrony_logdir_ancestor_writable: bool,
+
     /// `maxdistance` の許容上限（秒、既定 5.0）
     /// chrony のデフォルトは 3.0 秒なので 5.0 秒超は明示的な緩和設定と判定する
     #[serde(default = "NtpConfigMonitorConfig::default_maxdistance_max_threshold")]
@@ -6510,6 +6520,7 @@ impl Default for NtpConfigMonitorConfig {
             check_chrony_logdir_metadata: true,
             check_chrony_logdir_symlink: true,
             check_chrony_logdir_ancestor_symlink: true,
+            check_chrony_logdir_ancestor_writable: true,
             maxdistance_max_threshold: Self::default_maxdistance_max_threshold(),
             maxjitter_max_threshold: Self::default_maxjitter_max_threshold(),
             makestep_threshold_max: Self::default_makestep_threshold_max(),
